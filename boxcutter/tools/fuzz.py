@@ -9,12 +9,15 @@ mode:
   (no marker, URL has query params)    inject every query parameter
   (no marker, ID-like path segments)   inject each numeric/UUID/long-hex segment
 
-Detection is signal-based, not blind. Pattern hits on dynamic payloads
-(``{RANDOM}`` reflection, ``EXPR`` evaluation) are re-fired to weed out flukes -
-a fast-confirm path (shot 1 hits -> 2 more, need >=2/3) or the full
-``>=4/5``. Time-based blind payloads are confirmed only when the response time
-scales monotonically with the injected delay. Numeric probing filters soft-404s
-with UUID canaries and dedupes identical bodies / redirect targets.
+Detection is signal-based, not blind. Static error/output patterns (SQLi error,
+LFI, RCE, NoSQL, error-disclosure, ...) are diffed against a per-parameter
+baseline response, so a pattern that already matches the unfuzzed page (e.g. a JS
+snippet that looks like an error string) is not reported - only an occurrence the
+baseline did not have counts. Dynamic payloads (``{RANDOM}`` reflection, ``EXPR``
+evaluation) are re-fired to weed out flukes - a fast-confirm path (shot 1 hits ->
+2 more, need >=2/3) or the full ``>=4/5``. Time-based blind payloads are confirmed
+only when the response time scales monotonically with the injected delay. Numeric
+probing filters soft-404s with UUID canaries and dedupes bodies / redirect targets.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import re
 import statistics
 import time
 import uuid
+from collections import Counter
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from ..core import http
@@ -275,6 +279,33 @@ def _match(pattern: str, body: str):
         return None
 
 
+def _new_match(pattern: str, body: str, baseline_body: str, cache: dict):
+    """Return a match of ``pattern`` in ``body`` that the baseline did not already
+    contain - i.e. an occurrence beyond what the unfuzzed page had.
+
+    Suppresses false positives where a static error/output regex matches content
+    that is part of the normal page (e.g. a minified JS snippet that contains
+    ``TypeError ... is not a function``). Matched strings are counted, so a
+    payload that makes an existing pattern appear an *extra* time still reports.
+    ``cache`` memoizes the baseline match counts per pattern (one body per param).
+    """
+    try:
+        rx = re.compile(pattern, re.I)
+    except re.error:
+        return None
+    base = cache.get(pattern)
+    if base is None:
+        base = Counter(m.group(0) for m in rx.finditer(baseline_body))
+        cache[pattern] = base
+    seen: Counter = Counter()
+    for m in rx.finditer(body):
+        text = m.group(0)
+        seen[text] += 1
+        if seen[text] > base.get(text, 0):
+            return m
+    return None
+
+
 def _check_signal_reliable(method, url, body, param, payload_raw, pattern_raw, sess):
     """Re-fire a dynamic payload to confirm. Shot 1 hit -> 2 more, need >=2/3;
     shot 1 miss -> 4 more, need >=4/5. Returns (ok, signal, evidence, payload, url, status)."""
@@ -337,6 +368,8 @@ def _run_inject_mode(method, target, body, sess, deadline: float, dbg) -> list[d
         if baseline["error"] is not None or baseline["status"] is None:
             continue
         baseline_time = baseline["time_ms"] / 1000.0
+        baseline_body = baseline["body"]
+        baseline_cache: dict = {}  # pattern -> Counter of baseline matches
         label = "FUZZ" if param in ("__URL_FUZZ__", "__BODY_FUZZ__") else param
 
         for cls in INJECT_CLASSES:
@@ -352,7 +385,9 @@ def _run_inject_mode(method, target, body, sess, deadline: float, dbg) -> list[d
                     resp = _substitute(method, target, body, param, payload, sess)
                     ok = signal = evidence = url = status = None
                     if resp["error"] is None and resp["status"] is not None and pattern:
-                        m = _match(pattern, resp["body"])
+                        # Diff against the baseline: only a match the unfuzzed page
+                        # did not already have counts as a signal.
+                        m = _new_match(pattern, resp["body"], baseline_body, baseline_cache)
                         if m:
                             ok, signal, evidence = True, "pattern_match", m.group(0)[:200]
                             url, status = resp["_url"], resp["status"]
