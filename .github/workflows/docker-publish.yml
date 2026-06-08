@@ -14,16 +14,39 @@ on:
         type: boolean
         default: true
 
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  push_to_registries:
-    name: Push Docker image to multiple registries
-    runs-on: ubuntu-latest
+  # One job per target x architecture (4 jobs, in parallel). Each builds a
+  # single-arch image and pushes it *by digest* (no tag yet) to both registries.
+  build:
+    name: Build ${{ matrix.target }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
     permissions:
       packages: write
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [full, slim]
+        platform: [linux/amd64, linux/arm64]
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          # arm64 native runner (free on public repos). For a private repo,
+          # switch this to `ubuntu-latest` to fall back to QEMU emulation.
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Check out the repo
         uses: actions/checkout@v6
+
+      - name: Normalize platform name
+        run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+        env:
+          PLATFORM: ${{ matrix.platform }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -38,50 +61,94 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Log in to the Container registry
-        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        uses: docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-
-      - name: Extract metadata for the full image
+      - name: Labels for the image
         id: meta
         uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
         with:
           images: |
             zzzteph/boxcutter
             ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
-            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
-      - name: Build and push the full image
-        id: push
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@3b5e8027fcad23fda98b2e3ac259d8d67585f671
         with:
           context: .
-          target: full
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
-          tags: ${{ steps.meta.outputs.tags }}
+          target: ${{ matrix.target }}
+          platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=full
-          cache-to: type=gha,mode=max,scope=full
+          outputs: type=image,"name=zzzteph/boxcutter,ghcr.io/${{ github.repository }}",push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'workflow_dispatch' || inputs.push }}
+          cache-from: type=gha,scope=${{ matrix.target }}-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}-${{ env.PLATFORM_PAIR }}
 
-      # ---- slim image: 1.2.3-slim, 1.2-slim, <tag>-slim, latest-slim ----
-      - name: Extract metadata for the slim image
-        id: meta_slim
+      - name: Export digest
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.target }}-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # One merge job per target. Collects that target's per-arch digests and
+  # publishes a single multi-arch manifest list per tag, to both registries.
+  merge:
+    name: Merge ${{ matrix.target }} manifest
+    needs: build
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [full, slim]
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.target }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags)
+        id: meta
         uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
         with:
           images: |
             zzzteph/boxcutter
             ghcr.io/${{ github.repository }}
-          flavor: |
-            suffix=-slim,onlatest=true
+          flavor: ${{ matrix.target == 'slim' && 'suffix=-slim,onlatest=true' || '' }}
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
@@ -89,15 +156,20 @@ jobs:
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
             type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
-      - name: Build and push the slim image
-        id: push_slim
-        uses: docker/build-push-action@3b5e8027fcad23fda98b2e3ac259d8d67585f671
-        with:
-          context: .
-          target: slim
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
-          tags: ${{ steps.meta_slim.outputs.tags }}
-          labels: ${{ steps.meta_slim.outputs.labels }}
-          cache-from: type=gha,scope=slim
-          cache-to: type=gha,mode=max,scope=slim
+      - name: Create and push manifest lists
+        working-directory: /tmp/digests
+        run: |
+          for image in zzzteph/boxcutter "ghcr.io/${{ github.repository }}"; do
+            tags=$(jq -cr --arg img "$image" \
+              '.tags | map(select(startswith($img + ":"))) | map("-t " + .) | join(" ")' \
+              <<< "$DOCKER_METADATA_OUTPUT_JSON")
+            sources=$(printf "${image}@sha256:%s " *)
+            echo "::group::$image"
+            docker buildx imagetools create $tags $sources
+            echo "::endgroup::"
+          done
+
+      - name: Inspect
+        run: |
+          tag=$(jq -cr '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools inspect "$tag"
