@@ -19,9 +19,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # One job per target (full / slim), in parallel. Each builds a multi-arch
-  # (amd64 + arm64) image and pushes the manifest to both registries directly -
-  # build-push-action handles the manifest list, so there is no digest/merge step.
+  # One job per target. Each builds a multi-arch (amd64 + arm64) image and pushes
+  # the manifest to both registries directly - build-push-action handles the
+  # manifest list, so there is no digest/merge step. Runs sequentially (slim
+  # first, full last) so `:latest` is the most-recently-pushed tag and shows as
+  # the suggested pull command on the registry package page.
   publish:
     name: Publish ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -30,8 +32,9 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
-        target: [full, slim]
+        target: [slim, full]
     steps:
       - name: Check out the repo
         uses: actions/checkout@v6
