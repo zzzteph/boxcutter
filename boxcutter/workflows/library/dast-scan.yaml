@@ -1,0 +1,20 @@
+name: dast-scan
+help: DAST bundle on one URL - fuzz + nuclei -dast + sqlmap + zap-scan-url
+input: url
+output: findings
+
+steps:
+  - tool: fuzz
+    target: ${url}
+    args: --timeout 120
+    save: findings
+  - tool: nuclei
+    target: ${url}
+    args: --opt-args=-dast
+    save: findings
+  - tool: sqlmap
+    target: ${url}
+    save: findings
+  - tool: zap-scan-url
+    target: ${url}
+    save: findings

@@ -1,0 +1,16 @@
+name: takeover-env
+help: subfinder, then nuclei takeover templates on every discovered subdomain
+input: target
+output: findings
+
+steps:
+  - tool: subfinder
+    target: ${target}
+    save: hosts
+
+  - for_each: ${hosts}
+    do:
+      - tool: nuclei
+        target: ${hosts.item}
+        args: '--opt-args="-tags takeover"'
+        save: findings

@@ -1,0 +1,17 @@
+name: swagger-fuzz
+help: parse an OpenAPI/Swagger spec and fuzz every parameterised endpoint
+input: spec
+output: findings
+
+steps:
+  - tool: swagger-endpoints
+    target: ${spec}
+    args: --fuzzable
+    save: urls
+
+  - for_each: ${urls}
+    do:
+      - tool: fuzz
+        target: ${urls.item}
+        args: --timeout 60
+        save: findings

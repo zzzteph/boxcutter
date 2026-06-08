@@ -1,0 +1,15 @@
+name: recon-http
+help: recon, then httpx; show only the live HTTP(S) services
+input: target
+output: ${live}
+
+steps:
+  - workflow: recon
+    target: ${target}
+    save: hosts
+
+  - for_each: ${hosts}
+    do:
+      - tool: httpx
+        target: ${hosts.item}
+        save: live

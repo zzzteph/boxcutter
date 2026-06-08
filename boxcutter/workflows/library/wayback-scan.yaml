@@ -1,0 +1,34 @@
+name: wayback-scan
+help: wayback URLs - secrets on JS files, sqlmap/fuzz/zap on param URLs
+input: target
+output: findings
+
+steps:
+  - tool: wayback
+    target: ${target}
+    save: urls
+  - select: ${urls | js}
+    save: js
+  - select: ${urls | params | dedup}
+    save: params
+
+  # secrets in each JS file
+  - for_each: ${js}
+    do:
+      - tool: scan-secrets
+        target: ${js.item}
+        save: findings
+
+  # scan each parameterised URL
+  - for_each: ${params}
+    do:
+      - tool: sqlmap
+        target: ${params.item}
+        save: findings
+      - tool: fuzz
+        target: ${params.item}
+        args: --timeout 120
+        save: findings
+      - tool: zap-scan-url
+        target: ${params.item}
+        save: findings

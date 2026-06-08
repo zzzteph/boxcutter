@@ -1,0 +1,15 @@
+name: nuclei-env
+help: subfinder, then nuclei on every discovered subdomain
+input: target
+output: findings
+
+steps:
+  - tool: subfinder
+    target: ${target}
+    save: hosts
+
+  - for_each: ${hosts}
+    do:
+      - tool: nuclei
+        target: ${hosts.item}
+        save: findings

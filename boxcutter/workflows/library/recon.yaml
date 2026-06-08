@@ -1,0 +1,16 @@
+name: recon
+help: subdomains (subfinder + wayback), kept if they resolve (dnsx)
+input: target
+output: ${hosts}
+
+steps:
+  - select: ${target}          # seed with the apex
+    save: hosts
+  - tool: subfinder
+    target: ${target}
+    save: hosts
+  - tool: wayback-domains
+    target: ${target}
+    save: hosts
+  - alive: ${hosts}            # keep only the ones dnsx resolves
+    save: hosts

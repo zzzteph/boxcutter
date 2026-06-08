@@ -1,0 +1,2 @@
+# boxcutter's only dependency.
+requests>=2.28

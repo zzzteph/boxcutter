@@ -1,0 +1,175 @@
+"""JSON envelope output - the Python port of the ``JsonOutput`` PHP trait.
+
+Every tool returns the same shape::
+
+    {"success": <bool>, "data": <list>, "error": <str|null>}
+
+``success`` is ``True`` exactly when ``error`` is ``None``. The envelope is
+written to ``--output`` when given, otherwise to stdout. Diagnostic/debug
+chatter never touches stdout (it goes to stderr via :func:`debug_logger`) so
+stdout always stays parseable JSON.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from typing import Any, Callable, Iterable
+
+# When True, stdout output is rendered as a text table instead of JSON. Set once
+# by the CLI from the --table flag. It only affects stdout: writes to a file
+# (--output, and the temp files tools pass to each other) always stay JSON.
+_TABLE_MODE = False
+
+# The kind of payload the current tool/workflow emits: one of "findings", "urls",
+# "items". Set by the CLI/runner from the tool's KIND before it runs, so every
+# envelope is self-describing and consumers know the data shape up front.
+_OUTPUT_KIND = "items"
+KINDS = ("findings", "urls", "items")
+
+
+def set_table_mode(enabled: bool) -> None:
+    global _TABLE_MODE
+    _TABLE_MODE = enabled
+
+
+def set_output_kind(kind: str) -> None:
+    global _OUTPUT_KIND
+    _OUTPUT_KIND = kind if kind in KINDS else "items"
+
+
+def output_result(
+    data: list[Any],
+    output_file: str | None = None,
+    error: str | None = None,
+    *,
+    extra: dict[str, Any] | None = None,
+    pretty: bool = False,
+) -> None:
+    """Emit the standard ``{success, data, error}`` envelope.
+
+    ``extra`` injects additional top-level keys (e.g. ``sources`` for
+    git-extract). ``pretty`` switches to indented JSON.
+    """
+    payload: dict[str, Any] = {
+        "success": error is None,
+        "kind": _OUTPUT_KIND,
+        "data": data,
+        "error": error,
+    }
+    if extra:
+        payload.update(extra)
+
+    if output_file:
+        text = json.dumps(payload, ensure_ascii=False, indent=2) if pretty else \
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        with open(output_file, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return
+
+    if _TABLE_MODE:
+        sys.stdout.write(render_table(data, error) + "\n")
+        sys.stdout.flush()
+        return
+
+    # ensure_ascii=False keeps unicode/slashes intact, matching PHP's
+    # JSON_UNESCAPED_SLASHES. Compact separators mirror PHP's fwrite output.
+    text = json.dumps(payload, ensure_ascii=False, indent=2) if pretty else \
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    sys.stdout.write(text + "\n")
+    sys.stdout.flush()
+
+
+_MAX_CELL = 70
+
+
+def render_table(data: list[Any], error: str | None = None) -> str:
+    """Render the envelope's ``data`` list as a plain text table."""
+    if error:
+        return f"error: {error}"
+    if not data:
+        return "(no results)"
+
+    if all(isinstance(row, dict) for row in data):
+        columns: list[str] = []
+        for row in data:
+            for key in row:
+                if key not in columns:
+                    columns.append(key)
+        rows = [[_cell(row.get(col, "")) for col in columns] for row in data]
+        return _grid(columns, rows)
+
+    return _grid(["value"], [[_cell(item)] for item in data])
+
+
+def _cell(value: Any) -> str:
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False)
+    else:
+        text = str(value)
+    text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    if len(text) > _MAX_CELL:
+        text = text[: _MAX_CELL - 3] + "..."
+    return text
+
+
+def _grid(columns: list[str], rows: list[list[str]]) -> str:
+    widths = [len(col) for col in columns]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def line(cells: list[str]) -> str:
+        return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells))
+
+    out = [line(columns), "  ".join("-" * w for w in widths)]
+    out.extend(line(row) for row in rows)
+    return "\n".join(out)
+
+
+def debug_print(message: str) -> None:
+    """Write a diagnostic line to stderr (keeps stdout pure JSON)."""
+    sys.stderr.write(str(message) + "\n")
+    sys.stderr.flush()
+
+
+def debug_logger(enabled: bool) -> Callable[[str], None]:
+    """Return a logging closure that only emits when ``enabled`` is true.
+
+    Mirrors the ``if ($debug) $this->info(...)`` pattern littered through the
+    PHP commands.
+    """
+
+    def _log(message: str) -> None:
+        if enabled:
+            debug_print(message)
+
+    return _log
+
+
+def read_envelope(path: str) -> dict[str, Any]:
+    """Read and JSON-decode an envelope file, tolerating missing/empty files."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError:
+        return {}
+    raw = raw.strip()
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def dedupe(items: Iterable[str]) -> list[str]:
+    """Order-preserving de-duplication of a string iterable."""
+    seen: dict[str, bool] = {}
+    for item in items:
+        if item not in seen:
+            seen[item] = True
+    return list(seen.keys())

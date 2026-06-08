@@ -1,0 +1,24 @@
+name: wayback-full-scan-env
+help: subfinder, wayback every subdomain, then dast-scan every parameterised URL (deduped)
+input: target
+output: findings
+
+steps:
+  - tool: subfinder
+    target: ${target}
+    save: hosts
+
+  - for_each: ${hosts}
+    do:
+      - tool: wayback
+        target: ${hosts.item}
+        save: urls
+
+  - select: ${urls | params | dedup}
+    save: params
+
+  - for_each: ${params}
+    do:
+      - workflow: dast-scan
+        target: ${params.item}
+        save: findings
