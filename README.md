@@ -123,12 +123,23 @@ boxcutter zap-scan-full https://example.com
 | Tool | Arguments | kind | What it does |
 |---|---|---|---|
 | `path-fuzz <url-with-FUZZ>` | `--method` `--header` `--timeout` | findings | brute-force the `FUZZ` position with the built-in wordlist |
-| `fuzz <url>` | `--method` `--data` `--header` `--timeout` | findings | fuzz parameters for XSS/SSTI/SQLi/LFI/RCE/XXE (reflection + time-based) |
+| `fuzz <url>` | `--method` `--data` `--header` `--status` `--timeout` | findings | inject params/path/body (XSS, SQLi, SSTI, LFI, RCE, XXE, NoSQL, GraphQL, error-disclosure) or enumerate IDs with `{NUMBERS}` |
+
+`fuzz` is signal-based, not blind. An explicit marker picks the mode: `{NUMBERS}`
+(or `{NUMBERS[m-n]}`) enumerates numeric IDs for IDOR — soft-404 filtered and
+deduped; `{FUZZ}` in the URL or `--data` injects payloads at that position;
+unmarked, it injects every query parameter (or, if the path has ID-like segments,
+each of those). Dynamic payloads (`{RANDOM}` reflection, `EXPR` evaluation) are
+re-fired to confirm (fast-path ≥2/3, else ≥4/5); time-based blind injection is
+reported only when response time scales monotonically with the injected delay.
 
 ```bash
+boxcutter fuzz "https://example.com/?id=1"                     # inject every query param
+boxcutter fuzz "https://example.com/search?q={FUZZ}"           # inject one marked position
+boxcutter fuzz "https://example.com/api/{NUMBERS}" --table     # enumerate numeric IDs (IDOR)
+boxcutter fuzz "https://example.com/api/{NUMBERS[1-500]}"      # enumerate a range
 boxcutter path-fuzz "https://example.com/FUZZ"
-boxcutter fuzz "https://example.com/?id=1"
-boxcutter fuzz "https://example.com/api" --method POST --data '{"q":"1"}'
+boxcutter fuzz "https://example.com/api" --method POST --data '{"q":"{FUZZ}"}'
 ```
 
 ### Secrets / source

@@ -9,7 +9,7 @@ the tool modules the same primitives on top of ``requests``.
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import requests
 import urllib3
@@ -21,6 +21,70 @@ CHROME_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+def session(extra_headers: dict[str, str] | None = None) -> requests.Session:
+    """A reusable session (connection pooling) with TLS verification off and the
+    Chrome UA preset. Fuzzers fire hundreds of requests at one host, so reusing
+    the connection is a real win over a fresh request each time."""
+    sess = requests.Session()
+    sess.verify = False
+    sess.headers["User-Agent"] = CHROME_UA
+    if extra_headers:
+        sess.headers.update(extra_headers)
+    return sess
+
+
+def send(
+    method: str,
+    url: str,
+    *,
+    sess: Optional[requests.Session] = None,
+    headers: dict[str, str] | None = None,
+    data: Any = None,
+    json: Any = None,
+    params: dict[str, Any] | None = None,
+    timeout: int = 15,
+    allow_redirects: bool = True,
+) -> dict[str, Any]:
+    """Issue one request and return a normalized dict that never raises.
+
+    Unlike :func:`request` (which returns a ``requests.Response`` and propagates
+    transport errors), this captures everything the scanners need - decoded body,
+    true byte length, timing, final URL - and turns a transport failure into an
+    ``error`` string. The shape is::
+
+        {status, headers, body, body_bytes, final_url, time_ms, error}
+
+    ``status`` is ``None`` and ``error`` is set when the request never completed.
+    """
+    s = sess or session()
+    start = time.time()
+    try:
+        response = s.request(
+            method.upper(), url, headers=headers, data=data, json=json,
+            params=params, timeout=timeout, allow_redirects=allow_redirects,
+        )
+        body = response.content
+        return {
+            "status": response.status_code,
+            "headers": dict(response.headers),
+            "body": body.decode("utf-8", errors="replace"),
+            "body_bytes": len(body),
+            "final_url": response.url,
+            "time_ms": int((time.time() - start) * 1000),
+            "error": None,
+        }
+    except requests.RequestException as exc:
+        return {
+            "status": None,
+            "headers": {},
+            "body": "",
+            "body_bytes": 0,
+            "final_url": url,
+            "time_ms": int((time.time() - start) * 1000),
+            "error": str(exc),
+        }
 
 
 def request(
