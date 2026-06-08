@@ -29,7 +29,7 @@ import statistics
 import time
 import uuid
 from collections import Counter
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from ..core import http
 from ..core.args import add_common_args
@@ -246,12 +246,21 @@ def _needs_reliability(payload_raw: str) -> bool:
     return "{RANDOM}" in payload_raw or "EXPR" in payload_raw
 
 
+# Percent-encode a payload placed at a {FUZZ} position in the URL, treating the
+# slot as one component value. Everything is encoded - including ``/`` - so the
+# payload stays inside its own path segment (or query value) instead of spilling
+# into the URL structure (a raw ``/`` would start a new segment, ``#``/``?`` would
+# become a fragment/query). ``%`` is left literal so an already-encoded payload
+# (e.g. %252e%252e%2f, %00) is sent as authored rather than double-encoded.
+_FUZZ_SAFE = "%"
+
+
 def _substitute(method, url, body, param, payload, sess):
     """Place ``payload`` at ``param`` (URL marker, body marker, or a query param)
     and send. Returns the normalized response dict with the request URL added."""
     new_url, new_body = url, body
     if param == "__URL_FUZZ__":
-        new_url = url.replace("{FUZZ}", payload)
+        new_url = url.replace("{FUZZ}", quote(payload, safe=_FUZZ_SAFE))
     elif param == "__BODY_FUZZ__":
         new_body = (body or "").replace("{FUZZ}", payload)
     else:
