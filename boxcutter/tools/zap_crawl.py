@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from ..core.args import add_common_args
+from ..core.args import add_common_args, add_header_arg
 from ..core.envelope import debug_logger, output_result
 from ..core.urlfilter import keep_url
 from ..core.validators import is_valid_url
@@ -20,6 +20,7 @@ def add_arguments(parser) -> None:
     parser.add_argument("--js", action="store_true", help="Return JS URLs only")
     parser.add_argument("--params", action="store_true", help="Return URLs with query params only")
     parser.add_argument("--timeout", type=int, default=600, help="Process timeout in seconds")
+    add_header_arg(parser)
     add_common_args(parser)
 
 
@@ -34,7 +35,7 @@ def run(args) -> int:
         output_result([], args.output, "Use either --js or --params, not both.")
         return 1
 
-    crawled = _run_zap(target, args.timeout, dbg)
+    crawled = _run_zap(target, args.timeout, dbg, args.header)
 
     urls: list[str] = []
     for url in crawled:
@@ -48,11 +49,12 @@ def run(args) -> int:
     return 0
 
 
-def _run_zap(target: str, timeout: int, dbg) -> list[str]:
+def _run_zap(target: str, timeout: int, dbg, raw_headers=None) -> list[str]:
     run = _zap.prepare_run()
     plan = _build_plan(target, run.urls_path)
     dbg(f"Target: {target}")
-    _zap.execute(run, plan, timeout, dbg)
+    cfg = _zap.replacer_configs(_zap.header_map(raw_headers))
+    _zap.execute(run, plan, timeout, dbg, extra_config=cfg)
 
     if not os.path.exists(run.urls_path):
         dbg("URLs file was not generated.")

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 
-from ..core.args import add_common_args
+from ..core.args import add_common_args, add_header_arg
 from ..core.envelope import debug_logger, output_result
 from ..core.validators import is_valid_url
 from . import _zap
@@ -18,6 +18,7 @@ HELP = "ZAP active scan against a single exact URL (no crawling)."
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="Target URL")
     parser.add_argument("--timeout", type=int, default=900, help="Process timeout in seconds")
+    add_header_arg(parser)
     add_common_args(parser)
 
 
@@ -32,7 +33,8 @@ def run(args) -> int:
     run = _zap.prepare_run()
     plan = _build_plan(target, run.report_path)
     dbg(f"Target: {target}")
-    _zap.execute(run, plan, args.timeout, dbg)
+    cfg = _zap.replacer_configs(_zap.header_map(args.header))
+    _zap.execute(run, plan, args.timeout, dbg, extra_config=cfg)
 
     if not os.path.exists(run.report_path):
         _zap.cleanup(run)

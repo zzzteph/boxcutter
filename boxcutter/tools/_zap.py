@@ -46,8 +46,14 @@ def prepare_run() -> ZapRun:
 
 
 def execute(run: ZapRun, plan_text: str, timeout: int, dbg, *,
-            host: str | None = None, port: int | None = None) -> None:
-    """Write the plan and run ZAP to completion (or until ``timeout``)."""
+            host: str | None = None, port: int | None = None,
+            extra_config: list[str] | None = None) -> None:
+    """Write the plan and run ZAP to completion (or until ``timeout``).
+
+    ``extra_config`` is a list of extra ``zap.sh`` arguments (e.g. the
+    ``-config replacer.full_list(N)...`` pairs from :func:`replacer_configs`)
+    inserted before ``-cmd`` so they apply to every request the run makes.
+    """
     with open(run.plan_path, "w", encoding="utf-8") as fh:
         fh.write(plan_text)
 
@@ -59,12 +65,50 @@ def execute(run: ZapRun, plan_text: str, timeout: int, dbg, *,
     if host is not None and port is not None:
         cmd += ["-host", host, "-port", str(port)]
         dbg(f"ZAP proxy: {host}:{port}")
+    if extra_config:
+        cmd += extra_config
     cmd += ["-cmd", "-autorun", run.plan_path]
     dbg("JMEM=" + JMEM + " " + process.format_command(cmd))
 
     result = process.run(cmd, timeout=timeout, env={"JMEM": JMEM})
     if not result.successful():
         dbg("ZAP process did not exit cleanly. Will still try to parse artefacts.")
+
+
+# -- custom request headers (auth etc.) --------------------------------------
+
+def header_map(raw_headers: list[str] | None) -> dict[str, str]:
+    """Parse repeatable ``"Name: Value"`` strings into a dict."""
+    headers: dict[str, str] = {}
+    for raw in raw_headers or []:
+        if ":" in raw:
+            name, _, value = raw.partition(":")
+            if name.strip():
+                headers[name.strip()] = value.strip()
+    return headers
+
+
+def replacer_configs(headers: dict[str, str]) -> list[str]:
+    """Build ``-config replacer.full_list(N)...`` args that add/replace each
+    header on *every* request ZAP makes (spider, active scan, OpenAPI import).
+
+    Uses the built-in Replacer add-on with ``matchtype=REQ_HEADER``: the header
+    is replaced if present, added if missing. Returned as a flat argv list.
+    """
+    cfg: list[str] = []
+    for i, (name, value) in enumerate(headers.items()):
+        node = f"replacer.full_list({i})"
+        cfg += [
+            "-config", f"{node}.description=bc-header-{i}",
+            "-config", f"{node}.enabled=true",
+            "-config", f"{node}.matchtype=REQ_HEADER",
+            "-config", f"{node}.matchstr={name}",
+            "-config", f"{node}.regex=false",
+            "-config", f"{node}.replacement={value}",
+            "-config", f"{node}.initiators=",
+            "-config", f"{node}.tokenprocessing=false",
+        ]
+    return cfg
 
 
 def cleanup(run: ZapRun) -> None:

@@ -14,7 +14,7 @@ import re
 from urllib.parse import urlparse
 
 from ..core import http
-from ..core.args import add_common_args
+from ..core.args import add_common_args, add_header_arg
 from ..core.envelope import debug_logger, output_result
 from ..core.validators import is_valid_url
 from . import _zap
@@ -27,6 +27,7 @@ HELP = "ZAP active scan driven by an OpenAPI/Swagger specification URL."
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="URL of the OpenAPI/Swagger spec (JSON or YAML)")
     parser.add_argument("--timeout", type=int, default=900, help="Process timeout in seconds")
+    add_header_arg(parser)
     add_common_args(parser)
 
 
@@ -38,9 +39,10 @@ def run(args) -> int:
         output_result([], args.output, "Invalid spec URL.")
         return 1
 
+    headers = _zap.header_map(args.header)
     dbg(f"Fetching spec: {spec_url}")
     try:
-        response = http.get(spec_url, timeout=30)
+        response = http.get(spec_url, timeout=30, headers=headers or None, verify=False)
         spec_content = response.text
     except Exception:
         output_result([], args.output, f"Could not fetch spec from: {spec_url}")
@@ -56,7 +58,8 @@ def run(args) -> int:
 
     run_ = _zap.prepare_run()
     plan = _build_plan(spec_url, target_url, run_.report_path)
-    _zap.execute(run_, plan, args.timeout, dbg)
+    cfg = _zap.replacer_configs(headers)
+    _zap.execute(run_, plan, args.timeout, dbg, extra_config=cfg)
 
     if not os.path.exists(run_.report_path):
         _zap.cleanup(run_)

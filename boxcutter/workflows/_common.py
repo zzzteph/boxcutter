@@ -20,10 +20,13 @@ from ..core.envelope import read_envelope
 from ..core.runner import tool_data
 
 # Tools that accept a "--header" option; a workflow's --header propagates to
-# these (ZAP tools take headers via their plan, handled separately).
+# these. ZAP tools inject the headers into every request via the Replacer
+# add-on; swagger discovery/parse tools use them to fetch the spec.
 HEADER_CAPABLE = {
     "nuclei", "httpx", "tech-detect", "katana-crawl", "sqlmap", "dirsearch",
     "screenshot", "fuzz", "path-fuzz", "http-request", "swagger-parser",
+    "swagger-specs", "swagger-endpoints",
+    "zap-scan-url", "zap-scan-openapi", "zap-scan-full", "zap-crawl",
 }
 
 
