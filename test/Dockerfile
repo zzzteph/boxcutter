@@ -1,7 +1,8 @@
 # Boxcutter Store - deliberately vulnerable test target.
 # Build:  docker build -t boxcutter-store ./test
 # Run:    docker run --rm -p 8000:8000 boxcutter-store
-# Then point a scanner at http://localhost:8000
+# Then point a scanner at https://localhost:8000 (self-signed cert)
+# To disable HTTPS: docker run --rm -p 8000:8000 -e HTTPS=0 boxcutter-store
 
 # ---- stage 1: build the Vue account SPA ----
 FROM node:20-slim AS frontend

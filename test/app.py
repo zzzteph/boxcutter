@@ -12,6 +12,7 @@ Authorized testing only. Do not deploy on the public internet.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import os
 import pickle
@@ -19,7 +20,7 @@ import re
 import sqlite3
 import subprocess
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import jwt
 from flask import Flask, Response, jsonify, render_template_string, request
@@ -2168,6 +2169,61 @@ OPENAPI["paths"].update(_resource_paths())
 OPENAPI["paths"].update(_extra_paths())
 
 
+def _make_ssl_context():
+    import ssl
+    import tempfile
+
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        return "adhoc"
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "boxcutter-store")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(timezone.utc))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=3650))
+        .add_extension(
+            x509.SubjectAlternativeName([
+                x509.DNSName("localhost"),
+                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+            ]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    )
+
+    tmp = tempfile.mkdtemp()
+    cert_path = os.path.join(tmp, "cert.pem")
+    key_path = os.path.join(tmp, "key.pem")
+    with open(cert_path, "wb") as f:
+        f.write(cert_pem)
+    with open(key_path, "wb") as f:
+        f.write(key_pem)
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert_path, key_path)
+    return ctx
+
+
 if __name__ == "__main__":
     init_db()
-    app.run(host="0.0.0.0", port=8000)
+    https = os.environ.get("HTTPS", "1") not in ("0", "false", "no")
+    ssl_context = _make_ssl_context() if https else None
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port, ssl_context=ssl_context)

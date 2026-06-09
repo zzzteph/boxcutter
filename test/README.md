@@ -62,7 +62,9 @@ npm --prefix test/frontend install && npm --prefix test/frontend run build
 pip install flask pyjwt && python test/app.py
 ```
 
-Then point your scanner at `http://localhost:8000`.
+Then point your scanner at `https://localhost:8000` (self-signed cert — pass `-k` or equivalent to skip verification).
+
+To run without HTTPS: `docker run --rm -p 8000:8000 -e HTTPS=0 boxcutter-store`
 
 **Accounts:** `user / user` (the demo customer), `alice / alice123`, `admin /
 S3cur3Adm!n`. The JWT signing secret (`boxcutter-super-secret-key-2024`) is leaked
