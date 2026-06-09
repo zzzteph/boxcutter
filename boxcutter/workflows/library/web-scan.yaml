@@ -1,0 +1,58 @@
+name: web-scan
+help: full DAST of one known URL (no httpx probe) - crawl -> nuclei -> zap-full -> fuzz/sqlmap/nuclei-dast per param URL -> secrets per JS
+input: url
+output: findings
+
+steps:
+  # the given URL is the target as-is (no httpx liveness probe)
+  - select: ${url}
+    save: live
+
+  - for_each: ${live}
+    do:
+      - tool: url-crawl
+        target: ${live.item}
+        save: urls
+
+  - for_each: ${urls | js}
+    do:
+      - tool: js-endpoints
+        target: ${urls.item}
+        pick: endpoints.url
+        save: urls
+
+  - select: ${urls | params | dedup}
+    save: params
+
+  # scan the URL itself
+  - for_each: ${live}
+    do:
+      - tool: nuclei
+        target: ${live.item}
+        args: '--opt-args="-tags exposures,misconfig,cve -severity critical,high,medium"'
+        save: findings
+      - tool: zap-scan-full
+        target: ${live.item}
+        save: findings
+
+  # scan each parameterised URL
+  - for_each: ${params}
+    do:
+      - tool: fuzz
+        target: ${params.item}
+        args: --timeout 120
+        save: findings
+      - tool: nuclei
+        target: ${params.item}
+        args: --opt-args=-dast
+        save: findings
+      - tool: sqlmap
+        target: ${params.item}
+        save: findings
+
+  # secrets in each JS file
+  - for_each: ${urls | js}
+    do:
+      - tool: scan-secrets
+        target: ${urls.item}
+        save: findings

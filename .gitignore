@@ -18,3 +18,10 @@ env/
 runs/
 runs2/
 *.log
+
+# Test target runtime DB + request logs + uploads + generated fixtures
+test/store.db
+test/logs/
+test/uploads/
+test/keys/
+test/locales/

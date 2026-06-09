@@ -368,10 +368,13 @@ def _run_inject_mode(method, target, body, sess, deadline: float, dbg) -> list[d
         return []
 
     pattern_based, time_based = _group_payloads()
-    findings: list[dict] = []
+    # Collect confirmed hits per (param, class) so one vulnerable parameter yields a
+    # single finding listing every payload that worked - not 5-10 near-duplicate rows.
+    hits: dict[tuple[str, str], list[dict]] = {}
+    out_of_time = False
 
     for param in params:
-        if time.time() >= deadline:
+        if out_of_time or time.time() >= deadline:
             break
         baseline = _substitute(method, target, body, param, "control-x9z3-marker", sess)
         if baseline["error"] is not None or baseline["status"] is None:
@@ -385,7 +388,8 @@ def _run_inject_mode(method, target, body, sess, deadline: float, dbg) -> list[d
             for payload_raw, pattern_raw in pattern_based.get(cls, []):
                 if time.time() >= deadline:
                     dbg(f"Timeout reached, stopping at [{cls}] on '{label}'.")
-                    return findings
+                    out_of_time = True
+                    break
                 if _needs_reliability(payload_raw):
                     ok, signal, evidence, payload, url, status = _check_signal_reliable(
                         method, target, body, param, payload_raw, pattern_raw, sess)
@@ -402,39 +406,51 @@ def _run_inject_mode(method, target, body, sess, deadline: float, dbg) -> list[d
                             url, status = resp["_url"], resp["status"]
                 if ok:
                     dbg(f"  Confirmed [{cls}] in '{label}': {signal}")
-                    findings.append(_inject_finding(method, cls, label, payload, signal,
-                                                    evidence, url, status))
+                    hits.setdefault((label, cls), []).append(
+                        {"payload": payload, "signal": signal, "evidence": evidence,
+                         "url": url, "status": status})
+            if out_of_time:
+                break
 
             for payload_template in time_based.get(cls, []):
                 if time.time() >= deadline:
-                    return findings
+                    out_of_time = True
+                    break
                 ok, signal, evidence, url, status = _check_time_reliable(
                     method, target, body, param, payload_template, baseline_time, sess)
                 if ok:
                     dbg(f"  Confirmed time-based [{cls}] in '{label}'")
-                    findings.append(_inject_finding(
-                        method, cls, label, payload_template.replace("{TIME}", str(TIME_VALUES[-1])),
-                        signal, evidence, url, status))
+                    hits.setdefault((label, cls), []).append(
+                        {"payload": payload_template.replace("{TIME}", str(TIME_VALUES[-1])),
+                         "signal": signal, "evidence": evidence, "url": url, "status": status})
+            if out_of_time:
+                break
 
-    return findings
+    return [_grouped_finding(method, cls, param, hs) for (param, cls), hs in hits.items()]
 
 
 # -- finding builders (boxcutter {severity, title, info, url} shape) ----------
 
-def _inject_finding(method, cls, param, payload, signal, evidence, url, status) -> dict:
+def _grouped_finding(method, cls, param, hits: list[dict]) -> dict:
+    """One finding per (param, class), listing every confirmed payload as evidence."""
+    first = hits[0]
+    n = len(hits)
+    lines = [
+        f"Class:    {cls}",
+        f"Param:    {param}",
+        f"Signal:   {first['signal']}",
+        f"Status:   {first['status']}",
+        f"URL:      {first['url']}",
+        f"Confirmed payloads ({n}):",
+    ]
+    for h in hits:
+        evidence = (h["evidence"] or "").replace("\n", " ")[:100]
+        lines.append(f"  - {h['payload']}  =>  {evidence}")
     return {
         "severity": _SEVERITY.get(cls, "medium"),
-        "title": f"[{method}] [{cls}] {signal} in '{param}'",
-        "info": "\n".join([
-            f"Class:    {cls}",
-            f"Param:    {param}",
-            f"Payload:  {payload}",
-            f"Signal:   {signal}",
-            f"Evidence: {evidence}",
-            f"Status:   {status}",
-            f"URL:      {url}",
-        ]),
-        "url": url or "",
+        "title": f"[{method}] [{cls}] in '{param}' ({n} payload{'s' if n != 1 else ''})",
+        "info": "\n".join(lines),
+        "url": first["url"] or "",
     }
 
 
