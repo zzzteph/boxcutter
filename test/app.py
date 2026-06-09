@@ -20,6 +20,7 @@ import re
 import sqlite3
 import subprocess
 import traceback
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -447,7 +448,7 @@ def _actuator(payload):
 def actuator_index():
     base = request.host_url.rstrip("/")
     links = {n: {"href": f"{base}/actuator/{n}"} for n in
-             ["health", "info", "env", "mappings", "metrics", "loggers", "heapdump", "threaddump"]}
+             ["health", "info", "env", "configprops", "mappings", "metrics", "loggers", "heapdump", "threaddump"]}
     return _actuator({"_links": {"self": {"href": f"{base}/actuator"}, **links}})
 
 
@@ -471,6 +472,28 @@ def actuator_env():
             "AWS_ACCESS_KEY_ID": {"value": "AKIAIOSFODNN7EXAMPLE"},
             "DB_DATABASE": {"value": DB_PATH},
         }}]})
+
+
+@app.route("/actuator/configprops", strict_slashes=False)
+def actuator_configprops():
+    # VULN[actuator-configprops]: a path-based access rule guards the EXACT path
+    # /actuator/configprops (-> 401), but the very same handler is reachable with a
+    # trailing slash (/actuator/configprops/), which the rule never matched -> the
+    # bound, runtime-resolved production secrets leak. Classic Spring Security /
+    # proxy ACL trailing-slash bypass (see SECAPP-3282).
+    if not request.path.endswith("/"):
+        return Response('{"timestamp":"2024-01-01T00:00:00Z","status":401,"error":"Unauthorized","path":"/actuator/configprops"}',
+                        status=401, mimetype="application/vnd.spring-boot.actuator.v3+json")
+    return _actuator({"contexts": {"application": {"beans": {
+        "spring.kafka-org.springframework.boot.autoconfigure.kafka.KafkaProperties": {"properties": {
+            "bootstrapServers": ["pkc-2rqw2.eu-west-1.aws.confluent.cloud:9092"],
+            "properties": {"sasl.mechanism": "PLAIN", "security.protocol": "SASL_SSL",
+                           "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required "
+                                               "username='OA2H4NDEHYAYXFZJ' password='" + JWT_SECRET + "';"}}},
+        "security.oauth2-org.springframework.boot.autoconfigure.security.oauth2.OAuth2Properties": {"properties": {
+            "issuerUri": "https://boxcutter.okta-emea.com/oauth2/default", "jwsAlgorithm": "RS256"}},
+        "store.signing-com.boxcutter.config.SigningProperties": {"properties": {"jwtSecret": JWT_SECRET}},
+    }}}})
 
 
 @app.route("/actuator/mappings")
@@ -817,11 +840,16 @@ def openapi():
 
 @app.route("/api/docs")
 def api_docs():
-    # Minimal Swagger UI loading our spec.
-    return page("API docs", """<div id="swagger"></div>
+    # VULN[swagger-dom-xss]: Swagger UI lets the spec location be overridden with
+    # ?url= / ?configUrl=, and that value is dropped into the inline initialiser
+    # unescaped -> a crafted value breaks out of the JS string and runs script.
+    #   /api/docs?url=';alert(document.domain)//
+    # (Recurring JET finding: Swagger-UI ?url=/?configUrl= XSS.)
+    spec = request.args.get("configUrl") or request.args.get("url") or "/api/openapi.json"
+    return page("API docs", f"""<div id="swagger"></div>
       <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
       <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-      <script>SwaggerUIBundle({url:'/api/openapi.json',dom_id:'#swagger'});</script>""")
+      <script>SwaggerUIBundle({{url:'{spec}',dom_id:'#swagger'}});</script>""")
 
 
 # ============================ GraphQL =======================================
@@ -1772,6 +1800,13 @@ _EXTRA = [
     ("/api/admin/delete-user", ["GET", "POST"], True, "Authenticated", "Delete a user", "id"),
     ("/api/admin/products/{id}/price", ["PUT", "POST"], True, "Authenticated", "Set a product price", None),
     ("/api/coupons/generate", ["POST"], True, "Authenticated", "Generate a discount coupon", None),
+    ("/api/account/reports", ["GET"], True, "Authenticated", "Marketing & revenue reports", "company_id"),
+    ("/api/menu/items/update", ["POST"], True, "Authenticated", "Update a menu item", None),
+    ("/api/config/client", ["GET"], False, "public", "Client runtime config", None),
+    ("/api/account/recover", ["POST"], False, "public", "Recover an account", None),
+    ("/api/account/reset-link", ["POST"], False, "public", "Send a password reset link", None),
+    ("/api/cart/price", ["POST"], False, "store", "Price a cart (base + modifiers)", None),
+    ("/api/campaigns/boost", ["POST"], True, "Authenticated", "Enable Premium Boost on a campaign", None),
 ]
 
 
@@ -1998,6 +2033,176 @@ def remember_me():
     # VULN[cookie-flags]: forgeable token in a cookie with no HttpOnly / Secure / SameSite.
     resp.set_cookie("remember", base64.b64encode((claims.get("sub", "") + ":1").encode()).decode())
     return resp
+
+
+# ============================ more vulnerable functionality (round 3) ========
+
+# Two tenants ("companies"), each owning private revenue / marketing data. The
+# caller's token never says which company they belong to - the org is chosen by a
+# client-supplied id, so there is nothing tying a caller to a single tenant.
+_ORG_REPORTS = {
+    "165690": {"company": "Alder & Co", "currency": "GBP", "revenue": 53485, "roas": 31.5,
+               "campaigns": [{"id": "68c7a791", "area": "ha8", "spend": 750, "revenue": 7881}]},
+    "122123": {"company": "Birch Bistro", "currency": "GBP", "revenue": 18820, "roas": 5.9,
+               "campaigns": [{"id": "1dea6b4e", "area": "ha7", "spend": 400, "revenue": 2363}]},
+}
+
+
+@app.route("/api/account/reports")
+def account_reports():
+    claims, err = _require_jwt()
+    if err:
+        return err
+    # VULN[tenant-isolation]: the org whose data is returned is taken from a
+    # client-supplied tenant id (X-Company-Id header or ?company_id=) with NO check
+    # that the authenticated caller belongs to that org -> horizontal cross-tenant
+    # data access (mirrors the x-company-identifier / companyIdentifier findings).
+    org = request.headers.get("X-Company-Id") or request.args.get("company_id") or "165690"
+    report = _ORG_REPORTS.get(str(org))
+    if not report:
+        return jsonify({"error": "unknown company", "company_id": org}), 404
+    return jsonify({"company_id": org, "viewer": claims.get("sub"), **report})
+
+
+# Menu items keyed by (restaurant_id, uuid). A signed-in restaurant may edit only
+# its OWN items - but the routing trusts a client-supplied `where` value.
+_MENU_ITEMS = {
+    ("9492893", "self-uuid"): {"name": "Zupa serowa", "price": 2200},
+    ("9627043", "54a23c86-86ed-474a-a2f4-172dfb19685e"): {"name": "Pizza Margherita", "price": 3900},
+}
+
+
+@app.route("/api/menu/items/update", methods=["POST"])
+def menu_item_update():
+    claims, err = _require_jwt()
+    if err:
+        return err
+    d = request.get_json(silent=True) or {}
+    where = str(d.get("where", "self/items/self-uuid"))
+    try:
+        price = int(d.get("price", 0))
+    except (TypeError, ValueError):
+        price = 0
+    # VULN[secondary-idor]: `where` is concatenated into an internal resource path and
+    # normalised, so ../ traversal escapes your own scope into the INTERNAL menu
+    # namespace and edits ANY restaurant's item with no ownership check (secondary-
+    # context IDOR, e.g. where=../../../../v2/menu/9627043/items/<uuid>).
+    resolved = os.path.normpath("/svc/public/menu/myrestaurant/" + where).replace("\\", "/")
+    m = re.search(r"/(?:v\d+|internal)/menu/(\w+)/items/([\w-]+)", resolved)
+    if m and "myrestaurant" not in resolved:
+        rid, uuid = m.group(1), m.group(2)
+        item = _MENU_ITEMS.get((rid, uuid))
+        if item:
+            item["price"] = price  # cross-tenant write, no ownership check
+            return jsonify({"updated": True, "restaurant": rid, "item": item, "resolved": resolved})
+        return jsonify({"error": "no such item", "restaurant": rid, "resolved": resolved}), 404
+    # normal path: edit your own item
+    _MENU_ITEMS[("9492893", "self-uuid")]["price"] = price
+    return jsonify({"updated": True, "restaurant": "self", "resolved": resolved})
+
+
+@app.route("/api/config/client")
+def client_config():
+    # VULN[cache-poisoning]: the response is explicitly cacheable (Cache-Control:
+    # public) yet reflects the UNKEYED X-Forwarded-Host header into the asset/redirect
+    # URLs. A CDN keys only on the path, so an attacker poisons the cached entry and
+    # every later visitor is served links pointing at the attacker's host (also the
+    # web-cache-deception vector: a sensitive body cached under a static-looking path).
+    host = request.headers.get("X-Forwarded-Host", request.host)
+    resp = jsonify({"cdn": f"https://{host}/static", "api": f"https://{host}/api",
+                    "login_redirect": f"https://{host}/dashboard", "version": "2.3.1"})
+    resp.headers["Cache-Control"] = "public, max-age=600"
+    resp.headers["X-Cache"] = "MISS"
+    return resp
+
+
+@app.route("/api/account/recover", methods=["POST"])
+def account_recover():
+    ident = str((request.get_json(silent=True) or {}).get("identifier", "") or "")
+    # VULN[unicode-collision]: the lookup NFKC-normalises + case-folds the identifier,
+    # so look-alikes / case / full-width variants collide with a real account
+    # (e.g. "ADMIN", "ＡＤＭＩＮ", or a Cyrillic "аdmin" all match "admin") and the
+    # recovery token is issued for the matched victim -> 0-click account takeover.
+    norm = unicodedata.normalize("NFKC", ident).casefold()
+    conn = get_conn()
+    rows = conn.execute("SELECT username, email FROM users").fetchall()
+    conn.close()
+    for r in rows:
+        if unicodedata.normalize("NFKC", r["username"]).casefold() == norm or \
+           unicodedata.normalize("NFKC", r["email"] or "").casefold() == norm:
+            return jsonify({"matched_account": r["username"],
+                            "reset_token": "rst_" + r["username"] + "_2024",
+                            "message": "Recovery link issued."})
+    return jsonify({"error": "no account found"}), 404
+
+
+@app.route("/api/account/reset-link", methods=["POST"])
+def reset_link():
+    d = request.get_json(silent=True) or {}
+    email = d.get("email", "")
+    # VULN[reset-host-param]: the reset link's host is taken from a client-controlled
+    # `hostName` body field (not even the Host header), so an attacker sets hostName to
+    # their own server and the victim's reset link + token points there (ATO).
+    host = d.get("hostName", request.host_url.rstrip("/"))
+    return jsonify({"sent": True,
+                    "reset_link": f"{host}/reset?email={email}&token=rst_{email}_2024"})
+
+
+@app.route("/reset")
+def reset_landing():
+    # VULN[reset-token-referer]: the reset token is carried in the URL AND the page
+    # loads a third-party tracker, so the full URL (with the token) leaks to the
+    # third party via the Referer header -> token theft / account takeover.
+    token = request.args.get("token", "")
+    return page("Reset your password", f"""<h1 class="title">Choose a new password</h1>
+      <img src="https://analytics.example-cdn.com/px.gif?ref=boxcutter" alt="" width="1" height="1">
+      <form class="box" style="max-width:420px" method="post" action="/api/password/reset">
+        <input type="hidden" name="token" value="{token}">
+        <input class="input mb-2" type="password" name="password" placeholder="New password">
+        <button class="button is-info">Set password</button>
+      </form>""")
+
+
+@app.route("/api/cart/price", methods=["POST"])
+def cart_price():
+    d = request.get_json(silent=True) or {}
+    try:
+        base = float(d.get("base", 59.0))
+    except (TypeError, ValueError):
+        base = 59.0
+    mods = d.get("modifiers", []) if isinstance(d.get("modifiers"), list) else []
+    # VULN[bl-modifier]: each modifier price is summed with no de-duplication, no
+    # per-group maximum and no floor, and negative prices are accepted -> duplicating
+    # a modifier (or sending a negative-priced add-on) drives the total down, even
+    # below zero (the cross-region "modifier multiplication" price-manipulation bug).
+    addons = 0.0
+    for m in mods:
+        try:
+            addons += float(m.get("price", 0))
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return jsonify({"base": round(base, 2), "modifiers": len(mods),
+                    "total": round(base + addons, 2)})
+
+
+@app.route("/api/campaigns/boost", methods=["POST"])
+def campaign_boost():
+    claims, err = _require_jwt()
+    if err:
+        return err
+    d = request.get_json(silent=True) or {}
+    # VULN[bl-fee-omit]: a Premium-Boost add-on costs a fee. Setting additional_fee to
+    # 0 is rejected, but OMITTING the field entirely skips the validation and enables
+    # the paid feature for free (required-field-omission business-logic bypass).
+    if "additional_fee" in d:
+        try:
+            fee = float(d["additional_fee"])
+        except (TypeError, ValueError):
+            fee = 0.0
+        if fee <= 0:
+            return jsonify({"error": "additional_fee must be greater than 0"}), 400
+        return jsonify({"boosted": True, "premium": True, "charged": fee})
+    return jsonify({"boosted": True, "premium": True, "charged": 0.0, "note": "no fee applied"})
 
 
 # ============================ OpenAPI spec ==================================

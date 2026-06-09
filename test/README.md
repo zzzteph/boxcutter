@@ -109,6 +109,8 @@ execution, auth/JWT forging, or manual work — the **blind spots**).
 | `graphql-cms` | `updateHelpArticle` mutation → `/help` | stored XSS via unauth CMS edit | H |
 | `dom-script-load` | `?widget=<url>` (in `app.js`) | external script loaded from URL/localStorage | H |
 | `dom-localstorage` | `?pref=key:value` (in `app.js`) | arbitrary localStorage write | H |
+| `swagger-dom-xss` | `/api/docs?url=` / `?configUrl=` | reflected into the Swagger-UI initialiser (JS-string) | M |
+| `xss-postmessage` | account SPA — `window.postMessage({notice})` | DOM XSS via an unguarded `message` listener → Vue `v-html` | H |
 
 ### File path traversal
 | id | Where | Type | |
@@ -123,6 +125,7 @@ execution, auth/JWT forging, or manual work — the **blind spots**).
 | `exposed-backup` | `/backup.sql`, `/config.bak` | E |
 | exposed git | `/.git/config` (leaked CI token in remote URL), `/.git/HEAD` | E |
 | `actuator-env` / `actuator-heapdump` | `/actuator/env`, `/actuator/heapdump`, `/actuator/health` | E |
+| `actuator-configprops` | `/actuator/configprops/` (trailing-slash ACL bypass — `/configprops` → 401, `/configprops/` → 200 leaks prod creds) | M |
 | `hidden-debug` | `/debug` | E |
 | `exposed-phpinfo` | `/phpinfo`, `/phpinfo.php` | E |
 | error disclosure | SQL errors (`/product`, `/api/products`), GraphQL traceback | E |
@@ -156,6 +159,8 @@ Exposures set realistic **Content-Type** headers so content-type-matching templa
 | `bfla-delete` | `POST/GET /api/admin/delete-user` | admin action, no role check | M |
 | `bfla-price` | `PUT /api/admin/products/{id}/price` | admin action, no role check | M |
 | `bfla-coupon` | `POST /api/coupons/generate` | admin action, no role check | M |
+| `tenant-isolation` | `GET /api/account/reports` (`X-Company-Id` / `company_id`) | cross-tenant (horizontal) data — org id is client-supplied, no membership check | H |
+| `secondary-idor` | `POST /api/menu/items/update` (`where=../../v2/menu/{id}/items/{uuid}`) | secondary-context IDOR — `../` routes into the internal namespace → cross-tenant write | H |
 
 ### Secrets, hidden routes, API & GraphQL
 | id | Where | |
@@ -175,6 +180,8 @@ Exposures set realistic **Content-Type** headers so content-type-matching templa
 | `bl-coupon` | `POST /api/checkout/apply-coupon` | discount percent uncapped (>100% pays the customer) |
 | `bl-status` | `POST /api/orders/{id}/status` | set any order status (ship/refund without payment) |
 | `payment-confirmation` | `POST /api/orders/confirm` | a confirmation code from *any* paid order confirms anyone's order (fulfilment without paying) |
+| `bl-modifier` | `POST /api/cart/price` | modifier prices summed with no dedupe / floor — duplicating or negative-priced add-ons drive the total below zero |
+| `bl-fee-omit` | `POST /api/campaigns/boost` | `additional_fee:0` is rejected, but **omitting** the field enables the paid add-on for free |
 
 ### Authentication, identity & cross-origin
 | id | Where | Type |
@@ -186,6 +193,10 @@ Exposures set realistic **Content-Type** headers so content-type-matching templa
 | `host-header` | `POST /api/password/reset` | reset link built from `Host` (poisoning) |
 | `csrf` | `GET /api/account/email` | state change over GET, no token |
 | `csv-injection` | `GET /api/export.csv` | spreadsheet formula injection (`=`,`+`,`-`,`@`) |
+| `cache-poisoning` | `GET /api/config/client` | unkeyed `X-Forwarded-Host` reflected into a `Cache-Control: public` response (poisoning / deception) |
+| `unicode-collision` | `POST /api/account/recover` | NFKC/case-fold identifier collision → recovery token for a look-alike account (0-click ATO) |
+| `reset-host-param` | `POST /api/account/reset-link` | reset link host taken from a client-controlled `hostName` body field |
+| `reset-token-referer` | `GET /reset?token=` | reset token carried in the URL + a third-party tracker → token leaks via `Referer` |
 
 API versions share a resource at `v1`/`v2`/`v3` where only `v3` is secure
 (`ver-sqli` on v1, `ver-idor` on v2 — see above).
@@ -233,6 +244,8 @@ action is **admin-only and the role is not checked** (broken function-level auth
 | `GET /api/v1/users/{id}` | none (legacy, SQLi) |
 | `GET /api/v2/users/{id}` | JWT (IDOR) |
 | `GET /api/v3/users/{id}` | JWT (secure) |
+| `POST /api/account/recover`, `POST /api/account/reset-link` | none (unicode-collision ATO / `hostName` reset poisoning) |
+| `GET /api/account/reports` | JWT (no tenant check → cross-tenant) |
 
 ### Orders, checkout & payments
 | Endpoint | Auth |
@@ -241,6 +254,9 @@ action is **admin-only and the role is not checked** (broken function-level auth
 | `GET /api/orders/track`, `GET /api/users/{id}/orders` | none (IDOR) |
 | `GET /api/orders/{id}`, `GET /api/orders/{id}/invoice`, `GET/PUT /api/account/addresses/{id}` | JWT (no ownership → IDOR) |
 | `POST /api/orders/{id}/status`, `POST /api/orders/{id}/notes` (POST) | none (business-logic / method bypass) |
+| `POST /api/cart/price` | none (business-logic: modifier multiplication) |
+| `POST /api/menu/items/update` | JWT (no ownership → secondary-context IDOR) |
+| `POST /api/campaigns/boost` | JWT (business-logic: fee-omission bypass) |
 
 ### Admin & privileged actions
 | Endpoint | Auth |
@@ -262,9 +278,10 @@ action is **admin-only and the role is not checked** (broken function-level auth
 | `POST /api/password/reset`, `POST /api/forgot-password` | none |
 | `GET /api/account/data` (CORS), `GET/POST /api/account/email` (CSRF) | JWT |
 | `/api/account/orders` `…/signature` `…/statement` `…/invoices` | JWT |
+| `GET /api/config/client` | none (cacheable; unkeyed `X-Forwarded-Host`) |
 
 (Storefront pages — `/`, `/search`, `/product`, `/reviews`, `/blog`, `/help`,
-`/download`, `/redirect`, `/phpinfo`, exposures — are all unauthenticated.)
+`/download`, `/redirect`, `/reset`, `/phpinfo`, exposures — are all unauthenticated.)
 
 ## Logging
 

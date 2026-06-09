@@ -28,6 +28,8 @@
     <!-- Authenticated account area -->
     <div v-else>
       <h1 class="title">My account</h1>
+      <!-- in-app notice banner, updated by host-page widgets via postMessage -->
+      <div v-if="notice" class="notification is-info" v-html="notice"></div>
       <div class="tabs"><ul>
         <li :class="{ 'is-active': tab === 'profile' }"><a @click="tab = 'profile'">Profile</a></li>
         <li :class="{ 'is-active': tab === 'orders' }"><a @click="tab = 'orders'">Orders</a></li>
@@ -99,10 +101,19 @@ export default {
       profile: { full_name: '', email: '', role: '', bio: '' },
       orderId: '1001',
       orders: [],
+      notice: '',
     }
   },
   mounted() {
     if (this.token) this.loadProfile()
+    // VULN[xss-postmessage]: a window 'message' handler with NO origin check writes
+    // attacker-controlled data into a v-html sink, so any page that frames or opens
+    // this app can postMessage({notice:'<img src=x onerror=alert(document.domain)>'})
+    // and run script in this origin (DOM XSS via postMessage).
+    window.addEventListener('message', (e) => {
+      const m = e.data || {}
+      if (m.notice !== undefined) this.notice = m.notice
+    })
   },
   methods: {
     authHeaders() {
