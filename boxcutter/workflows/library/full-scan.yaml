@@ -1,11 +1,11 @@
 name: full-scan
-help: probe liveness (httpx), then run the full web-scan DAST on each live URL
+help: probe liveness (httpx), then nuclei template passes + the full web-scan DAST on each live URL
 input: target
 output: findings
 
 steps:
-  # liveness probe - full-scan is just web-scan with an httpx front door, so the
-  # crawl/spec/param/secret logic lives in web-scan (single source of truth).
+  # liveness probe - the crawl/spec/param/secret DAST logic lives in web-scan
+  # (single source of truth); nuclei template scanning runs first via nuclei-scan.
   - tool: httpx
     target: ${target}
     pick: url
@@ -13,6 +13,9 @@ steps:
 
   - for_each: ${live}
     do:
+      - workflow: nuclei-scan
+        target: ${live.item}
+        save: findings
       - workflow: web-scan
         target: ${live.item}
         save: findings

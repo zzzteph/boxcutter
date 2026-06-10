@@ -1,0 +1,26 @@
+name: nuclei-scan
+help: nuclei template passes against one URL - exposures, misconfig, cve2026, kev, exposed-panels (each with tuned severity)
+input: url
+output: findings
+
+steps:
+  - tool: nuclei
+    target: ${url}
+    args: '--opt-args="-tags exposures -severity critical,high,medium,low"'
+    save: findings
+  - tool: nuclei
+    target: ${url}
+    args: '--opt-args="-tags misconfig -severity critical,high,medium,low"'
+    save: findings
+  - tool: nuclei
+    target: ${url}
+    args: '--opt-args="-tags cve2026 -severity critical,high,medium"'
+    save: findings
+  - tool: nuclei
+    target: ${url}
+    args: '--opt-args="-tags kev -severity critical,high,medium"'
+    save: findings
+  - tool: nuclei
+    target: ${url}
+    args: '--opt-args="-tags panel -severity critical,high,medium"'
+    save: findings

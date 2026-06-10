@@ -1,5 +1,5 @@
 name: web-scan
-help: full DAST of one known URL (no httpx probe) - crawl -> nuclei -> zap-full -> fuzz/sqlmap/nuclei-dast per param URL -> graphql detect+audit -> secrets per JS
+help: full DAST of one known URL (no httpx probe) - crawl -> zap-full -> fuzz/sqlmap per param URL -> swagger -> graphql detect+audit -> secrets per JS
 input: url
 output: findings
 
@@ -24,13 +24,9 @@ steps:
   - select: ${urls | params | dedup}
     save: params
 
-  # scan the URL itself
+  # active-scan the URL itself (nuclei runs separately in full-scan)
   - for_each: ${live}
     do:
-      - tool: nuclei
-        target: ${live.item}
-        args: '--opt-args="-tags exposures,misconfig,cve -severity critical,high,medium"'
-        save: findings
       - tool: zap-scan-full
         target: ${live.item}
         save: findings
@@ -41,10 +37,6 @@ steps:
       - tool: fuzz
         target: ${params.item}
         args: --timeout 120
-        save: findings
-      - tool: nuclei
-        target: ${params.item}
-        args: --opt-args=-dast
         save: findings
       - tool: sqlmap
         target: ${params.item}

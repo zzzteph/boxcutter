@@ -1,5 +1,5 @@
 name: nuclei-env
-help: subfinder -> nuclei across the env (takeover on all hosts; exposures/misconfig/cve/default-login on live hosts)
+help: subfinder -> nuclei across the env (takeover on all hosts; nuclei-scan template passes on live hosts)
 input: target
 output: findings
 
@@ -7,15 +7,6 @@ steps:
   - tool: subfinder
     target: ${target}
     save: hosts
-
-  # Subdomain takeover: run on ALL discovered hosts - takeover candidates point at a
-  # dangling service and often don't serve a normal HTTP 200, so don't pre-filter them.
-  - for_each: ${hosts}
-    do:
-      - tool: nuclei
-        target: ${hosts.item}
-        args: '--opt-args="-tags takeover -severity critical,high,medium"'
-        save: findings
 
   # Everything else only needs LIVE HTTP services - probe with httpx first.
   - for_each: ${hosts}
@@ -27,23 +18,6 @@ steps:
 
   - for_each: ${live}
     do:
-      - tool: nuclei
+      - workflow: nuclei-scan
         target: ${live.item}
-        args: '--opt-args="-tags exposures -severity critical,high,medium,low"'
-        save: findings
-      - tool: nuclei
-        target: ${live.item}
-        args: '--opt-args="-tags misconfig -severity critical,high,medium,low"'
-        save: findings
-      - tool: nuclei
-        target: ${live.item}
-        args: '--opt-args="-tags cve2026 -severity critical,high,medium"'
-        save: findings
-      - tool: nuclei
-        target: ${live.item}
-        args: '--opt-args="-tags kev -severity critical,high,medium"'
-        save: findings
-      - tool: nuclei
-        target: ${live.item}
-        args: '--opt-args="-tags panel -severity critical,high,medium"'
         save: findings
