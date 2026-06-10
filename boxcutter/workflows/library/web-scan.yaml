@@ -1,5 +1,5 @@
 name: web-scan
-help: full DAST of one known URL (no httpx probe) - crawl -> nuclei -> zap-full -> fuzz/sqlmap/nuclei-dast per param URL -> secrets per JS
+help: full DAST of one known URL (no httpx probe) - crawl -> nuclei -> zap-full -> fuzz/sqlmap/nuclei-dast per param URL -> graphql detect+audit -> secrets per JS
 input: url
 output: findings
 
@@ -74,6 +74,19 @@ steps:
         save: findings
       - tool: sqlmap
         target: ${api_urls.item}
+        save: findings
+
+  # discover GraphQL endpoint(s) on the target, then audit each (introspection,
+  # CSRF, batching, arg injection, mutation exposure) - crawling rarely reaches them
+  - for_each: ${live}
+    do:
+      - tool: graphql-detect
+        target: ${live.item}
+        save: gql
+  - for_each: ${gql}
+    do:
+      - tool: graphql-audit
+        target: ${gql.item}
         save: findings
 
   # secrets in each JS file
