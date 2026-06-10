@@ -92,17 +92,11 @@ jobs:
       scanHeadersAllRequests: false
       delayInMs: 100
       threadPerHost: 2
-      maxRuleDurationInMins: 3
-      maxScanDurationInMins: 10
+      maxRuleDurationInMins: 1
+      maxScanDurationInMins: 8
     policyDefinition:
       defaultStrength: medium
       defaultThreshold: low
-      rules:
-        # DOM-based XSS (id 40026) is browser-based and off in the default policy;
-        # enable it so JS sinks (e.g. ?name= -> innerHTML) are actually tested.
-        - id: 40026
-          strength: high
-          threshold: low
 
   - type: report
     parameters:

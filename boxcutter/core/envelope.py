@@ -38,6 +38,42 @@ def set_output_kind(kind: str) -> None:
     _OUTPUT_KIND = kind if kind in KINDS else "items"
 
 
+# Severity ordering for findings output: worst first.
+_SEVERITY_RANK = {
+    "critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4, "informational": 4,
+}
+
+
+def _sort_by_severity(data: list[Any]) -> list[Any]:
+    """Stable-sort findings worst-first (critical/high on top). Leaves the list
+    untouched unless every item is a dict carrying a ``severity``."""
+    if not isinstance(data, list) or not data:
+        return data
+    if not all(isinstance(item, dict) and "severity" in item for item in data):
+        return data
+    return sorted(data, key=lambda f: _SEVERITY_RANK.get(str(f.get("severity", "")).lower(), 5))
+
+
+def _dedup_findings(data: list[Any]) -> list[Any]:
+    """Drop duplicate findings, keeping the first (highest-severity after sorting).
+    Two findings are the same when their (title, url) match - the same issue at the
+    same location, however many tools/passes surfaced it."""
+    if not isinstance(data, list) or not data:
+        return data
+    seen: set = set()
+    out: list[Any] = []
+    for item in data:
+        if isinstance(item, dict):
+            key = (str(item.get("title", "")).strip().lower(), str(item.get("url", "")).strip())
+        else:
+            key = ("", str(item))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
 def output_result(
     data: list[Any],
     output_file: str | None = None,
@@ -49,8 +85,11 @@ def output_result(
     """Emit the standard ``{success, data, error}`` envelope.
 
     ``extra`` injects additional top-level keys (e.g. ``sources`` for
-    git-extract). ``pretty`` switches to indented JSON.
+    git-extract). ``pretty`` switches to indented JSON. Findings are sorted
+    worst-first (critical/high on top) and deduplicated by (title, url).
     """
+    if _OUTPUT_KIND == "findings":
+        data = _dedup_findings(_sort_by_severity(data))
     payload: dict[str, Any] = {
         "success": error is None,
         "kind": _OUTPUT_KIND,

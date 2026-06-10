@@ -111,7 +111,7 @@ boxcutter zap-scan-full https://example.com
 | Tool | Arguments | kind | What it does |
 |---|---|---|---|
 | `path-fuzz <url-with-FUZZ>` | `--method` `--header` `--timeout` | findings | brute-force the `FUZZ` position with the built-in wordlist |
-| `fuzz <url>` | `--method` `--data` `--header` `--status` `--timeout` | findings | inject params/path/body (XSS, SQLi, SSTI, LFI, RCE, XXE, NoSQL, GraphQL, error-disclosure) or enumerate IDs with `{NUMBERS}` |
+| `fuzz <url>` | `--method` `--data` `--header` `--status` `--timeout` `--payload` `--payload-file` `--pattern` | findings | inject params/path/body (XSS, SQLi, SSTI, LFI, RCE, XXE, NoSQL, GraphQL, error-disclosure), enumerate IDs with `{NUMBERS}`, or send your own `--payload` |
 
 `fuzz` is signal-based, not blind. An explicit marker picks the mode: `{NUMBERS}`
 (or `{NUMBERS[m-n]}`) enumerates numeric IDs for IDOR — soft-404 filtered and
@@ -121,6 +121,12 @@ each of those). Dynamic payloads (`{RANDOM}` reflection, `EXPR` evaluation) are
 re-fired to confirm (fast-path ≥2/3, else ≥4/5); time-based blind injection is
 reported only when response time scales monotonically with the injected delay.
 
+**Bring your own payload** with `--payload` (repeatable) / `--payload-file` — this
+skips the built-in set and sends only your payload(s) at the fuzz point (the same
+points: `{FUZZ}`, query params, or ID path segments). Add `--pattern REGEX` to
+report a hit only when the response matches; without it, fuzz just sends each
+payload and reports what came back.
+
 ```bash
 boxcutter fuzz "https://example.com/?id=1"                     # inject every query param
 boxcutter fuzz "https://example.com/search?q={FUZZ}"           # inject one marked position
@@ -128,6 +134,8 @@ boxcutter fuzz "https://example.com/api/{NUMBERS}" --table     # enumerate numer
 boxcutter fuzz "https://example.com/api/{NUMBERS[1-500]}"      # enumerate a range
 boxcutter path-fuzz "https://example.com/FUZZ"
 boxcutter fuzz "https://example.com/api" --method POST --data '{"q":"{FUZZ}"}'
+# custom payload + pattern (only reports on match); drop --pattern to just send it
+boxcutter fuzz "https://example.com/p?id=1" --payload "' OR '1'='1" --pattern "sql syntax|syntax error"
 ```
 
 ### Secrets / source
@@ -199,6 +207,7 @@ tool; `--header "K: V"` passes auth to every inner tool.
 | `full-scan <domain\|url>` | crawl (url-crawl + js-endpoints) -> nuclei -> zap-full -> fuzz/sqlmap/nuclei-dast per param URL -> secrets per JS |
 | `dast-scan <url>` | DAST bundle on one URL: fuzz + nuclei -dast + sqlmap + zap-scan-url |
 | `wayback-scan <domain>` | archive URLs -> sqlmap / fuzz / zap-scan-url per param URL, scan-secrets per JS |
+| `wayback-custom-scan <domain>` | wayback -> `fuzz` each param URL with **your** payload (`--arg fuzz="--payload ... --pattern ..."`), scan-secrets per JS |
 | `url-crawl <url>` | Katana + ZAP crawlers, merged and deduped |
 | `secrets-hunter <domain>` | gather JS files (url-crawl + wayback, JS only) -> scan-secrets each |
 | `swagger-fuzz <spec>` | parse a spec and fuzz every parameterised endpoint |
