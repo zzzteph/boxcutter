@@ -19,16 +19,9 @@ steps:
         target: ${js.item}
         save: findings
 
-  # scan each parameterised URL
+  # DAST each parameterised URL (fuzz + nuclei -dast + sqlmap + zap-scan-url)
   - for_each: ${params}
     do:
-      - tool: sqlmap
-        target: ${params.item}
-        save: findings
-      - tool: fuzz
-        target: ${params.item}
-        args: --timeout 120
-        save: findings
-      - tool: zap-scan-url
+      - workflow: dast-scan
         target: ${params.item}
         save: findings

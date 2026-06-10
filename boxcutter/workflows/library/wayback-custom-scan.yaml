@@ -1,0 +1,35 @@
+name: wayback-custom-scan
+help: wayback URLs - scan-secrets on JS, then fuzz each parameterised URL with YOUR payload (--arg fuzz="--payload ... --pattern ...")
+input: target
+output: findings
+
+# Like wayback-scan, but the param loop runs `fuzz` instead of `dast-scan`, so you
+# can drive it with your own payload/pattern via --arg, e.g.:
+#   boxcutter workflow wayback-custom-scan example.com \
+#     --arg fuzz="--payload \"' OR '1'='1\" --pattern \"sql syntax|syntax error\""
+# Without a pattern, fuzz just sends each payload and reports what came back.
+# (Each wayback URL already has params, so no {FUZZ} marker is needed - fuzz
+# injects the payload into the discovered params.)
+
+steps:
+  - tool: wayback
+    target: ${target}
+    save: urls
+  - select: ${urls | js}
+    save: js
+  - select: ${urls | params | dedup}
+    save: params
+
+  # secrets in each JS file
+  - for_each: ${js}
+    do:
+      - tool: scan-secrets
+        target: ${js.item}
+        save: findings
+
+  # fuzz each parameterised URL with the user's payload/pattern (via --arg fuzz=...)
+  - for_each: ${params}
+    do:
+      - tool: fuzz
+        target: ${params.item}
+        save: findings

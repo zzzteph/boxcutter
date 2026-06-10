@@ -50,6 +50,32 @@ steps:
         target: ${params.item}
         save: findings
 
+  # discover OpenAPI/Swagger specs on the target, then scan every documented
+  # endpoint (crawling alone never reaches an unlinked API)
+  - for_each: ${live}
+    do:
+      - tool: swagger-specs
+        target: ${live.item}
+        save: specs
+  - for_each: ${specs}
+    do:
+      - tool: swagger-endpoints
+        target: ${specs.item}
+        args: --fuzzable
+        save: api_urls
+      - tool: zap-scan-openapi
+        target: ${specs.item}
+        save: findings
+  - for_each: ${api_urls}
+    do:
+      - tool: fuzz
+        target: ${api_urls.item}
+        args: --timeout 120
+        save: findings
+      - tool: sqlmap
+        target: ${api_urls.item}
+        save: findings
+
   # secrets in each JS file
   - for_each: ${urls | js}
     do:

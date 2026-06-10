@@ -4,6 +4,7 @@ Port of app:js-endpoints."""
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 from ..core import http
 from ..core.args import add_common_args
@@ -40,6 +41,12 @@ def add_arguments(parser) -> None:
 def run(args) -> int:
     js_url = args.js_url.strip()
     base_url = (args.base_url or "").rstrip("/")
+    # Default the base to the JS file's own origin so discovered paths come out as
+    # absolute, scannable URLs (a relative "/api/x" can't be fed to fuzz/sqlmap/zap).
+    if not base_url:
+        parts = urlparse(js_url)
+        if parts.scheme and parts.netloc:
+            base_url = f"{parts.scheme}://{parts.netloc}"
 
     try:
         response = http.get(js_url, timeout=30, verify=True)

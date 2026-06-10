@@ -901,6 +901,41 @@ def profile_update():
     return jsonify({"updated": dict(row) if row else None})
 
 
+def _gqt(name, kind="OBJECT"):
+    return {"name": name, "kind": kind, "ofType": None}
+
+
+def _gqf(name, ret, args=()):
+    return {"name": name, "type": ret, "args": [{"name": an, "type": at} for an, at in args]}
+
+
+_ID, _STR, _BOOL = _gqt("ID", "SCALAR"), _gqt("String", "SCALAR"), _gqt("Boolean", "SCALAR")
+_USER, _ORDER, _ART, _SYS = _gqt("User"), _gqt("Order"), _gqt("HelpArticle"), _gqt("SystemInfo")
+
+
+def _gqobj(name, *leaves):
+    return {"name": name, "kind": "OBJECT", "fields": [_gqf(n, _STR) for n in leaves]}
+
+
+# Faithful-ish introspection so a schema-aware client (e.g. boxcutter graphql-audit)
+# can build valid queries against the resolvers below.
+_GQL_SCHEMA = {
+    "queryType": {"name": "Query"}, "mutationType": {"name": "Mutation"}, "types": [
+        _gqobj("User", "id", "username", "email", "role", "api_token"),
+        _gqobj("Order", "id", "item", "total", "address", "card_last4"),
+        _gqobj("HelpArticle", "id", "slug", "title", "body", "published"),
+        _gqobj("SystemInfo", "version", "jwtSecret", "dbPath", "flag"),
+        {"name": "Query", "kind": "OBJECT", "fields": [
+            _gqf("user", _USER, [("id", _ID)]), _gqf("users", _USER),
+            _gqf("order", _ORDER, [("id", _ID)]),
+            _gqf("helpArticle", _ART, [("slug", _STR)]), _gqf("helpArticles", _ART),
+            _gqf("systemInfo", _SYS)]},
+        {"name": "Mutation", "kind": "OBJECT", "fields": [
+            _gqf("setRole", _BOOL, [("username", _STR), ("role", _STR)]),
+            _gqf("updateHelpArticle", _ART, [("slug", _STR), ("body", _STR)])]},
+    ]}
+
+
 @app.route("/graphql", methods=["GET", "POST"])
 def graphql():
     if request.method == "GET":
@@ -912,17 +947,22 @@ def graphql():
         query = (request.get_json(silent=True) or {}).get("query", "") or request.data.decode("utf-8", "replace")
     try:
         import re
-        # VULN[graphql-introspection]: schema introspection left enabled.
+        # __typename meta field (supports aliasing, so batching checks resolve)
+        if "__typename" in query and "__schema" not in query:
+            aliases = re.findall(r"(\w+)\s*:\s*__typename", query)
+            if aliases:
+                return jsonify({"data": {a: "Query" for a in aliases}})
+            return jsonify({"data": {"__typename": "Query"}})
+        # VULN[graphql-introspection]: schema introspection left enabled (full schema + args/types).
         if "__schema" in query or "__type" in query:
-            def _f(*ns):
-                return [{"name": n} for n in ns]
-            return jsonify({"data": {"__schema": {
-                "queryType": {"name": "Query"}, "mutationType": {"name": "Mutation"}, "types": [
-                    {"name": "User", "fields": _f("id", "username", "email", "role", "api_token")},
-                    {"name": "Order", "fields": _f("id", "item", "total", "address", "card_last4")},
-                    {"name": "HelpArticle", "fields": _f("id", "slug", "title", "body", "published")},
-                    {"name": "Query", "fields": _f("user", "users", "order", "systemInfo", "helpArticles", "helpArticle")},
-                    {"name": "Mutation", "fields": _f("setRole", "updateHelpArticle")}]}}})
+            return jsonify({"data": {"__schema": _GQL_SCHEMA}})
+        # a bare mutation with no args -> GraphQL-style "argument required" validation error,
+        # so a dry-probe sees the mutation is reachable WITHOUT executing it.
+        bare = re.search(r"mutation\s*\{\s*(\w+)\s*\}", query)
+        if bare and bare.group(1) in ("setRole", "updateHelpArticle"):
+            arg = "username" if bare.group(1) == "setRole" else "slug"
+            return jsonify({"errors": [{"message": f'Field "{bare.group(1)}" argument "{arg}" '
+                                        f'of type "String!" is required but not provided'}]}), 400
         # VULN[graphql-secret-field]: a query field that returns server secrets.
         if "systemInfo" in query or "serverConfig" in query:
             return jsonify({"data": {"systemInfo": {"version": "2.3.1", "jwtSecret": JWT_SECRET,

@@ -309,3 +309,30 @@ Good first targets for any scanner or manual session:
 - **Injection**: parameters on `/search`, `/product?id=`, `/api/products?q=`, `/greet?name=`,
   the `/api/lab/*` matrix, and the GraphQL endpoint `/graphql`.
 - **Secrets / JS**: `/static/js/config.js` and `/static/js/app.js` (keys + hidden routes).
+
+## Verifying with boxcutter
+
+Two layers of verification:
+
+- **`python checks.py`** — exploits **every** planted bug directly (ground truth, ~100 checks). Use this to prove a finding is real.
+- **boxcutter** — confirms the subset an automated scanner can reach, grouped below. (If boxcutter runs in a container and the app on your host, use `http://host.docker.internal:8000`.)
+
+```bash
+# one token for the auth-gated groups
+TOKEN=$(curl -s -X POST http://localhost:8000/api/login \
+  -H 'Content-Type: application/json' -d '{"username":"user","password":"user"}' \
+  | python -c "import sys,json;print(json.load(sys.stdin)['token'])")
+```
+
+| Finding group | boxcutter command | Confirms |
+|---|---|---|
+| **Everything (one shot)** | `boxcutter workflow web-scan http://localhost:8000 --header "Authorization: Bearer $TOKEN"` | crawl + spec + JS routes + param DAST + exposures |
+| **Exposures / info-disclosure** | `boxcutter nuclei http://localhost:8000 --opt-args "-tags exposures,misconfig,springboot"` and `boxcutter dirsearch http://localhost:8000` | `.env`, `.git/config`, actuators, heapdump, `backup.sql`, phpinfo |
+| **Secrets in JS** | `boxcutter scan-secrets http://localhost:8000/static/js/config.js` | AWS / Stripe / JWT keys |
+| **API discovery** | `boxcutter swagger-specs localhost:8000` | finds `/api/openapi.json` |
+| **API injection (authed)** | `boxcutter workflow swagger-fuzz http://localhost:8000/api/openapi.json --header "Authorization: Bearer $TOKEN"` | SQLi / SSTI / cmd / reflection on documented endpoints |
+| **Storefront injection** | `boxcutter fuzz "http://localhost:8000/search?q=1"` and `boxcutter fuzz "http://localhost:8000/product?id=1"` | reflected XSS, SQLi (error/blind/time) |
+| **Hidden XHR routes** | `boxcutter js-endpoints http://localhost:8000/static/js/app.js` (absolute URLs) → `boxcutter fuzz` each `?param` route | hidden SQLi / SSRF / error-disclosure |
+| **ZAP active scan (authed)** | `boxcutter zap-scan-openapi http://localhost:8000/api/openapi.json --header "Authorization: Bearer $TOKEN"` | ZAP's view of the API (note: rates some SQLi `High (Low)` → raise confidence to see it) |
+
+**Not auto-verifiable by the scanner — use `checks.py`:** access-control / IDOR / BFLA / tenant-isolation, business logic (price, coupon, payment-confirmation replay, fee-omit), client-side / DOM XSS, GraphQL (introspection / secret field / `setRole` / CMS), and the JWT-`kid`/`alg:none` forgeries. These need an auth oracle, a JS engine, or a known request — outside single-pass DAST.

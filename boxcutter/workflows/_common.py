@@ -27,6 +27,7 @@ HEADER_CAPABLE = {
     "screenshot", "fuzz", "path-fuzz", "http-request", "swagger-parser",
     "swagger-specs", "swagger-endpoints",
     "zap-scan-url", "zap-scan-openapi", "zap-scan-full", "zap-crawl",
+    "graphql-detect", "graphql-audit",
 }
 
 

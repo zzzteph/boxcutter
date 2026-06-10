@@ -81,6 +81,13 @@ def add_arguments(parser) -> None:
     parser.add_argument("--status", default="200,201,204,301,302,307",
                         help="Status codes to report in numeric mode (default excludes 401/403/5xx)")
     parser.add_argument("--timeout", type=int, default=300, help="Max total seconds to spend fuzzing")
+    parser.add_argument("--payload", action="append", default=[], metavar="PAYLOAD",
+                        help="Send ONLY this exact payload at {FUZZ} (repeatable); skips the built-in payload set")
+    parser.add_argument("--payload-file", default=None, metavar="FILE",
+                        help="Read payloads to send at {FUZZ}, one per line")
+    parser.add_argument("--pattern", default=None, metavar="REGEX",
+                        help="With --payload: report a hit only when this regex matches the response "
+                             "(no --pattern: just send each payload and report what came back)")
     add_common_args(parser)
 
 
@@ -98,6 +105,26 @@ def run(args) -> int:
     dbg = debug_logger(args.debug)
     sess = http.session(extra_headers or None)
     deadline = time.time() + max(1, args.timeout)
+
+    # Custom-payload mode: user supplies the exact payload(s) to send at {FUZZ}.
+    payloads = _collect_payloads(args)
+    if payloads is None:
+        output_result([], args.output, f"Cannot read --payload-file: {args.payload_file!r}")
+        return 1
+    if payloads:
+        # Same fuzz points as default mode (explicit {FUZZ}, query params, or
+        # auto-derived ID path segments) - just with YOUR payload/pattern.
+        custom: list[dict] = []
+        for resolved in _auto_fuzz_targets(target):
+            if time.time() >= deadline:
+                break
+            if not is_valid_url(resolved):
+                output_result([], args.output, "Invalid URL.")
+                return 1
+            custom += _run_custom_mode(method, resolved, args.data, payloads, args.pattern, sess, deadline, dbg)
+        dbg(f"Found {len(custom)} finding(s).")
+        output_result(custom, args.output)
+        return 0
 
     findings: list[dict] = []
     for resolved in _auto_fuzz_targets(target):
@@ -286,6 +313,75 @@ def _match(pattern: str, body: str):
         return re.search(pattern, body, re.I)
     except re.error:
         return None
+
+
+# -- custom-payload mode (bring your own payloads) ----------------------------
+
+def _collect_payloads(args) -> list[str] | None:
+    """Gather --payload values + --payload-file lines. None on a file error."""
+    payloads = list(getattr(args, "payload", None) or [])
+    path = getattr(args, "payload_file", None)
+    if path:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                payloads += [line.rstrip("\r\n") for line in fh if line.strip()]
+        except OSError:
+            return None
+    return payloads
+
+
+def _param_label(param: str) -> str:
+    return {"__URL_FUZZ__": "FUZZ", "__BODY_FUZZ__": "body"}.get(param, param)
+
+
+def _run_custom_mode(method, target, body, payloads, pattern, sess, deadline, dbg) -> list[dict]:
+    """Send each user-supplied payload at the fuzz point. With ``pattern``, report
+    only responses the regex matches; without it, report what each payload returned."""
+    points = _param_targets(target, body)
+    if not points:
+        dbg(f"No fuzz point ({{FUZZ}} or query param) in {target}")
+        return []
+    findings: list[dict] = []
+    for param in points:
+        label = _param_label(param)
+        matched: list[tuple] = []
+        sent: list[tuple] = []
+        for payload in payloads:
+            if time.time() >= deadline:
+                dbg("Timeout reached, stopping.")
+                break
+            resp = _substitute(method, target, body, param, payload, sess)
+            if resp["error"] is not None:
+                dbg(f"  [custom] {label} <= {payload!r} -> error: {resp['error']}")
+                continue
+            status, nbytes = resp["status"], resp["body_bytes"]
+            dbg(f"  [custom] {label} <= {payload!r} -> {status} {nbytes}b")
+            if pattern:
+                m = _match(pattern, resp["body"] or "")
+                if m:
+                    matched.append((payload, m.group(0)[:200], resp["_url"], status))
+            else:
+                snippet = " ".join((resp["body"] or "")[:200].split())
+                sent.append((payload, status, nbytes, snippet, resp["_url"]))
+        if pattern and matched:
+            findings.append(_custom_match_finding(method, label, pattern, matched))
+        elif not pattern and sent:
+            findings.append(_custom_sent_finding(method, label, sent))
+    return findings
+
+
+def _custom_match_finding(method, label, pattern, matched) -> dict:
+    lines = [f"Pattern:  {pattern}", f"Param:    {label}", f"Matched ({len(matched)}):"]
+    lines += [f"  - {p}  =>  [{st}] {ev}" for p, ev, _u, st in matched[:50]]
+    return {"severity": "high", "info": "\n".join(lines), "url": matched[0][2],
+            "title": f"[{method}] [custom-match] in '{label}' ({len(matched)} matched)"}
+
+
+def _custom_sent_finding(method, label, sent) -> dict:
+    lines = [f"Param:    {label}", f"Sent {len(sent)} payload(s):"]
+    lines += [f"  - {p}  =>  [{st}] {n}b  {snip}" for p, st, n, snip, _u in sent[:50]]
+    return {"severity": "info", "info": "\n".join(lines), "url": sent[0][4],
+            "title": f"[{method}] [custom] sent {len(sent)} payload(s) to '{label}'"}
 
 
 def _new_match(pattern: str, body: str, baseline_body: str, cache: dict):

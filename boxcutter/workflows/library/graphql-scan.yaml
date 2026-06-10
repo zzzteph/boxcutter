@@ -1,0 +1,15 @@
+name: graphql-scan
+help: discover GraphQL endpoint(s) on a target, then audit each (introspection, CSRF, batching, injection, mutation exposure)
+input: target
+output: findings
+
+steps:
+  - tool: graphql-detect
+    target: ${target}
+    save: gql
+
+  - for_each: ${gql}
+    do:
+      - tool: graphql-audit
+        target: ${gql.item}
+        save: findings

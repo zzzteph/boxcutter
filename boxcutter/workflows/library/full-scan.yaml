@@ -1,10 +1,11 @@
 name: full-scan
-help: crawl, then DAST every param URL and scan secrets in JS
+help: probe liveness (httpx), then run the full web-scan DAST on each live URL
 input: target
 output: findings
 
 steps:
-  # discovery
+  # liveness probe - full-scan is just web-scan with an httpx front door, so the
+  # crawl/spec/param/secret logic lives in web-scan (single source of truth).
   - tool: httpx
     target: ${target}
     pick: url
@@ -12,49 +13,6 @@ steps:
 
   - for_each: ${live}
     do:
-      - tool: url-crawl
+      - workflow: web-scan
         target: ${live.item}
-        save: urls
-
-  - for_each: ${urls | js}
-    do:
-      - tool: js-endpoints
-        target: ${urls.item}
-        pick: endpoints.url
-        save: urls
-
-  - select: ${urls | params | dedup}
-    save: params
-
-  # scan each live URL
-  - for_each: ${live}
-    do:
-      - tool: nuclei
-        target: ${live.item}
-        args: '--opt-args="-tags exposures,misconfig,cve -severity critical,high,medium"'
-        save: findings
-      - tool: zap-scan-full
-        target: ${live.item}
-        save: findings
-
-  # scan each parameterised URL
-  - for_each: ${params}
-    do:
-      - tool: fuzz
-        target: ${params.item}
-        args: --timeout 120
-        save: findings
-      - tool: nuclei
-        target: ${params.item}
-        args: --opt-args=-dast
-        save: findings
-      - tool: sqlmap
-        target: ${params.item}
-        save: findings
-
-  # secrets in each JS file
-  - for_each: ${urls | js}
-    do:
-      - tool: scan-secrets
-        target: ${urls.item}
         save: findings

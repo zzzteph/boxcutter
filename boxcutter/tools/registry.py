@@ -12,6 +12,8 @@ from . import (
     dnsx,
     fuzz,
     git_extract,
+    graphql_audit,
+    graphql_detect,
     http_request,
     httpx_probe,
     js_endpoints,
@@ -68,6 +70,9 @@ TOOLS = [
     swagger_parser,
     swagger_endpoints,
     swagger_specs,
+    # GraphQL
+    graphql_detect,
+    graphql_audit,
     # Generic
     http_request,
 ]

@@ -106,9 +106,9 @@ boxcutter js-endpoints https://example.com/app.js --base-url https://example.com
 | `sqlmap <url>` | `--opt-args` `--header` | findings | confirm + exploit SQL injection |
 | `dirb <url>` | `--wordlist` `--timeout` `--opt-args` | findings | directory/file brute-force (C, fast) |
 | `dirsearch <url>` | `--timeout` `--header` | findings | directory/file brute-force (Python, flexible) |
-| `zap-scan-url <url>` | `--timeout` | findings | active scan of one exact URL, no crawling |
-| `zap-scan-full <url>` | `--timeout` | findings | crawl + active scan of a whole site |
-| `zap-scan-openapi <spec>` | `--timeout` | findings | active scan driven by an OpenAPI/Swagger spec |
+| `zap-scan-url <url>` | `--timeout` `--header` | findings | active scan of one exact URL, no crawling |
+| `zap-scan-full <url>` | `--timeout` `--header` | findings | crawl + active scan of a whole site |
+| `zap-scan-openapi <spec>` | `--timeout` `--header` | findings | active scan driven by an OpenAPI/Swagger spec |
 
 ```bash
 boxcutter nuclei https://example.com --opt-args "-tags cve -severity high,critical"
@@ -117,6 +117,9 @@ boxcutter dirsearch https://example.com
 boxcutter zap-scan-url "https://example.com/?id=1"
 boxcutter zap-scan-full https://example.com
 ```
+
+ZAP tools inject any `--header` into **every** request (via the Replacer add-on),
+so they scan behind auth too — see [Authenticated scanning](#authenticated-scanning).
 
 ### Fuzzing
 
@@ -168,6 +171,18 @@ boxcutter swagger-endpoints https://api.example.com/openapi.json --fuzzable
 boxcutter swagger-specs api.example.com
 ```
 
+### GraphQL
+
+| Tool | Arguments | kind | What it does |
+|---|---|---|---|
+| `graphql-detect <host>` | `--timeout` `--header` | urls | probe common paths with `{__typename}`; list the GraphQL endpoint URL(s) |
+| `graphql-audit <url>` | `--timeout` `--header` | findings | introspection, GET/CSRF, batching, verbose-error/secret leaks, schema-guided arg injection, and mutation exposure (**dry-probe only** — never executes a mutation) |
+
+```bash
+boxcutter graphql-detect api.example.com
+boxcutter graphql-audit https://api.example.com/graphql --header "Authorization: Bearer $T"
+```
+
 ### Generic
 
 | Tool | Arguments | kind | What it does |
@@ -203,6 +218,7 @@ tool; `--header "K: V"` passes auth to every inner tool.
 | `swagger-fuzz <spec>` | parse a spec and fuzz every parameterised endpoint |
 | `swagger-dast <spec>` | DAST bundle against every Swagger endpoint |
 | `swagger-discover <host>` | probe common spec paths, then DAST every endpoint found |
+| `graphql-scan <host>` | discover GraphQL endpoint(s), then audit each (graphql-detect → graphql-audit) |
 
 **Scan a whole environment** — start from a domain, enumerate subdomains first:
 
@@ -238,6 +254,64 @@ boxcutter workflow nuclei-env example.com --steps
 boxcutter workflow takeover-env example.com
 boxcutter workflow env-scan example.com --arg fuzz="--timeout 60"
 ```
+
+### Authenticated scanning
+
+Pass `--header "Name: Value"` (repeatable) to scan behind auth. On a **workflow** it
+propagates to every inner tool that supports headers — fuzz, sqlmap, nuclei, dirsearch,
+the swagger tools, and all four ZAP tools (which inject it into every request via the
+Replacer add-on). The same flag works on each tool directly.
+
+```bash
+TOKEN="eyJhbGci..."   # obtain once, e.g. from the API's login endpoint
+
+# --- without auth (public surface only) ---
+boxcutter workflow full-scan https://example.com --steps
+boxcutter fuzz       "https://example.com/api/search?q=1"
+boxcutter zap-scan-url "https://example.com/api/search?q=1"
+
+# --- with auth (reaches token-gated endpoints) ---
+boxcutter workflow full-scan https://example.com --steps \
+  --header "Authorization: Bearer $TOKEN"
+boxcutter fuzz         "https://example.com/api/search?q=1" --header "Authorization: Bearer $TOKEN"
+boxcutter zap-scan-url "https://example.com/api/search?q=1" --header "Authorization: Bearer $TOKEN"
+
+# several headers - just repeat the flag (token + API key + tenant)
+boxcutter workflow dast-scan "https://example.com/api/x?id=1" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "X-Api-Key: $KEY" \
+  --header "X-Tenant-Id: 42"
+```
+
+Headers are keyed by name (a repeated name keeps the last value). ZAP adds the header if
+missing / replaces it if present, on spider, active-scan **and** OpenAPI-import requests.
+
+### Scanning an OpenAPI / Swagger spec
+
+Point a tool or workflow at the spec URL. Two engines: **ZAP** (`zap-scan-openapi` —
+active scan driven from the spec) and the **swagger bundle** (`swagger-dast` — parse the
+spec, then fuzz + nuclei `-dast` + sqlmap + zap-scan-url per endpoint). Add `--header`
+for an authenticated API.
+
+```bash
+# find / inspect the spec first (optional)
+boxcutter swagger-specs api.example.com
+boxcutter swagger-endpoints https://api.example.com/openapi.json --fuzzable
+
+# --- without auth ---
+boxcutter zap-scan-openapi https://api.example.com/openapi.json
+boxcutter workflow swagger-dast https://api.example.com/openapi.json
+boxcutter workflow swagger-discover api.example.com          # probe spec paths, then DAST
+
+# --- with auth (header is used for the spec fetch AND every scan request) ---
+boxcutter zap-scan-openapi https://api.example.com/openapi.json \
+  --header "Authorization: Bearer $TOKEN"
+boxcutter workflow swagger-dast https://api.example.com/openapi.json \
+  --header "Authorization: Bearer $TOKEN"
+```
+
+Tip: `--debug` prints the `zap.sh` command, including the `-config replacer.full_list(...)`
+rules, so you can confirm exactly which headers ZAP injects.
 
 ### Define your own (YAML)
 
