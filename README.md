@@ -4,7 +4,7 @@
 
 # boxcutter
 
-**A pentesting toolkit in one container. Every tool speaks JSON.**
+**A pentesting toolkit in one container.**
 
 ProjectDiscovery, OWASP ZAP, sqlmap, dirb, dirsearch and a set of Python
 recon/fuzz tools behind one CLI. Every command returns the same envelope on
@@ -14,29 +14,13 @@ stdout (quiet by default), so it fits a shell, a CI job, or an agent loop:
 { "success": true, "kind": "findings", "data": [], "error": null }
 ```
 
-## Run
+## Build and Run
 
 ```bash
-docker build -t boxcutter .                             # full (~3GB): ZAP, browsers, sqlmap, dirb, dirsearch
-docker build -t boxcutter:slim --target slim .          # slim (~870MB): no ZAP / browsers / dirb
-docker run --rm boxcutter --list                        # tools usable in this image (+ workflows)
-docker run --rm boxcutter subfinder example.com
+docker pull ghcr.io/zzzteph/boxcutter:latest
+docker run --rm boxcutter workflow web-scan https://google.com
 ```
 
-Or run from source — only needs `requests` (plus `PyYAML` for workflows):
-
-```bash
-pip install requests pyyaml && python3 boxcutter.py --list
-```
-
-**In every example below, `boxcutter` means either `docker run --rm boxcutter`
-or `python3 boxcutter.py`** — they're interchangeable.
-
-`--list` shows only the tools that actually run in the image you built (slim
-still has sqlmap/dirsearch; it only hides ZAP, `dirb`, and `screenshot`);
-`--list-all` shows them all, and a workflow just skips any tool that is missing.
-
-## Options
 
 | Option | Where | What it does |
 |---|---|---|
@@ -93,9 +77,9 @@ boxcutter wayback-domains example.com             # archived hostnames
 | `js-endpoints <js-url>` | `--base-url` | items | pull API endpoint references out of a JS file |
 
 ```bash
-boxcutter katana-crawl https://example.com --js
-boxcutter url-crawl https://example.com --params
-boxcutter js-endpoints https://example.com/app.js --base-url https://example.com
+boxcutter katana-crawl https://example.com
+boxcutter url-crawl https://example.com
+boxcutter js-endpoints https://example.com/app.js
 ```
 
 ### Vulnerability scanners
@@ -118,8 +102,6 @@ boxcutter zap-scan-url "https://example.com/?id=1"
 boxcutter zap-scan-full https://example.com
 ```
 
-ZAP tools inject any `--header` into **every** request (via the Replacer add-on),
-so they scan behind auth too — see [Authenticated scanning](#authenticated-scanning).
 
 ### Fuzzing
 
@@ -180,7 +162,7 @@ boxcutter swagger-specs api.example.com
 
 ```bash
 boxcutter graphql-detect api.example.com
-boxcutter graphql-audit https://api.example.com/graphql --header "Authorization: Bearer $T"
+boxcutter graphql-audit https://api.example.com/graphql
 ```
 
 ### Generic
@@ -263,7 +245,7 @@ the swagger tools, and all four ZAP tools (which inject it into every request vi
 Replacer add-on). The same flag works on each tool directly.
 
 ```bash
-TOKEN="eyJhbGci..."   # obtain once, e.g. from the API's login endpoint
+
 
 # --- without auth (public surface only) ---
 boxcutter workflow full-scan https://example.com --steps
@@ -272,14 +254,14 @@ boxcutter zap-scan-url "https://example.com/api/search?q=1"
 
 # --- with auth (reaches token-gated endpoints) ---
 boxcutter workflow full-scan https://example.com --steps \
-  --header "Authorization: Bearer $TOKEN"
-boxcutter fuzz         "https://example.com/api/search?q=1" --header "Authorization: Bearer $TOKEN"
-boxcutter zap-scan-url "https://example.com/api/search?q=1" --header "Authorization: Bearer $TOKEN"
+  --header "Authorization: Bearer TOKEN"
+boxcutter fuzz         "https://example.com/api/search?q=1" --header "Authorization: Bearer TOKEN"
+boxcutter zap-scan-url "https://example.com/api/search?q=1" --header "Authorization: Bearer TOKEN"
 
 # several headers - just repeat the flag (token + API key + tenant)
 boxcutter workflow dast-scan "https://example.com/api/x?id=1" \
-  --header "Authorization: Bearer $TOKEN" \
-  --header "X-Api-Key: $KEY" \
+  --header "Authorization: Bearer TOKEN" \
+  --header "X-Api-Key: TOKEN" \
   --header "X-Tenant-Id: 42"
 ```
 
@@ -305,9 +287,9 @@ boxcutter workflow swagger-discover api.example.com          # probe spec paths,
 
 # --- with auth (header is used for the spec fetch AND every scan request) ---
 boxcutter zap-scan-openapi https://api.example.com/openapi.json \
-  --header "Authorization: Bearer $TOKEN"
+  --header "Authorization: Bearer TOKEN"
 boxcutter workflow swagger-dast https://api.example.com/openapi.json \
-  --header "Authorization: Bearer $TOKEN"
+  --header "Authorization: Bearer TOKEN"
 ```
 
 Tip: `--debug` prints the `zap.sh` command, including the `-config replacer.full_list(...)`
