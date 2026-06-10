@@ -1,0 +1,15 @@
+name: url-crawl
+help: crawl a URL with Katana + ZAP, merged and deduped - the crawl you usually want
+input: target
+output: urls
+
+# Was a Python tool that drove both crawlers in-process; now a workflow so each
+# crawler runs through the normal tool path (header/debug propagation, graceful
+# skip when a binary is missing). Filter the result with ${... | js|params}.
+steps:
+  - tool: katana-crawl
+    target: ${target}
+    save: urls
+  - tool: zap-crawl
+    target: ${target}
+    save: urls

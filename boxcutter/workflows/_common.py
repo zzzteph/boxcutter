@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 from ..core import fsutil
 from ..core.envelope import read_envelope
-from ..core.runner import tool_data
+from ..core.runner import run_tool
 
 # Tools that accept a "--header" option; a workflow's --header propagates to
 # these. ZAP tools inject the headers into every request via the Replacer
@@ -76,15 +76,26 @@ def _parse_overrides(items: list[str] | None) -> dict[str, list[str]]:
     return overrides
 
 
-def call(module, base_argv: list[str], args) -> list:
+def call(module, base_argv: list[str], args, dbg=None) -> list:
     """Run ``module`` with ``base_argv`` plus the user's ``--arg`` override, and
-    propagate any workflow ``--header`` to tools that support one."""
+    propagate any workflow ``--header`` to tools that support one.
+
+    ``--debug`` is forwarded too, so running a workflow with ``--debug`` surfaces
+    each underlying tool's own diagnostics (not just the step header line). When a
+    tool reports an error it is logged via ``dbg`` instead of being silently
+    dropped - a crashing/failing step used to vanish into an empty result."""
     overrides = _parse_overrides(getattr(args, "tool_overrides", None))
     argv = [*base_argv, *overrides.get(module.NAME, [])]
     if module.NAME in HEADER_CAPABLE:
         for header in getattr(args, "header", []) or []:
             argv += ["--header", header]
-    return tool_data(module, argv)
+    if getattr(args, "debug", False):
+        argv += ["--debug"]
+    env = run_tool(module, argv)
+    if dbg and env.get("error"):
+        dbg(f"  {module.NAME} error: {env['error']}")
+    data = env.get("data", [])
+    return data if isinstance(data, list) else []
 
 
 def run_workflow(module, target: str, args) -> list:

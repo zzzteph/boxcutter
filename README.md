@@ -72,13 +72,16 @@ boxcutter wayback-domains example.com             # archived hostnames
 | Tool | Arguments | kind | What it does |
 |---|---|---|---|
 | `katana-crawl <url>` | `--js` `--params` `--timeout` `--opt-args` `--header` | urls | active crawl of a site with Katana |
-| `zap-crawl <url>` | `--js` `--params` `--timeout` | urls | ZAP spider + AJAX spider (reaches JS-rendered links) |
-| `url-crawl <url>` | `--js` `--params` | urls | Katana + ZAP merged and deduped — the crawl you usually want |
+| `zap-crawl <url>` | `--js` `--params` `--timeout` `--header` | urls | ZAP spider + AJAX spider (reaches JS-rendered links) |
 | `js-endpoints <js-url>` | `--base-url` | items | pull API endpoint references out of a JS file |
+
+> Katana + ZAP merged and deduped — the crawl you usually want — is the
+> `url-crawl` **workflow**: `boxcutter workflow url-crawl <url>` (filter with
+> `--js`/`--params` no longer applies; use it as a building block in scans).
 
 ```bash
 boxcutter katana-crawl https://example.com
-boxcutter url-crawl https://example.com
+boxcutter workflow url-crawl https://example.com
 boxcutter js-endpoints https://example.com/app.js
 ```
 
@@ -196,7 +199,8 @@ tool; `--header "K: V"` passes auth to every inner tool.
 | `full-scan <domain\|url>` | crawl (url-crawl + js-endpoints) -> nuclei -> zap-full -> fuzz/sqlmap/nuclei-dast per param URL -> secrets per JS |
 | `dast-scan <url>` | DAST bundle on one URL: fuzz + nuclei -dast + sqlmap + zap-scan-url |
 | `wayback-scan <domain>` | archive URLs -> sqlmap / fuzz / zap-scan-url per param URL, scan-secrets per JS |
-| `secrets-hunter <domain>` | gather JS files (url-crawl --js + wayback) -> scan-secrets each |
+| `url-crawl <url>` | Katana + ZAP crawlers, merged and deduped |
+| `secrets-hunter <domain>` | gather JS files (url-crawl + wayback, JS only) -> scan-secrets each |
 | `swagger-fuzz <spec>` | parse a spec and fuzz every parameterised endpoint |
 | `swagger-dast <spec>` | DAST bundle against every Swagger endpoint |
 | `swagger-discover <host>` | probe common spec paths, then DAST every endpoint found |
@@ -407,7 +411,7 @@ shape up front:
 | `kind` | `data` items | tools |
 |---|---|---|
 | `findings` | `{severity, title, info, url}` | nuclei, sqlmap, fuzz, scan-secrets, dirb, dirsearch, zap-scan-*, ... |
-| `urls` | strings | subfinder, wayback, url-crawl, swagger-endpoints, ... |
+| `urls` | strings | subfinder, wayback, katana-crawl, zap-crawl, swagger-endpoints, ... |
 | `items` | objects (always a `url`; `status` for HTTP code) | httpx, tech-detect, js-endpoints, swagger-parser, ... |
 
 `error` is `null` on success. A tool exits 0 whenever it ran (even with zero

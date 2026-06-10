@@ -126,7 +126,7 @@ def _run_step(step: dict, variables: dict, args, dbg) -> None:
     for target in _targets(step, variables):
         dbg(f"{step['tool']} {target}")
         url = target if isinstance(target, str) and target.startswith("http") else None
-        for item in call(module, [target, *extra], args):
+        for item in call(module, [target, *extra], args, dbg):
             if kind == "findings" and isinstance(item, dict):
                 collected.append(finding(step["tool"], item, url))  # source-tagged
             else:

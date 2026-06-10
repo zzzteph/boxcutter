@@ -35,7 +35,7 @@ def run(args) -> int:
         output_result([], args.output, "Use either --js or --params, not both.")
         return 1
 
-    crawled = _run_zap(target, args.timeout, dbg, args.header)
+    crawled = _run_zap(target, args.timeout, dbg, getattr(args, "header", []))
 
     urls: list[str] = []
     for url in crawled:

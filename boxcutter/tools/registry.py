@@ -28,7 +28,6 @@ from . import (
     swagger_parser,
     swagger_specs,
     tech_detect,
-    url_crawl,
     wayback,
     wayback_domains,
     zap_crawl,
@@ -50,7 +49,6 @@ TOOLS = [
     # Crawl
     katana_crawl,
     zap_crawl,
-    url_crawl,
     js_endpoints,
     # Vuln scanners
     nuclei,
