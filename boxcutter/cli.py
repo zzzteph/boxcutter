@@ -19,8 +19,8 @@ import sys
 
 from . import __version__
 from .core import capability
-from .core.args import add_common_args
-from .core.envelope import output_result, set_output_kind, set_table_mode
+from .core.args import add_common_args, add_severity_arg
+from .core.envelope import output_result, set_output_kind, set_severity_filter, set_table_mode
 from .workflows import WORKFLOWS
 from .workflows._common import add_header_option, add_overrides_option, add_steps_option
 from .tools.registry import TOOLS
@@ -42,6 +42,10 @@ def build_parser() -> argparse.ArgumentParser:
     for module in TOOLS:
         sub = subparsers.add_parser(module.NAME, help=module.HELP, description=module.HELP)
         module.add_arguments(sub)
+        # --severity is a findings filter, so only expose it on tools that emit
+        # findings; for url/items tools it would do nothing.
+        if getattr(module, "KIND", "items") == "findings":
+            add_severity_arg(sub)
         sub.set_defaults(_run=module.run, _tool_name=module.NAME,
                          _kind=getattr(module, "KIND", "items"))
 
@@ -65,6 +69,7 @@ def _add_workflow_parser(subparsers: argparse._SubParsersAction) -> None:
         sub = wf_sub.add_parser(module.NAME, help=module.HELP, description=module.HELP)
         module.add_arguments(sub)
         add_common_args(sub)
+        add_severity_arg(sub)
         add_overrides_option(sub)
         add_steps_option(sub)
         add_header_option(sub)
@@ -151,6 +156,9 @@ def main(argv: list[str] | None = None) -> int:
 
     set_table_mode(getattr(args, "table", False))
     set_output_kind(getattr(args, "_kind", "items"))
+    # Findings-only filter; a no-op for url/items output. Set once here so it
+    # applies to a single tool and to a workflow's final aggregated output alike.
+    set_severity_filter(getattr(args, "severity", None))
 
     # A tool whose external binary is missing in this image fails honestly.
     tname = getattr(args, "_tool_name", None)

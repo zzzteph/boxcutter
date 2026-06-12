@@ -18,7 +18,6 @@ REQUIREMENTS: dict[str, str] = {
     "subfinder": "subfinder",
     "dnsx": "dnsx",
     "httpx": "httpx",
-    "tech-detect": "httpx",
     "screenshot": "chromium-browser",
     "katana-crawl": "katana",
     "nuclei": "nuclei",

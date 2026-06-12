@@ -13,6 +13,7 @@ stdout always stays parseable JSON.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from typing import Any, Callable, Iterable
 
@@ -42,6 +43,73 @@ def set_output_kind(kind: str) -> None:
 _SEVERITY_RANK = {
     "critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4, "informational": 4,
 }
+
+# The set of severities to keep in findings output, or None for "report all".
+# Set once by the CLI from the --severity flag. Only ever consulted for the
+# "findings" kind (it is meaningless for urls/items), so non-findings output is
+# never touched by it.
+_SEVERITY_FILTER: set[str] | None = None
+
+# Canonical severity levels a finding can carry. "informational" is an accepted
+# spelling of "info"; everything else is normalised to one of these or left
+# unclassified.
+VALID_SEVERITIES = ("critical", "high", "medium", "low", "info")
+
+
+def _normalize_severity(raw: Any) -> str | None:
+    """Canonicalise a severity token to one of :data:`VALID_SEVERITIES`.
+
+    Returns ``None`` when the value is empty or unrecognised, so callers can
+    treat "couldn't classify this" distinctly from "classified as info".
+    """
+    text = str(raw).strip().lower()
+    if text in ("informational", "information"):
+        text = "info"
+    return text if text in VALID_SEVERITIES else None
+
+
+def set_severity_filter(spec: str | None) -> None:
+    """Set the findings severity filter from a ``--severity`` spec.
+
+    ``spec`` is a comma/space-separated list like ``"critical,high"``. An empty
+    or ``None`` spec disables filtering (report everything). Unrecognised levels
+    are skipped with a stderr warning rather than aborting.
+    """
+    global _SEVERITY_FILTER
+    if not spec:
+        _SEVERITY_FILTER = None
+        return
+    levels: set[str] = set()
+    for token in re.split(r"[,\s]+", str(spec).strip()):
+        if not token:
+            continue
+        level = _normalize_severity(token)
+        if level is None:
+            debug_print(
+                f"boxcutter: ignoring unknown --severity value '{token}' "
+                f"(expected one of: {', '.join(VALID_SEVERITIES)})"
+            )
+        else:
+            levels.add(level)
+    _SEVERITY_FILTER = levels or None
+
+
+def _filter_by_severity(data: list[Any]) -> list[Any]:
+    """Keep only findings whose severity is in the active filter set.
+
+    Conservative by design: an item is dropped only when its severity can be
+    positively classified and falls outside the requested set. Anything we can't
+    classify (non-dict items, a missing or unrecognised ``severity``) is kept, so
+    the filter never silently hides a finding it didn't understand.
+    """
+    if _SEVERITY_FILTER is None or not isinstance(data, list):
+        return data
+    kept: list[Any] = []
+    for item in data:
+        level = _normalize_severity(item.get("severity")) if isinstance(item, dict) else None
+        if level is None or level in _SEVERITY_FILTER:
+            kept.append(item)
+    return kept
 
 
 def _sort_by_severity(data: list[Any]) -> list[Any]:
@@ -86,10 +154,11 @@ def output_result(
 
     ``extra`` injects additional top-level keys (e.g. ``sources`` for
     git-extract). ``pretty`` switches to indented JSON. Findings are sorted
-    worst-first (critical/high on top) and deduplicated by (title, url).
+    worst-first (critical/high on top), deduplicated by (title, url), and - when
+    a ``--severity`` filter is active - reduced to the requested severities.
     """
     if _OUTPUT_KIND == "findings":
-        data = _dedup_findings(_sort_by_severity(data))
+        data = _filter_by_severity(_dedup_findings(_sort_by_severity(data)))
     payload: dict[str, Any] = {
         "success": error is None,
         "kind": _OUTPUT_KIND,

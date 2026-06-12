@@ -1,7 +1,7 @@
 name: recon
 help: subdomains (subfinder + wayback), kept if they resolve (dnsx)
 input: target
-output: ${hosts}
+output: ${live}
 
 steps:
   - select: ${target}          # seed with the apex
@@ -12,5 +12,7 @@ steps:
   - tool: wayback-domains
     target: ${target}
     save: hosts
+  # Narrow to a fresh var: `save` merges into the named var, so writing the
+  # resolving subset back into `hosts` would just re-merge the full set.
   - alive: ${hosts}            # keep only the ones dnsx resolves
-    save: hosts
+    save: live

@@ -19,9 +19,9 @@ _TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
 
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="Target URL")
-    parser.add_argument("-D", "--data", "--D", dest="data", default=None,
+    parser.add_argument("-D", "--data", dest="data", default=None,
                         help="POST body data (omit for GET)")
-    parser.add_argument("-H", "--header", "--H", dest="header", action="append", default=[],
+    parser.add_argument("-H", "--header", dest="header", action="append", default=[],
                         metavar="NAME: VALUE", help='Request header (repeatable)')
     add_common_args(parser)
 

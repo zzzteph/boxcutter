@@ -27,6 +27,7 @@ docker run --rm boxcutter workflow web-scan https://google.com
 | `--output FILE` | all | write the JSON envelope to a file instead of stdout |
 | `--table` | all | print a readable text table on stdout instead of JSON |
 | `--debug` | all | print progress/diagnostics to stderr |
+| `--severity LEVELS` | findings tools + workflows | only report findings at these severities, e.g. `--severity critical,high`; omit to report all |
 | `--timeout N` | most tools | per-tool time budget in seconds (defaults vary) |
 | `--opt-args "..."` | binary wrappers | extra flags passed straight to the underlying binary |
 | `--js` / `--params` | crawlers, wayback | keep only JS URLs / only URLs with query params |
@@ -52,7 +53,6 @@ Every tool also takes `--output FILE`, `--debug`, `--table` (see Options); the
 | `subfinder <domain>` | — | urls | passive subdomain enumeration: the starting attack surface |
 | `dnsx <host>` | `--timeout` | urls | resolve A/AAAA/CNAME — confirms a host is real before you touch it |
 | `httpx <host\|url>` | `--timeout` `--opt-args` `--header` | items | which hosts actually serve HTTP(S) (port, scheme, IP) |
-| `tech-detect <url>` | `--timeout` `--header` | items | fingerprint server + technologies (Wappalyzer) to aim later tools |
 | `screenshot <url>` | `--opt-args` `--header` | items | headless screenshot (base64 PNG) + title for fast visual triage |
 | `wayback <domain>` | `--js` `--params` `--inc-subdomains` `--timeout` | urls | historical URLs (Wayback/CommonCrawl/OTX/URLScan) — free endpoints + params |
 | `wayback-domains <domain>` | `--timeout` | urls | unique hosts seen across those archives |
@@ -61,7 +61,6 @@ Every tool also takes `--output FILE`, `--debug`, `--table` (see Options); the
 boxcutter subfinder example.com                  # passive subdomains
 boxcutter dnsx api.example.com                    # does it resolve?
 boxcutter httpx example.com --table               # live HTTP services
-boxcutter tech-detect https://example.com         # server + tech stack
 boxcutter screenshot https://example.com          # base64 PNG + title
 boxcutter wayback example.com --params            # archived URLs that have params
 boxcutter wayback-domains example.com             # archived hostnames
@@ -236,6 +235,11 @@ boxcutter workflow recon-http example.com --table
 # full scan one site: crawl -> nuclei -> zap-full -> fuzz/sqlmap/nuclei-dast per
 # param URL -> secrets per JS  (--steps prints each step)
 boxcutter workflow full-scan https://example.com --steps
+
+# same scan, but report only the critical/high findings (filters the merged
+# output from every inner tool; --severity also works on a single findings tool)
+boxcutter workflow full-scan https://example.com --severity critical,high
+boxcutter nuclei https://example.com --severity critical,high
 
 # DAST one URL, with an auth header passed to every inner tool
 boxcutter workflow dast-scan "https://example.com/?id=1" --header "Authorization: Bearer T"
@@ -421,7 +425,7 @@ shape up front:
 |---|---|---|
 | `findings` | `{severity, title, info, url}` | nuclei, sqlmap, fuzz, scan-secrets, dirb, dirsearch, zap-scan-*, ... |
 | `urls` | strings | subfinder, wayback, katana-crawl, zap-crawl, swagger-endpoints, ... |
-| `items` | objects (always a `url`; `status` for HTTP code) | httpx, tech-detect, js-endpoints, swagger-parser, ... |
+| `items` | objects (always a `url`; `status` for HTTP code) | httpx, js-endpoints, swagger-parser, ... |
 
 `error` is `null` on success. A tool exits 0 whenever it ran (even with zero
 findings) and non-zero only on bad input, so gate on `success`/`data`, not the

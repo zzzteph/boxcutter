@@ -25,6 +25,22 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_severity_arg(parser: argparse.ArgumentParser) -> None:
+    """Add the ``--severity`` findings filter.
+
+    Only meaningful for tools/workflows that emit findings; the value is a
+    comma-separated allow-list of severities to report, e.g.
+    ``--severity critical,high``. With no value, every finding is reported.
+    """
+    parser.add_argument(
+        "--severity",
+        metavar="LEVELS",
+        default=None,
+        help="Only report findings at these severities (comma-separated), e.g. "
+        "'--severity critical,high'. Omit to report all. Findings output only.",
+    )
+
+
 def add_opt_args(parser: argparse.ArgumentParser) -> None:
     """Add the passthrough ``--opt-args`` option (extra flags for the binary)."""
     parser.add_argument(

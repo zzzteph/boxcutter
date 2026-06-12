@@ -25,6 +25,7 @@ _BLOCK = re.compile(r"^---$(.*?)^---$", re.M | re.S)
 
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="Target URL")
+    parser.add_argument("--timeout", type=int, default=300, help="Process timeout in seconds")
     add_opt_args(parser)
     add_header_arg(parser)
     add_common_args(parser)
@@ -51,7 +52,7 @@ def run(args) -> int:
     cmd += process.split_opt_args(opt_args)
     dbg(f"Command: {process.format_command(cmd)}")
 
-    result = process.run(cmd, timeout=300)
+    result = process.run(cmd, timeout=args.timeout)
     if not result.successful():
         dbg("sqlmap exited with a non-zero status.")
 
