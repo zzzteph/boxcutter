@@ -53,19 +53,27 @@ steps:
     do:
       - tool: swagger-endpoints
         target: ${specs.item}
+        save: api_urls_concrete
+      - tool: swagger-endpoints
+        target: ${specs.item}
         args: --fuzzable
         save: api_urls
       - tool: zap-scan-openapi
         target: ${specs.item}
         save: findings
+  # fuzz gets the {FUZZ}-marked variants (it substitutes the marker before sending);
+  # sqlmap gets the concrete URLs - it has no concept of {FUZZ} and would otherwise
+  # send the literal placeholder (e.g. /addresses/{FUZZ}, email=%7BFUZZ%7D) to the target
   - for_each: ${api_urls}
     do:
       - tool: fuzz
         target: ${api_urls.item}
         args: --timeout 120
         save: findings
+  - for_each: ${api_urls_concrete}
+    do:
       - tool: sqlmap
-        target: ${api_urls.item}
+        target: ${api_urls_concrete.item}
         save: findings
 
   # discover GraphQL endpoint(s) on the target, then audit each (introspection,
