@@ -40,6 +40,17 @@ def add_steps_option(parser) -> None:
     )
 
 
+def add_show_findings_option(parser) -> None:
+    """Add the ``--show-findings`` flag (stream findings to stderr as steps run)."""
+    parser.add_argument(
+        "--show-findings",
+        dest="show_findings",
+        action="store_true",
+        help="Print each finding to stderr as the step that found it ends "
+             "(live view; pairs with --steps). Final output is unchanged.",
+    )
+
+
 def add_overrides_option(parser) -> None:
     """Add the repeatable ``--arg TOOL=ARGS`` override option."""
     parser.add_argument(
@@ -111,6 +122,7 @@ def run_workflow(module, target: str, args) -> list:
             target=target,
             debug=getattr(args, "debug", False),
             steps=getattr(args, "steps", False),
+            show_findings=getattr(args, "show_findings", False),
             output=out,
             tool_overrides=getattr(args, "tool_overrides", []),
             header=getattr(args, "header", []),

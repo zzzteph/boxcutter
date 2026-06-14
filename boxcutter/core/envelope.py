@@ -237,6 +237,26 @@ def _grid(columns: list[str], rows: list[list[str]]) -> str:
     return "\n".join(out)
 
 
+def print_live_findings(findings: list[Any]) -> None:
+    """Stream findings to stderr as a workflow step produces them - the
+    ``--show-findings`` live view.
+
+    Honours the active ``--severity`` filter so what scrolls by matches the final
+    report, and truncates long titles/URLs the same way the table does. stdout is
+    never touched: it still carries only the final envelope (or ``--table``).
+    """
+    for f in _filter_by_severity(findings):
+        if not isinstance(f, dict):
+            continue
+        sev = str(f.get("severity", "info"))
+        source = str(f.get("source", "")).strip()
+        prefix = f"{source}: " if source else ""
+        debug_print(f"    [{sev}] {prefix}{_cell(f.get('title', ''))}".rstrip())
+        url = _cell(f.get("url", ""))
+        if url:
+            debug_print(f"        {url}")
+
+
 def debug_print(message: str) -> None:
     """Write a diagnostic line to stderr (keeps stdout pure JSON)."""
     sys.stderr.write(str(message) + "\n")

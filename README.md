@@ -14,6 +14,26 @@ stdout (quiet by default), so it fits a shell, a CI job, or an agent loop:
 { "success": true, "kind": "findings", "data": [], "error": null }
 ```
 
+## Contents
+
+- [Build and Run](#build-and-run)
+- [Tools](#tools)
+  - [Recon](#recon)
+  - [Crawl](#crawl)
+  - [Vulnerability scanners](#vulnerability-scanners)
+  - [Fuzzing](#fuzzing)
+  - [Secrets / source](#secrets--source)
+  - [API specs](#api-specs)
+  - [GraphQL](#graphql)
+  - [Generic](#generic)
+- [Workflows](#workflows)
+  - [Authenticated scanning](#authenticated-scanning)
+  - [Scanning an OpenAPI / Swagger spec](#scanning-an-openapi--swagger-spec)
+  - [Define your own (YAML)](#define-your-own-yaml)
+- [Output & dependencies](#output--dependencies)
+- [Example run](#example-run)
+- [Credits](#credits)
+
 ## Build and Run
 
 ```bash
@@ -36,6 +56,7 @@ docker run --rm boxcutter workflow web-scan https://google.com
 | `--wordlist PATH` | dirb | custom wordlist |
 | `--base-url URL` | js-endpoints, swagger-parser | base used to resolve discovered paths |
 | `--steps` | workflows | print each step as it runs (otherwise silent) |
+| `--show-findings` | workflows | stream each finding to stderr as the step that found it ends (live view; pairs with `--steps`, honours `--severity`) |
 | `--arg TOOL="..."` | workflows | append args to an inner tool, e.g. `--arg fuzz="--timeout 60"` |
 
 `boxcutter <tool> --help` shows the exact options for any tool.
@@ -397,10 +418,8 @@ Single values work the same way: `${target | url}` turns `example.com` into
 Chaining is left-to-right, so `params | dedup` filters to parameterised URLs and
 *then* collapses the value-duplicates.
 
-### Your own workflows
-
-Point `BOXCUTTER_WORKFLOWS` at a directory of `*.yaml` files to add (or override)
-workflows without rebuilding or touching Python:
+**Load your own without rebuilding.** Point `BOXCUTTER_WORKFLOWS` at a directory
+of `*.yaml` files to add (or override) workflows without touching Python:
 
 ```bash
 # from source

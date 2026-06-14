@@ -22,7 +22,12 @@ from .core import capability
 from .core.args import add_common_args, add_severity_arg
 from .core.envelope import output_result, set_output_kind, set_severity_filter, set_table_mode
 from .workflows import WORKFLOWS
-from .workflows._common import add_header_option, add_overrides_option, add_steps_option
+from .workflows._common import (
+    add_header_option,
+    add_overrides_option,
+    add_show_findings_option,
+    add_steps_option,
+)
 from .tools.registry import TOOLS
 
 
@@ -72,6 +77,7 @@ def _add_workflow_parser(subparsers: argparse._SubParsersAction) -> None:
         add_severity_arg(sub)
         add_overrides_option(sub)
         add_steps_option(sub)
+        add_show_findings_option(sub)
         add_header_option(sub)
         sub.set_defaults(_run=module.run)
     wf.set_defaults(_run=_run_workflow_index)

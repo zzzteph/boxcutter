@@ -8,7 +8,7 @@ on:
       tag:
         description: "Image tag for manual runs"
         required: false
-        default: "dev"
+        default: "latest"
       push:
         description: "Push to registries (uncheck to build only)"
         type: boolean
@@ -66,11 +66,10 @@ jobs:
             zzzteph/boxcutter
             ghcr.io/${{ github.repository }}
           flavor: ${{ matrix.target == 'slim' && 'suffix=-slim,onlatest=true' || '' }}
+          # Only ever publish `latest` (and `latest-slim` for the slim target via
+          # flavor) - no version/ref tags, regardless of the release version.
           tags: |
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest
             type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push

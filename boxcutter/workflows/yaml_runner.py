@@ -33,7 +33,13 @@ import os
 import pathlib
 import shlex
 
-from ..core.envelope import debug_logger, dedupe, output_result, set_output_kind
+from ..core.envelope import (
+    debug_logger,
+    dedupe,
+    output_result,
+    print_live_findings,
+    set_output_kind,
+)
 from ..tools.registry import BY_NAME
 from ._common import call, finding, run_workflow
 from .filters import FILTERS
@@ -131,6 +137,11 @@ def _run_step(step: dict, variables: dict, args, dbg) -> None:
                 collected.append(finding(step["tool"], item, url))  # source-tagged
             else:
                 collected.append(item)
+
+    # --show-findings: stream this step's findings to stderr as it ends, so a long
+    # run shows results live instead of only at the end. stdout stays untouched.
+    if kind == "findings" and collected and getattr(args, "show_findings", False):
+        print_live_findings(collected)
 
     if "save" in step:
         if kind != "findings" and step.get("pick"):
