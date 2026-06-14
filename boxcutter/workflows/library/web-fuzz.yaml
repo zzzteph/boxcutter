@@ -1,0 +1,73 @@
+name: web-fuzz
+help: like web-scan but injection testing is fuzz-only - no sqlmap, no ZAP active scan. crawl -> fuzz per param URL -> swagger -> fuzz per endpoint -> graphql detect+audit -> secrets per JS
+input: url
+output: findings
+
+steps:
+  # the given URL is the target as-is (no httpx liveness probe)
+  - select: ${url}
+    save: live
+
+  - for_each: ${live}
+    do:
+      - workflow: url-crawl
+        target: ${live.item}
+        save: urls
+
+  - for_each: ${urls | js}
+    do:
+      - tool: js-endpoints
+        target: ${urls.item}
+        pick: endpoints.url
+        save: urls
+
+  - select: ${urls | params | dedup}
+    save: params
+
+  # fuzz each parameterised URL (no sqlmap, no ZAP active scan - fuzz only)
+  - for_each: ${params}
+    do:
+      - tool: fuzz
+        target: ${params.item}
+        args: --timeout 120
+        save: findings
+
+  # discover OpenAPI/Swagger specs on the target, then fuzz every documented
+  # endpoint (crawling alone never reaches an unlinked API)
+  - for_each: ${live}
+    do:
+      - tool: swagger-specs
+        target: ${live.item}
+        save: specs
+  - for_each: ${specs}
+    do:
+      - tool: swagger-endpoints
+        target: ${specs.item}
+        args: --fuzzable
+        save: api_urls
+  - for_each: ${api_urls}
+    do:
+      - tool: fuzz
+        target: ${api_urls.item}
+        args: --timeout 120
+        save: findings
+
+  # discover GraphQL endpoint(s) on the target, then audit each (introspection,
+  # CSRF, batching, arg injection, mutation exposure) - crawling rarely reaches them
+  - for_each: ${live}
+    do:
+      - tool: graphql-detect
+        target: ${live.item}
+        save: gql
+  - for_each: ${gql}
+    do:
+      - tool: graphql-audit
+        target: ${gql.item}
+        save: findings
+
+  # secrets in each JS file
+  - for_each: ${urls | js}
+    do:
+      - tool: scan-secrets
+        target: ${urls.item}
+        save: findings

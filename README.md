@@ -226,6 +226,8 @@ tool; `--header "K: V"` passes auth to every inner tool.
 |---|---|
 | `full-scan <domain\|url>` | crawl (url-crawl + js-endpoints) -> nuclei -> zap-full -> fuzz/sqlmap/nuclei-dast per param URL -> secrets per JS |
 | `dast-scan <url>` | DAST bundle on one URL: fuzz + nuclei -dast + sqlmap + zap-scan-url |
+| `web-fuzz <url>` | like the web stage of full-scan but **fuzz is the only injection tool** — crawl + swagger + graphql + secrets, no sqlmap, no ZAP active scan |
+| `web-sqlmap <url>` | same as `web-fuzz` but **sqlmap is the only injection tool** — crawl + swagger + graphql + secrets, no fuzz, no ZAP active scan |
 | `wayback-scan <domain>` | archive URLs -> sqlmap / fuzz / zap-scan-url per param URL, scan-secrets per JS |
 | `wayback-custom-scan <domain>` | wayback -> `fuzz` each param URL with **your** payload (`--arg fuzz="--payload ... --pattern ..."`), scan-secrets per JS |
 | `url-crawl <url>` | Katana + ZAP crawlers, merged and deduped |
@@ -264,6 +266,9 @@ boxcutter nuclei https://example.com --severity critical,high
 
 # DAST one URL, with an auth header passed to every inner tool
 boxcutter workflow dast-scan "https://example.com/?id=1" --header "Authorization: Bearer T"
+
+# fuzz-only DAST of one site (no sqlmap / no ZAP active scan), findings shown live
+boxcutter workflow web-fuzz https://example.com --steps --show-findings
 
 # every Swagger endpoint (or discover the spec first)
 boxcutter workflow swagger-dast https://api.example.com/openapi.json

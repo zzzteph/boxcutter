@@ -1,0 +1,71 @@
+name: web-sqlmap
+help: like web-scan but injection testing is sqlmap-only - no fuzz, no ZAP active scan. crawl -> sqlmap per param URL -> swagger -> sqlmap per endpoint -> graphql detect+audit -> secrets per JS
+input: url
+output: findings
+
+steps:
+  # the given URL is the target as-is (no httpx liveness probe)
+  - select: ${url}
+    save: live
+
+  - for_each: ${live}
+    do:
+      - workflow: url-crawl
+        target: ${live.item}
+        save: urls
+
+  - for_each: ${urls | js}
+    do:
+      - tool: js-endpoints
+        target: ${urls.item}
+        pick: endpoints.url
+        save: urls
+
+  - select: ${urls | params | dedup}
+    save: params
+
+  # sqlmap each parameterised URL (no fuzz, no ZAP active scan - sqlmap only)
+  - for_each: ${params}
+    do:
+      - tool: sqlmap
+        target: ${params.item}
+        save: findings
+
+  # discover OpenAPI/Swagger specs on the target, then sqlmap every documented
+  # endpoint (crawling alone never reaches an unlinked API). sqlmap needs concrete
+  # URLs, so this uses swagger-endpoints WITHOUT --fuzzable (path->1, query->sample).
+  - for_each: ${live}
+    do:
+      - tool: swagger-specs
+        target: ${live.item}
+        save: specs
+  - for_each: ${specs}
+    do:
+      - tool: swagger-endpoints
+        target: ${specs.item}
+        save: api_urls
+  - for_each: ${api_urls}
+    do:
+      - tool: sqlmap
+        target: ${api_urls.item}
+        save: findings
+
+  # discover GraphQL endpoint(s) on the target, then audit each (introspection,
+  # CSRF, batching, arg injection, mutation exposure) - crawling rarely reaches them
+  - for_each: ${live}
+    do:
+      - tool: graphql-detect
+        target: ${live.item}
+        save: gql
+  - for_each: ${gql}
+    do:
+      - tool: graphql-audit
+        target: ${gql.item}
+        save: findings
+
+  # secrets in each JS file
+  - for_each: ${urls | js}
+    do:
+      - tool: scan-secrets
+        target: ${urls.item}
+        save: findings
