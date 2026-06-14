@@ -130,7 +130,10 @@ def endpoint_urls(spec: dict, spec_url: str | None = None, fuzzable: bool = Fals
             sample_path = sample_path.replace("{" + pp + "}", "1")
         for qp in query_params:  # one {FUZZ} per query param
             query = {o: ("{FUZZ}" if o == qp else "test") for o in query_params}
-            urls.append(base + sample_path + "?" + urlencode(query))
+            # safe="{}" keeps the {FUZZ} marker literal (not %7BFUZZ%7D) so the fuzz
+            # tool sees it as a marker and injects only this param, matching how the
+            # path-param variants above emit a raw {FUZZ}.
+            urls.append(base + sample_path + "?" + urlencode(query, safe="{}"))
 
     seen: list[str] = []
     for url in urls:
