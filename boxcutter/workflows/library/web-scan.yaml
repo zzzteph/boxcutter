@@ -1,5 +1,5 @@
 name: web-scan
-help: full DAST of one known URL (no httpx probe) - crawl -> zap-full -> fuzz/sqlmap per param URL -> swagger -> graphql detect+audit -> secrets per JS
+help: full DAST of one known URL (no httpx probe) - crawl -> zap-full -> web-dast per param URL -> swagger -> graphql-scan -> secrets per JS
 input: url
 output: findings
 
@@ -10,7 +10,7 @@ steps:
 
   - for_each: ${live}
     do:
-      - workflow: url-crawl
+      - workflow: web-crawl
         target: ${live.item}
         save: urls
 
@@ -24,70 +24,31 @@ steps:
   - select: ${urls | params | dedup}
     save: params
 
-  # active-scan the URL itself (nuclei runs separately in full-scan)
+  # active-scan the URL itself (nuclei runs separately in web-full)
   - for_each: ${live}
     do:
       - tool: zap-scan-full
         target: ${live.item}
         save: findings
 
-  # scan each parameterised URL
+  # DAST each parameterised URL via web-dast (fuzz + nuclei-dast + sqlmap + zap-scan-url)
   - for_each: ${params}
     do:
-      - tool: fuzz
-        target: ${params.item}
-        args: --timeout 120
-        save: findings
-      - tool: sqlmap
+      - workflow: web-dast
         target: ${params.item}
         save: findings
 
-  # discover OpenAPI/Swagger specs on the target, then scan every documented
-  # endpoint (crawling alone never reaches an unlinked API)
-  - for_each: ${live}
-    do:
-      - tool: swagger-specs
-        target: ${live.item}
-        save: specs
-  - for_each: ${specs}
-    do:
-      - tool: swagger-endpoints
-        target: ${specs.item}
-        save: api_urls_concrete
-      - tool: swagger-endpoints
-        target: ${specs.item}
-        args: --fuzzable
-        save: api_urls
-      - tool: zap-scan-openapi
-        target: ${specs.item}
-        save: findings
-  # fuzz gets the {FUZZ}-marked variants (it substitutes the marker before sending);
-  # sqlmap gets the concrete URLs - it has no concept of {FUZZ} and would otherwise
-  # send the literal placeholder (e.g. /addresses/{FUZZ}, email=%7BFUZZ%7D) to the target
-  - for_each: ${api_urls}
-    do:
-      - tool: fuzz
-        target: ${api_urls.item}
-        args: --timeout 120
-        save: findings
-  - for_each: ${api_urls_concrete}
-    do:
-      - tool: sqlmap
-        target: ${api_urls_concrete.item}
-        save: findings
+  # discover + DAST OpenAPI/Swagger endpoints - delegated to swagger-scan (find
+  # specs on the host, then fuzz/nuclei-dast/sqlmap/zap per endpoint + zap-openapi)
+  - workflow: swagger-scan
+    target: ${url}
+    save: findings
 
-  # discover GraphQL endpoint(s) on the target, then audit each (introspection,
-  # CSRF, batching, arg injection, mutation exposure) - crawling rarely reaches them
-  - for_each: ${live}
-    do:
-      - tool: graphql-detect
-        target: ${live.item}
-        save: gql
-  - for_each: ${gql}
-    do:
-      - tool: graphql-audit
-        target: ${gql.item}
-        save: findings
+  # discover + audit GraphQL endpoint(s) - delegated to graphql-scan, which does
+  # detect -> audit each (introspection, CSRF, batching, arg injection, mutation)
+  - workflow: graphql-scan
+    target: ${url}
+    save: findings
 
   # secrets in each JS file
   - for_each: ${urls | js}

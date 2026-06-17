@@ -3,7 +3,7 @@
 A workflow takes a single positional target by default. Per-tool arguments can
 be added with the repeatable ``--arg`` option, e.g.::
 
-    boxcutter workflow full-scan example.com --arg fuzz="--timeout 60" \
+    boxcutter workflow web-full example.com --arg fuzz="--timeout 60" \
         --arg nuclei="--opt-args '-tags cve'"
 
 ``call(module, base_argv, args)`` runs a tool with the workflow's base argv plus

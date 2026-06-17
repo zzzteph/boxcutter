@@ -1,4 +1,4 @@
-name: dast-scan
+name: web-dast
 help: DAST bundle on one URL - fuzz + nuclei -dast + sqlmap + zap-scan-url
 input: url
 output: findings

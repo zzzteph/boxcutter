@@ -1,4 +1,4 @@
-name: url-crawl
+name: web-crawl
 help: crawl a URL with Katana + ZAP, merged and deduped - the crawl you usually want
 input: target
 output: urls

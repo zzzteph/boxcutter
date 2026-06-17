@@ -1,5 +1,5 @@
-name: nuclei-env
-help: subfinder -> nuclei across the env (takeover on all hosts; nuclei-scan template passes on live hosts)
+name: env-nuclei
+help: subfinder -> nuclei across the env (takeover on all hosts; web-nuclei template passes on live hosts)
 input: target
 output: findings
 
@@ -18,6 +18,6 @@ steps:
 
   - for_each: ${live}
     do:
-      - workflow: nuclei-scan
+      - workflow: web-nuclei
         target: ${live.item}
         save: findings

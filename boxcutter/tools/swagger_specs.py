@@ -39,15 +39,24 @@ def add_arguments(parser) -> None:
 
 def run(args) -> int:
     dbg = debug_logger(args.debug)
-    base = _normalize(args.target.strip())
+    raw = args.target.strip()
+    base = _normalize(raw)
     if base is None:
         output_result([], args.output, "Invalid target.")
         return 1
 
     headers = _header_map(args.header)
+    # Test the host's common spec paths, but also the target URL itself first - so a
+    # direct spec link (e.g. a spec at a non-standard path) is picked up too. This
+    # lets the swagger workflows accept a bare host OR a spec URL with one input.
+    raw_url = raw if re.match(r"^https?://", raw, re.I) else "https://" + raw
+    candidates: list[str] = []
+    if urlparse(raw_url).path.strip("/"):
+        candidates.append(raw_url)
+    candidates += [base + path for path in COMMON_PATHS]
+
     found: list[str] = []
-    for path in COMMON_PATHS:
-        url = base + path
+    for url in candidates:
         try:
             response = http.get(url, timeout=8, headers=headers, verify=False)
         except Exception:  # noqa: BLE001
@@ -59,7 +68,8 @@ def run(args) -> int:
             dbg(f"spec found: {url}")
             found.append(url)
 
-    output_result(found, args.output)
+    # Dedupe order-preserving (the target URL may also be one of COMMON_PATHS).
+    output_result(list(dict.fromkeys(found)), args.output)
     return 0
 
 

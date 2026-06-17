@@ -1,5 +1,5 @@
-name: wayback-secrets-env
-help: subfinder, then secrets-hunter (url-crawl + wayback -> scan-secrets) on every subdomain
+name: env-takeover
+help: subfinder, then nuclei takeover templates on every discovered subdomain
 input: target
 output: findings
 
@@ -10,6 +10,7 @@ steps:
 
   - for_each: ${hosts}
     do:
-      - workflow: secrets-hunter
+      - tool: nuclei
         target: ${hosts.item}
+        args: '--opt-args="-tags takeover"'
         save: findings

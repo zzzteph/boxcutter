@@ -22,6 +22,6 @@ steps:
   # DAST each parameterised URL (fuzz + nuclei -dast + sqlmap + zap-scan-url)
   - for_each: ${params}
     do:
-      - workflow: dast-scan
+      - workflow: web-dast
         target: ${params.item}
         save: findings

@@ -10,7 +10,7 @@ steps:
 
   - for_each: ${live}
     do:
-      - workflow: url-crawl
+      - workflow: web-crawl
         target: ${live.item}
         save: urls
 

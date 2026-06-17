@@ -144,9 +144,32 @@ def _print_tool_list(show_all: bool = False) -> None:
     print("\nMulti-tool workflows:  boxcutter workflow --list")
 
 
+# Top-level subcommands that are neither a tool nor a workflow.
+_RESERVED_SUBCOMMANDS = {"workflow", "raw", "run"}
+
+
+def _desugar_workflow(argv: list[str]) -> list[str]:
+    """Let ``boxcutter <workflow> <target>`` work without the ``workflow`` keyword.
+
+    Tool-first resolution: if the first token names a tool (or a reserved
+    subcommand, or is a global flag), it is left untouched; only when it is *not*
+    a tool but *is* a workflow do we inject the ``workflow`` keyword. Unknown
+    names fall through so argparse reports them the usual way.
+    """
+    if not argv or argv[0].startswith("-"):
+        return argv
+    first = argv[0]
+    if first in _RESERVED_SUBCOMMANDS or any(m.NAME == first for m in TOOLS):
+        return argv
+    if any(m.NAME == first for m in WORKFLOWS):
+        return ["workflow", *argv]
+    return argv
+
+
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_desugar_workflow(raw_argv))
 
     if getattr(args, "list_all", False):
         _print_tool_list(show_all=True)

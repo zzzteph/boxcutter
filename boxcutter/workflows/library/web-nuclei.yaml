@@ -1,4 +1,4 @@
-name: nuclei-scan
+name: web-nuclei
 help: nuclei template passes against one URL - exposures, misconfig, cve2026, kev, exposed-panels (each with tuned severity)
 input: url
 output: findings

@@ -1,0 +1,44 @@
+name: swagger-scan
+help: find OpenAPI/Swagger spec(s) on a host (or scan a spec URL directly), then DAST every endpoint - fuzz (fuzzable) + nuclei-dast + sqlmap + zap-scan-url per endpoint, plus zap-scan-openapi per spec
+input: target
+output: findings
+
+steps:
+  - tool: swagger-specs
+    target: ${target}
+    save: specs
+
+  - for_each: ${specs}
+    do:
+      - tool: swagger-endpoints
+        target: ${specs.item}
+        save: concrete
+      - tool: swagger-endpoints
+        target: ${specs.item}
+        args: --fuzzable
+        save: fuzzable
+      - tool: zap-scan-openapi
+        target: ${specs.item}
+        save: findings
+
+  # fuzz gets the {FUZZ}-marked variants (marker mode); the non-fuzz tools get the
+  # concrete URLs - they have no concept of {FUZZ} and would send the literal marker
+  - for_each: ${fuzzable}
+    do:
+      - tool: fuzz
+        target: ${fuzzable.item}
+        args: --timeout 120
+        save: findings
+
+  - for_each: ${concrete}
+    do:
+      - tool: nuclei
+        target: ${concrete.item}
+        args: --opt-args=-dast
+        save: findings
+      - tool: sqlmap
+        target: ${concrete.item}
+        save: findings
+      - tool: zap-scan-url
+        target: ${concrete.item}
+        save: findings

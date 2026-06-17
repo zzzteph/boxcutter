@@ -7,16 +7,15 @@
 **A pentesting toolkit in one container.**
 
 ProjectDiscovery, OWASP ZAP, sqlmap, dirb, dirsearch and a set of Python
-recon/fuzz tools behind one CLI. Every command returns the same envelope on
-stdout (quiet by default), so it fits a shell, a CI job, or an agent loop:
-
-```json
-{ "success": true, "kind": "findings", "data": [], "error": null }
-```
+recon/fuzz tools behind one CLI. Point it at a URL, host, or domain and it runs
+the whole scan — quiet by default, one clean JSON result on stdout, so it drops
+straight into a shell, a CI job, or an agent loop.
 
 ## Contents
 
-- [Build and Run](#build-and-run)
+- [Install](#install)
+- [Scan](#scan)
+- [Options](#options)
 - [Tools](#tools)
   - [Recon](#recon)
   - [Crawl](#crawl)
@@ -34,13 +33,65 @@ stdout (quiet by default), so it fits a shell, a CI job, or an agent loop:
 - [Example run](#example-run)
 - [Credits](#credits)
 
-## Build and Run
+## Install
+
+Requires Docker. Pull the image and tag it `boxcutter` so commands stay short:
 
 ```bash
-docker pull ghcr.io/zzzteph/boxcutter:latest
-docker run --rm boxcutter workflow web-scan https://google.com
+docker pull ghcr.io/zzzteph/boxcutter:latest    
+docker tag  ghcr.io/zzzteph/boxcutter:latest boxcutter
+# or Docker Hub: 
+docker pull zzzteph/boxcutter
+
+
+docker run --rm boxcutter --list        # list the bundled tools
 ```
 
+No services to start — one command in, one JSON result out. For brevity, the rest
+of this README writes `boxcutter <args>` for `docker run --rm boxcutter <args>`.
+Prefer source over Docker? `python3 boxcutter.py <tool|workflow> ...` (needs only
+Python 3 + `requests`; workflows also need PyYAML).
+
+## Scan
+
+Point a workflow at a target. The `workflow` keyword is optional — a bare name
+resolves to a tool first, then a workflow. New here? `boxcutter web-full <url>`
+is the whole scan; everything below is for finer control.
+
+> ⚠️ **These are active, intrusive scans** (sqlmap, ZAP active scan, nuclei-dast,
+> fuzzing). Only run them against targets you own or are explicitly authorized to
+> test — `web-full` is loud and can trip WAFs, rate limits, or bug-bounty rules.
+
+```bash
+# full DAST (active vulnerability scan) of one site; --table prints a readable table
+# (crawl -> nuclei -> ZAP -> per-param bundle + swagger + graphql + secrets)
+boxcutter web-full https://example.com --steps --table
+
+# only critical/high findings
+boxcutter web-full https://example.com --severity critical,high --table
+
+# lighter single-tool variants of the web scan
+boxcutter web-fuzz   https://example.com      # fuzz only
+boxcutter web-sqlmap https://example.com      # sqlmap only
+
+# one parameterised URL - the reusable per-URL bundle (fuzz + nuclei-dast + sqlmap + zap)
+boxcutter web-dast "https://example.com/product?id=1"
+
+# an API: point at a spec URL or a bare host
+boxcutter swagger-scan https://api.example.com/openapi.json
+
+# start from a domain: resolving subdomains, then scan the whole environment
+boxcutter recon example.com
+boxcutter env-scan example.com --steps
+
+# behind auth - the header propagates to every inner tool
+boxcutter web-full https://example.com --header "Authorization: Bearer TOKEN"
+```
+
+See [Example run](#example-run) for what the findings table looks like.
+`boxcutter --list` shows every tool; `boxcutter workflow --list` shows every workflow.
+
+## Options
 
 | Option | Where | What it does |
 |---|---|---|
@@ -59,13 +110,12 @@ docker run --rm boxcutter workflow web-scan https://google.com
 | `--show-findings` | workflows | stream each finding to stderr as the step that found it ends (live view; pairs with `--steps`, honours `--severity`) |
 | `--arg TOOL="..."` | workflows | append args to an inner tool, e.g. `--arg fuzz="--timeout 60"` |
 
-`boxcutter <tool> --help` shows the exact options for any tool.
+`boxcutter <tool|workflow> --help` shows the exact options for any command.
 
 ## Tools
 
-Every tool also takes `--output FILE`, `--debug`, `--table` (see Options); the
-`kind` column is the envelope kind it emits. In the examples `boxcutter` is
-`docker run --rm boxcutter` or `python3 boxcutter.py`.
+Every tool also takes `--output FILE`, `--debug`, `--table` (see [Options](#options));
+the `kind` column is the envelope kind it emits.
 
 ### Recon
 
@@ -96,12 +146,12 @@ boxcutter wayback-domains example.com             # archived hostnames
 | `js-endpoints <js-url>` | `--base-url` | items | pull API endpoint references out of a JS file |
 
 > Katana + ZAP merged and deduped — the crawl you usually want — is the
-> `url-crawl` **workflow**: `boxcutter workflow url-crawl <url>` (filter with
-> `--js`/`--params` no longer applies; use it as a building block in scans).
+> `web-crawl` workflow (`boxcutter web-crawl <url>`); the scan workflows use it as
+> their crawl step.
 
 ```bash
 boxcutter katana-crawl https://example.com
-boxcutter workflow url-crawl https://example.com
+boxcutter workflow web-crawl https://example.com
 boxcutter js-endpoints https://example.com/app.js
 ```
 
@@ -213,6 +263,10 @@ A workflow chains tools and returns **one merged, source-tagged report**. Silent
 by default; `--steps` shows live progress; `--arg TOOL="..."` tunes any inner
 tool; `--header "K: V"` passes auth to every inner tool.
 
+You can drop the `workflow` keyword: `boxcutter web-full example.com` is shorthand
+for `boxcutter workflow web-full example.com`. A bare name resolves to a tool first
+and a workflow second, so tools always win a name clash.
+
 **Recon** — emit a list of hosts/services:
 
 | Workflow | What it does |
@@ -224,29 +278,29 @@ tool; `--header "K: V"` passes auth to every inner tool.
 
 | Workflow | What it does |
 |---|---|
-| `full-scan <domain\|url>` | crawl (url-crawl + js-endpoints) -> nuclei -> zap-full -> fuzz/sqlmap/nuclei-dast per param URL -> secrets per JS |
-| `dast-scan <url>` | DAST bundle on one URL: fuzz + nuclei -dast + sqlmap + zap-scan-url |
-| `web-fuzz <url>` | like the web stage of full-scan but **fuzz is the only injection tool** — crawl + swagger + graphql + secrets, no sqlmap, no ZAP active scan |
+| `web-full <domain\|url>` | probe live (httpx), then `web-nuclei` templates + `web-scan` full DAST per live URL |
+| `web-scan <url>` | full DAST of one URL: crawl -> zap-full -> `web-dast` per param URL -> swagger -> `graphql-scan` -> secrets per JS |
+| `web-dast <url>` | per-URL DAST bundle (the reusable unit): fuzz + nuclei -dast + sqlmap + zap-scan-url |
+| `web-fuzz <url>` | like the web stage of web-full but **fuzz is the only injection tool** — crawl + swagger + graphql + secrets, no sqlmap, no ZAP active scan |
 | `web-sqlmap <url>` | same as `web-fuzz` but **sqlmap is the only injection tool** — crawl + swagger + graphql + secrets, no fuzz, no ZAP active scan |
 | `wayback-scan <domain>` | archive URLs -> sqlmap / fuzz / zap-scan-url per param URL, scan-secrets per JS |
-| `wayback-custom-scan <domain>` | wayback -> `fuzz` each param URL with **your** payload (`--arg fuzz="--payload ... --pattern ..."`), scan-secrets per JS |
-| `url-crawl <url>` | Katana + ZAP crawlers, merged and deduped |
-| `secrets-hunter <domain>` | gather JS files (url-crawl + wayback, JS only) -> scan-secrets each |
-| `swagger-fuzz <spec>` | parse a spec and fuzz every parameterised endpoint |
-| `swagger-dast <spec>` | DAST bundle against every Swagger endpoint |
-| `swagger-discover <host>` | probe common spec paths, then DAST every endpoint found |
+| `wayback-fuzz <domain>` | wayback -> `fuzz` each param URL with **your** payload (`--arg fuzz="--payload ... --pattern ..."`), scan-secrets per JS |
+| `web-crawl <url>` | Katana + ZAP crawlers, merged and deduped |
+| `secrets-scan <domain>` | gather JS files (web-crawl + wayback, JS only) -> scan-secrets each |
+| `swagger-scan <host\|spec>` | find spec(s) on a host (or scan a spec URL), then DAST every endpoint: fuzz + nuclei-dast + sqlmap + zap, plus zap-openapi |
+| `swagger-fuzz <host\|spec>` | same discovery, **fuzz only** on every parameterised endpoint (sibling of `web-fuzz`) |
 | `graphql-scan <host>` | discover GraphQL endpoint(s), then audit each (graphql-detect → graphql-audit) |
 
 **Scan a whole environment** — start from a domain, enumerate subdomains first:
 
 | Workflow | What it does |
 |---|---|
-| `env-scan <domain>` | the lot: recon -> live HTTP -> full-scan + secrets-hunter each, wayback-scan each host |
-| `secrets-env <domain>` | env-scan minus the vuln scanners: recon -> live -> crawl + secrets-hunter each |
-| `nuclei-env <domain>` | subfinder -> nuclei on every discovered subdomain |
-| `takeover-env <domain>` | subfinder -> nuclei `-tags takeover` on every subdomain |
-| `wayback-secrets-env <domain>` | subfinder -> secrets-hunter (wayback + crawl -> scan-secrets) on every subdomain |
-| `wayback-full-scan-env <domain>` | subfinder -> wayback every subdomain -> dast-scan every parameterised URL |
+| `env-scan <domain>` | the lot: recon -> `web-full` + `wayback-scan` per host (web-full probes liveness & covers JS secrets) |
+| `env-secrets <domain>` | env-scan minus the vuln scanners: recon -> live -> crawl + secrets-scan each |
+| `env-nuclei <domain>` | subfinder -> nuclei on every discovered subdomain |
+| `env-takeover <domain>` | subfinder -> nuclei `-tags takeover` on every subdomain |
+| `env-wayback-secrets <domain>` | subfinder -> secrets-scan (wayback + crawl -> scan-secrets) on every subdomain |
+| `env-wayback <domain>` | subfinder -> wayback every subdomain -> web-dast every parameterised URL |
 
 ```bash
 # subdomains that resolve, as a table
@@ -257,26 +311,26 @@ boxcutter workflow recon-http example.com --table
 
 # full scan one site: crawl -> nuclei -> zap-full -> fuzz/sqlmap/nuclei-dast per
 # param URL -> secrets per JS  (--steps prints each step)
-boxcutter workflow full-scan https://example.com --steps
+boxcutter workflow web-full https://example.com --steps
 
 # same scan, but report only the critical/high findings (filters the merged
 # output from every inner tool; --severity also works on a single findings tool)
-boxcutter workflow full-scan https://example.com --severity critical,high
+boxcutter workflow web-full https://example.com --severity critical,high
 boxcutter nuclei https://example.com --severity critical,high
 
 # DAST one URL, with an auth header passed to every inner tool
-boxcutter workflow dast-scan "https://example.com/?id=1" --header "Authorization: Bearer T"
+boxcutter workflow web-dast "https://example.com/?id=1" --header "Authorization: Bearer T"
 
 # fuzz-only DAST of one site (no sqlmap / no ZAP active scan), findings shown live
 boxcutter workflow web-fuzz https://example.com --steps --show-findings
 
-# every Swagger endpoint (or discover the spec first)
-boxcutter workflow swagger-dast https://api.example.com/openapi.json
-boxcutter workflow swagger-discover api.example.com
+# every Swagger endpoint - point at a spec URL or a bare host
+boxcutter workflow swagger-scan https://api.example.com/openapi.json
+boxcutter workflow swagger-scan api.example.com
 
 # whole environment from just a domain (subdomains enumerated first)
-boxcutter workflow nuclei-env example.com --steps
-boxcutter workflow takeover-env example.com
+boxcutter workflow env-nuclei example.com --steps
+boxcutter workflow env-takeover example.com
 boxcutter workflow env-scan example.com --arg fuzz="--timeout 60"
 ```
 
@@ -291,18 +345,18 @@ Replacer add-on). The same flag works on each tool directly.
 
 
 # --- without auth (public surface only) ---
-boxcutter workflow full-scan https://example.com --steps
+boxcutter workflow web-full https://example.com --steps
 boxcutter fuzz       "https://example.com/api/search?q=1"
 boxcutter zap-scan-url "https://example.com/api/search?q=1"
 
 # --- with auth (reaches token-gated endpoints) ---
-boxcutter workflow full-scan https://example.com --steps \
+boxcutter workflow web-full https://example.com --steps \
   --header "Authorization: Bearer TOKEN"
 boxcutter fuzz         "https://example.com/api/search?q=1" --header "Authorization: Bearer TOKEN"
 boxcutter zap-scan-url "https://example.com/api/search?q=1" --header "Authorization: Bearer TOKEN"
 
 # several headers - just repeat the flag (token + API key + tenant)
-boxcutter workflow dast-scan "https://example.com/api/x?id=1" \
+boxcutter workflow web-dast "https://example.com/api/x?id=1" \
   --header "Authorization: Bearer TOKEN" \
   --header "X-Api-Key: TOKEN" \
   --header "X-Tenant-Id: 42"
@@ -314,9 +368,9 @@ missing / replaces it if present, on spider, active-scan **and** OpenAPI-import 
 ### Scanning an OpenAPI / Swagger spec
 
 Point a tool or workflow at the spec URL. Two engines: **ZAP** (`zap-scan-openapi` —
-active scan driven from the spec) and the **swagger bundle** (`swagger-dast` — parse the
-spec, then fuzz + nuclei `-dast` + sqlmap + zap-scan-url per endpoint). Add `--header`
-for an authenticated API.
+active scan driven from the spec) and the **swagger bundle** (`swagger-scan` — find the
+spec, then fuzz + nuclei `-dast` + sqlmap + zap-scan-url per endpoint, plus zap-scan-openapi).
+Add `--header` for an authenticated API.
 
 ```bash
 # find / inspect the spec first (optional)
@@ -325,13 +379,13 @@ boxcutter swagger-endpoints https://api.example.com/openapi.json --fuzzable
 
 # --- without auth ---
 boxcutter zap-scan-openapi https://api.example.com/openapi.json
-boxcutter workflow swagger-dast https://api.example.com/openapi.json
-boxcutter workflow swagger-discover api.example.com          # probe spec paths, then DAST
+boxcutter workflow swagger-scan https://api.example.com/openapi.json
+boxcutter workflow swagger-scan api.example.com              # bare host: probe spec paths first
 
 # --- with auth (header is used for the spec fetch AND every scan request) ---
 boxcutter zap-scan-openapi https://api.example.com/openapi.json \
   --header "Authorization: Bearer TOKEN"
-boxcutter workflow swagger-dast https://api.example.com/openapi.json \
+boxcutter workflow swagger-scan https://api.example.com/openapi.json \
   --header "Authorization: Bearer TOKEN"
 ```
 
@@ -347,7 +401,7 @@ you always see what it runs on. To run steps per item in a list use `for_each` +
 `do`; the current item is `${<list>.item}` (e.g. `for_each: ${live}` → `${live.item}`).
 
 ```yaml
-name: dast-scan
+name: web-dast
 input: url
 output: findings           # the var to emit ('findings', or a ${list} like recon)
 steps:
@@ -419,7 +473,7 @@ ${urls | hosts}           -> x                            just the hostname
 
 Single values work the same way: `${target | url}` turns `example.com` into
 `https://example.com`, and `${target | hosts}` turns `https://x/a?b=1` into `x`
-(this is how `secrets-hunter` feeds a URL to the crawler but a bare host to wayback).
+(this is how `secrets-scan` feeds a URL to the crawler but a bare host to wayback).
 Chaining is left-to-right, so `params | dedup` filters to parameterised URLs and
 *then* collapses the value-duplicates.
 
@@ -436,11 +490,17 @@ docker run --rm -v "$PWD/myflows:/flows" -e BOXCUTTER_WORKFLOWS=/flows \
 ```
 
 Your files appear in `boxcutter workflow --list` next to the built-ins. A file
-whose `name:` matches a built-in (e.g. `full-scan`) **overrides** it; any other
+whose `name:` matches a built-in (e.g. `web-full`) **overrides** it; any other
 name is **added**. They use the exact same tools, filters, and `${...}` syntax
 documented above — nothing else to learn.
 
 ## Output & dependencies
+
+Every command prints one JSON envelope on stdout (quiet by default):
+
+```json
+{ "success": true, "kind": "findings", "data": [], "error": null }
+```
 
 `data` is always a list and `kind` says what's in it, so consumers know the
 shape up front:
@@ -466,7 +526,7 @@ A full DAST pass over a deliberately vulnerable target, filtered to the
 high/critical findings and printed as a table:
 
 ```text
-docker run ghcr.io/zzzteph/boxcutter:latest workflow full-scan boxcutter.appsec.study --steps --table --severity high,critical
+docker run ghcr.io/zzzteph/boxcutter:latest workflow web-full boxcutter.appsec.study --steps --table --severity high,critical
 
 
 source         severity  title                                     info                                                                    url

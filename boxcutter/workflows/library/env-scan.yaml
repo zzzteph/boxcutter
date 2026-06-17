@@ -1,5 +1,5 @@
 name: env-scan
-help: enumerate + validate subdomains, then full-scan + secrets-hunter + wayback-scan each
+help: enumerate + validate subdomains, then web-full + wayback-scan each (web-full probes liveness itself)
 input: target
 output: findings
 
@@ -8,26 +8,13 @@ steps:
     target: ${target}
     save: hosts
 
+  # web-full probes liveness (httpx) itself and covers JS-secrets via web-scan, so
+  # there is no separate pre-probe or secrets-scan pass here - one loop per host.
   - for_each: ${hosts}
     do:
-      - tool: httpx
+      - workflow: web-full
         target: ${hosts.item}
-        pick: url
-        save: live
-
-  # for each live URL: full vuln scan + secrets hunt
-  - for_each: ${live}
-    do:
-      - workflow: full-scan
-        target: ${live.item}
         save: findings
-      - workflow: secrets-hunter
-        target: ${live.item}
-        save: findings
-
-  # wayback scan each host
-  - for_each: ${hosts}
-    do:
       - workflow: wayback-scan
         target: ${hosts.item}
         save: findings
