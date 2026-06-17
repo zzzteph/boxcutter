@@ -49,8 +49,6 @@ docker run --rm boxcutter --list        # list the bundled tools
 
 No services to start — one command in, one JSON result out. For brevity, the rest
 of this README writes `boxcutter <args>` for `docker run --rm boxcutter <args>`.
-Prefer source over Docker? `python3 boxcutter.py <tool|workflow> ...` (needs only
-Python 3 + `requests`; workflows also need PyYAML).
 
 ## Scan
 
