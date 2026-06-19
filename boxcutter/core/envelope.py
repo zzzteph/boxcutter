@@ -22,6 +22,16 @@ from typing import Any, Callable, Iterable
 # (--output, and the temp files tools pass to each other) always stay JSON.
 _TABLE_MODE = False
 
+# When True, a file sink (--output) is written as the machine-readable JSON
+# envelope rather than a table. The workflow engine sets this around every inner
+# tool/sub-workflow run so steps hand JSON to each other; a user's --output (the
+# outermost call) leaves it False and gets a readable table.
+_FORCE_JSON_FILE = False
+
+# Optional --jsonl path: the data list is also written here as JSON Lines (one
+# record per line). Only the outermost, user-facing result writes it.
+_JSONL_FILE: str | None = None
+
 # The kind of payload the current tool/workflow emits: one of "findings", "urls",
 # "items". Set by the CLI/runner from the tool's KIND before it runs, so every
 # envelope is self-describing and consumers know the data shape up front.
@@ -32,6 +42,19 @@ KINDS = ("findings", "urls", "items")
 def set_table_mode(enabled: bool) -> None:
     global _TABLE_MODE
     _TABLE_MODE = enabled
+
+
+def set_force_json_file(enabled: bool) -> bool:
+    """Toggle machine-JSON file output; returns the previous value (for restore)."""
+    global _FORCE_JSON_FILE
+    prev = _FORCE_JSON_FILE
+    _FORCE_JSON_FILE = enabled
+    return prev
+
+
+def set_jsonl_file(path: str | None) -> None:
+    global _JSONL_FILE
+    _JSONL_FILE = path or None
 
 
 def set_output_kind(kind: str) -> None:
@@ -168,23 +191,37 @@ def output_result(
     if extra:
         payload.update(extra)
 
-    if output_file:
-        text = json.dumps(payload, ensure_ascii=False, indent=2) if pretty else \
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    # ensure_ascii=False keeps unicode/slashes intact, matching PHP's
+    # JSON_UNESCAPED_SLASHES; compact separators mirror its fwrite output.
+    def _json(obj: Any) -> str:
+        return json.dumps(obj, ensure_ascii=False, indent=2) if pretty else \
+            json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+    # Internal capture for the workflow engine: a JSON envelope to the file, always.
+    # Steps read each other's output back as JSON, so this must never be a table.
+    if _FORCE_JSON_FILE and output_file is not None:
         with open(output_file, "w", encoding="utf-8") as fh:
-            fh.write(text)
+            fh.write(_json(payload))
         return
 
+    # --jsonl: also write the data as JSON Lines (one compact record per line). A
+    # machine sink alongside the primary output; skipped on error / internal captures.
+    if _JSONL_FILE and error is None:
+        with open(_JSONL_FILE, "w", encoding="utf-8") as fh:
+            for item in data:
+                fh.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    # --output FILE: a readable table, always (machine output goes to --jsonl/stdout).
+    if output_file is not None:
+        with open(output_file, "w", encoding="utf-8") as fh:
+            fh.write(render_table(data, error) + "\n")
+        return
+
+    # No file sink: stdout - table with --table, else the JSON envelope.
     if _TABLE_MODE:
         sys.stdout.write(render_table(data, error) + "\n")
-        sys.stdout.flush()
-        return
-
-    # ensure_ascii=False keeps unicode/slashes intact, matching PHP's
-    # JSON_UNESCAPED_SLASHES. Compact separators mirror PHP's fwrite output.
-    text = json.dumps(payload, ensure_ascii=False, indent=2) if pretty else \
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    sys.stdout.write(text + "\n")
+    else:
+        sys.stdout.write(_json(payload) + "\n")
     sys.stdout.flush()
 
 

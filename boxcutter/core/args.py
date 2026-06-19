@@ -11,7 +11,13 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         "--output",
         metavar="FILE",
         default=None,
-        help="File path to save output as JSON envelope (default: stdout)",
+        help="Save the result to FILE as a readable table (default: stdout)",
+    )
+    parser.add_argument(
+        "--jsonl",
+        metavar="FILE",
+        default=None,
+        help="Also save the data to FILE as JSON Lines (one record per line)",
     )
     parser.add_argument(
         "--debug",

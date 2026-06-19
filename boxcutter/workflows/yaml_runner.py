@@ -29,6 +29,7 @@ Filters (piped with ``|`` inside ``${...}``): see ``filters.FILTERS``.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shlex
@@ -68,6 +69,16 @@ def run_spec(spec: dict, args) -> int:
 
     for step in spec.get("steps", []):
         _run_step(step, variables, args, dbg)
+
+    # --dump: write the full state - every saved step var (live, urls, params,
+    # findings, ...) - to one JSON object, for analysis/debugging. Only the
+    # outermost run sets it (sub-workflows get no `dump`), so it's written once.
+    dump = getattr(args, "dump", None)
+    if dump:
+        snapshot = {k: v for k, v in variables.items() if not k.startswith("_")}
+        with open(dump, "w", encoding="utf-8") as fh:
+            json.dump(snapshot, fh, ensure_ascii=False, indent=2)
+        dbg(f"dumped {len(snapshot)} var(s) to {dump}")
 
     # `output:` names the variable to emit (bare name or ${name}). The emitted
     # envelope kind mirrors what the workflow returns.

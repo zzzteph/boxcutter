@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 
 from . import capability, fsutil
-from .envelope import read_envelope
+from .envelope import read_envelope, set_force_json_file
 
 
 def run_tool(module, argv: list[str]) -> dict:
@@ -36,10 +36,16 @@ def run_tool(module, argv: list[str]) -> dict:
             args = parser.parse_args([*argv, "--output", out])
         except SystemExit:
             return {"success": False, "data": [], "error": f"{module.NAME}: invalid arguments {argv}"}
+        # Force a JSON envelope into the temp file regardless of the user's
+        # --output/--jsonl (which render tables / JSON-lines); the engine reads it
+        # back as JSON to hand data to the next step.
+        prev = set_force_json_file(True)
         try:
             module.run(args)
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "data": [], "error": f"{module.NAME}: {exc}"}
+        finally:
+            set_force_json_file(prev)
         return read_envelope(out)
     finally:
         fsutil.remove(out)

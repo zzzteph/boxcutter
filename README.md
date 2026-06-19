@@ -93,7 +93,8 @@ See [Example run](#example-run) for what the findings table looks like.
 
 | Option | Where | What it does |
 |---|---|---|
-| `--output FILE` | all | write the JSON envelope to a file instead of stdout |
+| `--output FILE` | all | save the result to FILE as a readable table |
+| `--jsonl FILE` | all | also save the data to FILE as JSON Lines (one record per line) — machine-readable |
 | `--table` | all | print a readable text table on stdout instead of JSON |
 | `--debug` | all | print progress/diagnostics to stderr |
 | `--severity LEVELS` | findings tools + workflows | only report findings at these severities, e.g. `--severity critical,high`; omit to report all |
@@ -106,6 +107,7 @@ See [Example run](#example-run) for what the findings table looks like.
 | `--base-url URL` | js-endpoints, swagger-parser | base used to resolve discovered paths |
 | `--steps` | workflows | print each step as it runs (otherwise silent) |
 | `--show-findings` | workflows | stream each finding to stderr as the step that found it ends (live view; pairs with `--steps`, honours `--severity`) |
+| `--dump FILE` | workflows | write the full state (every saved step var: live, urls, params, findings, …) to FILE as one JSON object — for analysis |
 | `--arg TOOL="..."` | workflows | append args to an inner tool, e.g. `--arg fuzz="--timeout 60"` |
 
 `boxcutter <tool|workflow> --help` shows the exact options for any command.

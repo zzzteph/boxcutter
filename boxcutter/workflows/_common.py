@@ -16,7 +16,7 @@ import shlex
 from types import SimpleNamespace
 
 from ..core import fsutil
-from ..core.envelope import read_envelope
+from ..core.envelope import read_envelope, set_force_json_file
 from ..core.runner import run_tool
 
 # Tools that accept a "--header" option; a workflow's --header propagates to
@@ -37,6 +37,17 @@ def add_steps_option(parser) -> None:
         "--steps",
         action="store_true",
         help="Print each step to stderr as it runs (default: silent)",
+    )
+
+
+def add_dump_option(parser) -> None:
+    """Add ``--dump FILE``: write every saved step variable to FILE as JSON."""
+    parser.add_argument(
+        "--dump",
+        metavar="FILE",
+        default=None,
+        help="Write the full state (every saved step var: live, urls, params, "
+             "findings, ...) to FILE as one JSON object - for analysis/debugging",
     )
 
 
@@ -117,17 +128,23 @@ def run_workflow(module, target: str, args) -> list:
     a temp file which is read back and removed.
     """
     out = fsutil.temp_file("metawf_")
-    module.run(
-        SimpleNamespace(
-            target=target,
-            debug=getattr(args, "debug", False),
-            steps=getattr(args, "steps", False),
-            show_findings=getattr(args, "show_findings", False),
-            output=out,
-            tool_overrides=getattr(args, "tool_overrides", []),
-            header=getattr(args, "header", []),
+    # Capture the sub-workflow's result as a JSON envelope (not the user's table /
+    # jsonl / dump sinks), so the parent reads it back to keep chaining.
+    prev = set_force_json_file(True)
+    try:
+        module.run(
+            SimpleNamespace(
+                target=target,
+                debug=getattr(args, "debug", False),
+                steps=getattr(args, "steps", False),
+                show_findings=getattr(args, "show_findings", False),
+                output=out,
+                tool_overrides=getattr(args, "tool_overrides", []),
+                header=getattr(args, "header", []),
+            )
         )
-    )
+    finally:
+        set_force_json_file(prev)
     data = read_envelope(out).get("data", []) or []
     fsutil.remove(out)
     return data
