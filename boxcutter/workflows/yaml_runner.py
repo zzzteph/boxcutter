@@ -75,7 +75,10 @@ def run_spec(spec: dict, args) -> int:
     # outermost run sets it (sub-workflows get no `dump`), so it's written once.
     dump = getattr(args, "dump", None)
     if dump:
-        snapshot = {k: v for k, v in variables.items() if not k.startswith("_")}
+        # Saved vars only - drop internals (_target) and for_each loop items
+        # (named "<list>.item"), which are iteration state, not saved data.
+        snapshot = {k: v for k, v in variables.items()
+                    if not k.startswith("_") and ".item" not in k}
         with open(dump, "w", encoding="utf-8") as fh:
             json.dump(snapshot, fh, ensure_ascii=False, indent=2)
         dbg(f"dumped {len(snapshot)} var(s) to {dump}")
