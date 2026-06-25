@@ -73,7 +73,7 @@ boxcutter web-fuzz   https://example.com      # fuzz only
 boxcutter web-sqlmap https://example.com      # sqlmap only
 
 # one parameterised URL - the reusable per-URL bundle (fuzz + nuclei-dast + sqlmap + zap)
-boxcutter web-dast "https://example.com/product?id=1"
+boxcutter endpoint-scan "https://example.com/product?id=1"
 
 # an API: point at a spec URL or a bare host
 boxcutter swagger-scan https://api.example.com/openapi.json
@@ -279,8 +279,8 @@ and a workflow second, so tools always win a name clash.
 | Workflow | What it does |
 |---|---|
 | `web-full <domain\|url>` | probe live (httpx), then `web-nuclei` templates + `web-scan` full DAST per live URL |
-| `web-scan <url>` | full DAST of one URL: crawl -> zap-full -> `web-dast` per param URL -> swagger -> `graphql-scan` -> secrets per JS |
-| `web-dast <url>` | per-URL DAST bundle (the reusable unit): fuzz + nuclei -dast + sqlmap + zap-scan-url |
+| `web-scan <url>` | full DAST of one URL: crawl -> zap-full -> `endpoint-scan` per param URL -> swagger -> `graphql-scan` -> secrets per JS |
+| `endpoint-scan <url>` | per-URL DAST bundle (the reusable unit): fuzz + nuclei -dast + sqlmap + zap-scan-url |
 | `web-fuzz <url>` | like the web stage of web-full but **fuzz is the only injection tool** — crawl + swagger + graphql + secrets, no sqlmap, no ZAP active scan |
 | `web-sqlmap <url>` | same as `web-fuzz` but **sqlmap is the only injection tool** — crawl + swagger + graphql + secrets, no fuzz, no ZAP active scan |
 | `wayback-scan <domain>` | archive URLs -> sqlmap / fuzz / zap-scan-url per param URL, scan-secrets per JS |
@@ -300,7 +300,7 @@ and a workflow second, so tools always win a name clash.
 | `env-nuclei <domain>` | subfinder -> nuclei on every discovered subdomain |
 | `env-takeover <domain>` | subfinder -> nuclei `-tags takeover` on every subdomain |
 | `env-wayback-secrets <domain>` | subfinder -> secrets-scan (wayback + crawl -> scan-secrets) on every subdomain |
-| `env-wayback <domain>` | subfinder -> wayback every subdomain -> web-dast every parameterised URL |
+| `env-wayback <domain>` | subfinder -> wayback every subdomain -> endpoint-scan every parameterised URL |
 
 ```bash
 # subdomains that resolve, as a table
@@ -319,7 +319,7 @@ boxcutter workflow web-full https://example.com --severity critical,high
 boxcutter nuclei https://example.com --severity critical,high
 
 # DAST one URL, with an auth header passed to every inner tool
-boxcutter workflow web-dast "https://example.com/?id=1" --header "Authorization: Bearer T"
+boxcutter workflow endpoint-scan "https://example.com/?id=1" --header "Authorization: Bearer T"
 
 # fuzz-only DAST of one site (no sqlmap / no ZAP active scan), findings shown live
 boxcutter workflow web-fuzz https://example.com --steps --show-findings
@@ -356,7 +356,7 @@ boxcutter fuzz         "https://example.com/api/search?q=1" --header "Authorizat
 boxcutter zap-scan-url "https://example.com/api/search?q=1" --header "Authorization: Bearer TOKEN"
 
 # several headers - just repeat the flag (token + API key + tenant)
-boxcutter workflow web-dast "https://example.com/api/x?id=1" \
+boxcutter workflow endpoint-scan "https://example.com/api/x?id=1" \
   --header "Authorization: Bearer TOKEN" \
   --header "X-Api-Key: TOKEN" \
   --header "X-Tenant-Id: 42"
@@ -401,16 +401,16 @@ you always see what it runs on. To run steps per item in a list use `for_each` +
 `do`; the current item is `${<list>.item}` (e.g. `for_each: ${live}` → `${live.item}`).
 
 ```yaml
-name: web-dast
-input: url
+name: endpoint-scan
+input: endpoint
 output: findings           # the var to emit ('findings', or a ${list} like recon)
 steps:
   - tool: fuzz
-    target: ${url}
+    target: ${endpoint}
     args: --timeout 120
     save: findings
   - tool: sqlmap
-    target: ${url}
+    target: ${endpoint}
     save: findings
 ```
 

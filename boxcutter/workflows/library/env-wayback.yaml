@@ -1,5 +1,5 @@
 name: env-wayback
-help: subfinder, wayback every subdomain, then web-dast every parameterised URL (deduped)
+help: subfinder, wayback every subdomain, then endpoint-scan every parameterised URL (deduped)
 input: target
 output: findings
 
@@ -19,6 +19,6 @@ steps:
 
   - for_each: ${params}
     do:
-      - workflow: web-dast
+      - workflow: endpoint-scan
         target: ${params.item}
         save: findings

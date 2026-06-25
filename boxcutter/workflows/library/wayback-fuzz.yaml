@@ -3,7 +3,7 @@ help: wayback URLs - scan-secrets on JS, then fuzz each parameterised URL with Y
 input: target
 output: findings
 
-# Like wayback-scan, but the param loop runs `fuzz` instead of `web-dast`, so you
+# Like wayback-scan, but the param loop runs `fuzz` instead of `endpoint-scan`, so you
 # can drive it with your own payload/pattern via --arg, e.g.:
 #   boxcutter workflow wayback-fuzz example.com \
 #     --arg fuzz="--payload \"' OR '1'='1\" --pattern \"sql syntax|syntax error\""

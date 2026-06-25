@@ -1,20 +1,20 @@
-name: web-dast
-help: DAST bundle on one URL - fuzz + nuclei -dast + sqlmap + zap-scan-url
-input: url
+name: endpoint-scan
+help: scan one endpoint with every DAST tool - fuzz + nuclei -dast + sqlmap + zap-scan-url
+input: endpoint
 output: findings
 
 steps:
   - tool: fuzz
-    target: ${url}
+    target: ${endpoint}
     args: --timeout 120
     save: findings
   - tool: nuclei
-    target: ${url}
+    target: ${endpoint}
     args: --opt-args=-dast
     save: findings
   - tool: sqlmap
-    target: ${url}
+    target: ${endpoint}
     save: findings
   - tool: zap-scan-url
-    target: ${url}
+    target: ${endpoint}
     save: findings
