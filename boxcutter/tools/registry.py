@@ -7,6 +7,7 @@ can resolve a tool by its NAME without importing each other.
 from __future__ import annotations
 
 from . import (
+    bob,
     dirb,
     dirsearch,
     dnsx,
@@ -71,6 +72,8 @@ TOOLS = [
     graphql_audit,
     # Generic
     http_request,
+    # Agentic (LLM-driven multi-agent bug-hunter over the tools above)
+    bob,
 ]
 
 BY_NAME = {module.NAME: module for module in TOOLS}
