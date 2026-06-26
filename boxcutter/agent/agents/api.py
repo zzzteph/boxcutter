@@ -9,6 +9,12 @@ class Api(Agent):
              "graphql-audit", "fuzz", "http-request"}
     max_steps = 22
 
+    def should_run(self, ctx):
+        s = ctx.surface
+        hay = " ".join(s.get("endpoints", []) + s.get("paths", [])).lower()
+        return any(s.get(k) for k in ("api", "spec", "graphql", "endpoints")) or \
+            any(t in hay for t in ("/api", "swagger", "openapi", "/v1", "/v2", "graphql", ".json"))
+
     def objective(self, ctx):
         return (
             "You are API. Documented APIs are where the best chains start - a single test/login endpoint can hand "
@@ -30,4 +36,8 @@ class Api(Agent):
             "map of every sensitive_action.\n\n"
             "USE CONTEXT: SURFACE.api/spec/graphql/endpoints, the identities, and the APP PROFILE's sensitive_actions.\n"
             "HAND OFF: any harvested token in artifacts.tokens; every documented endpoint you confirmed in "
-            "artifacts.endpoints (so lateral re-sweeps them with the token); findings with reproduce argv.")
+            "artifacts.endpoints (so lateral re-sweeps them with the token); findings with reproduce argv.\n"
+            "Clever moves: probe UNDOCUMENTED siblings of documented routes (/v1 vs /v2, /internal/*, "
+            "singular/plural); swap the HTTP method (a GET-only doc endpoint may still accept POST/PUT); send a "
+            "JSON endpoint a form body (parser confusion); push limit/page/fields to extremes for over-fetch; and "
+            "add admin-ish fields (role/isAdmin/owner_id) to a write body for mass-assignment.")

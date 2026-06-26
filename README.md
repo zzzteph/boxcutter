@@ -29,6 +29,10 @@ straight into a shell, a CI job, or an agent loop.
   - [Authenticated scanning](#authenticated-scanning)
   - [Scanning an OpenAPI / Swagger spec](#scanning-an-openapi--swagger-spec)
   - [Define your own (YAML)](#define-your-own-yaml)
+- [AI agent (bob)](#ai-agent-bob)
+  - [Run bob](#run-bob)
+  - [Models & providers](#models--providers)
+  - [Orchestration](#orchestration)
 - [Output & dependencies](#output--dependencies)
 - [Example run](#example-run)
 - [Credits](#credits)
@@ -493,6 +497,172 @@ Your files appear in `boxcutter workflow --list` next to the built-ins. A file
 whose `name:` matches a built-in (e.g. `web-full`) **overrides** it; any other
 name is **added**. They use the exact same tools, filters, and `${...}` syntax
 documented above — nothing else to learn.
+
+## AI agent (bob)
+
+`boxcutter bob <target>` is an autonomous, LLM-driven bug-hunter built on the same tools. Instead of a
+fixed workflow, a team of specialist agents **share one engagement context**, harvest credentials as they
+go, chase chains across the app, and write a professional report. It is **boxcutter-only** (every action
+is a boxcutter sub-command, run in-process), **provider-agnostic**, and confirm-first. It needs an LLM API
+key; it streams agent progress to stderr and prints the report to stdout.
+
+> bob is deliberately low-config: it **always** hunts aggressively on the authorized target and
+> **auto-selects** which agents to run from what it discovers — there is no roster or mode to set.
+
+### Run bob
+
+```bash
+# Anthropic (key from env)
+docker run --rm -e ANTHROPIC_API_KEY boxcutter bob https://example.com
+
+# OpenAI
+docker run --rm -e OPENAI_API_KEY boxcutter bob https://example.com --provider openai --model gpt-4o
+
+# LiteLLM gateway — pass key + endpoint as flags, so one prebuilt image hits any provider, no rebuild
+docker run --rm boxcutter bob https://example.com \
+  --provider litellm --api-key sk-... --base-url http://litellm:4000 --model claude-sonnet-4-6
+
+# authenticated — give two identities so it can test BOLA/BFLA
+boxcutter bob https://example.com \
+  --header "Authorization: Bearer A" --header-b "Authorization: Bearer B"
+
+# self-managed auth — give creds and bob logs in, then refreshes access/refresh tokens itself
+boxcutter bob https://example.com --creds alice:pw1 --login-url https://example.com/api/login --creds-b bob:pw2
+
+# point it at exactly what you mean — bob detects the entry shape and scopes to it
+boxcutter bob example.com                              # domain   — full recon incl subdomains
+boxcutter bob https://example.com/orders/5            # endpoint — just this endpoint
+boxcutter bob https://api.example.com/openapi.json    # spec     — drive the documented API
+
+# watch every step (one-line result per tool call); or dump each agent's full prompt and exit
+boxcutter bob https://example.com --steps
+boxcutter bob https://example.com --show-prompts
+```
+
+| Flag | Default | What |
+|---|---|---|
+| `--provider` | `anthropic` | `anthropic` · `openai` · `litellm` |
+| `--model` | per-provider | model id (e.g. `claude-sonnet-4-6`, `gpt-4o`, or the LiteLLM route) |
+| `--api-key` | provider env var | LLM key — overrides the env var |
+| `--base-url` | provider default / `*_BASE_URL` env | LLM endpoint — overrides; point it at your LiteLLM gateway or a proxy |
+| `--header "K: V"` | — | auth header for identity A, propagated to every agent (repeatable) |
+| `--header-b "K: V"` | — | a 2nd identity for BOLA/BFLA (repeatable) |
+| `--creds user:pass` | — | credentials for identity A; bob logs in and self-manages access/refresh tokens |
+| `--creds-b user:pass` | — | credentials for a 2nd identity B |
+| `--login-url URL` | discovered | login endpoint for `--creds` (else the auth agent tries to find it) |
+| `--steps` | off | print a one-line result summary after every tool call |
+| `--show-prompts` | off | print every agent's full system prompt and exit |
+
+Scope is enforced from the target: an active call is refused if it leaves the target's domain (set
+`BOB_SCOPE=host1,host2` to widen). bob is **always aggressive** (it may use PUT/PATCH/DELETE) and bounded by a
+global tool-call budget — only run it against authorized targets.
+
+### Entry modes & scope
+
+bob reads the target and works with **exactly what you point at** — and fences itself to it:
+
+| You give it | Mode | What bob does |
+|---|---|---|
+| `example.com` | **domain** | full recon incl. subdomains (`subfinder`); scope = the apex + its subdomains |
+| `https://example.com` | **url** | stays on **this host only**, no subdomain enumeration |
+| `https://example.com/orders/5` | **endpoint** | focuses on that single endpoint, minimal crawl |
+| `https://api.example.com/openapi.json` (or `swagger`/`api-docs`/`.yaml`) | **spec** | drives the documented API from the spec |
+
+### Models & providers
+
+The provider, key, and endpoint each default to the environment but can be overridden by a flag — so a
+**single prebuilt image** can target any model without rebuilding (set `--api-key` / `--base-url`, or the
+env vars below).
+
+| `--provider` | key (env) | base URL (env) | default model |
+|---|---|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` | `claude-sonnet-4-6` |
+| `openai` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | `gpt-4o` |
+| `litellm` | `LITELLM_API_KEY` | `LITELLM_BASE_URL` (default `http://localhost:4000`) | set with `--model` |
+
+`litellm` speaks the OpenAI wire format, so a LiteLLM gateway fronts any model (Claude, GPT, local) behind
+one endpoint. No provider SDKs are used — bob talks to each API over plain HTTP (`requests` only).
+
+### Orchestration
+
+A **coordinator** drives the run adaptively — it is *not* a fixed pipeline. Each agent declares a trigger;
+the coordinator runs it only when the shared context satisfies that trigger, and re-runs the exploit agents
+when a credential is harvested mid-run. Every agent reads and writes one shared context, so a fact found by
+one agent (a JWT, an endpoint, the app's purpose) immediately steers the next.
+
+```text
+  boxcutter bob https://target        LLM via --provider / --model / --api-key / --base-url
+        │
+        ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ COORDINATOR  —  adaptive, not a fixed pipeline                            │
+  │   - runs an agent only when its trigger fires  (no API surface -> skip    │
+  │     api;  no JS -> skip js-analyzer;  no findings -> skip validator)      │
+  │   - re-sweeps the exploit agents when a credential is harvested mid-run   │
+  └──────────────────────────────────────────────────────────────────────────┘
+        │   every agent reads <-> writes the shared CONTEXT each step
+        ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ SHARED CONTEXT (the bus)                                                  │
+  │   base_url · app_profile (purpose / roles / objects / sensitive_actions)  │
+  │   surface (urls / params / js / api / endpoints / tier1)                  │
+  │   IDENTITIES (incl. HARVESTED jwt / cookie) · secrets · findings          │
+  └──────────────────────────────────────────────────────────────────────────┘
+        ▲
+        │  agents (preferred order; the coordinator gates each by its trigger)
+        │
+   recon / map   planner · auth · discovery · browser · js-analyzer · recon-ranker · fingerprint · profile
+   surface       api · graphql · exposure · config-auditor · visual
+   exploit       fuzzer · access · business-logic · lateral ──┐  new credential?
+                 ◄─────────────── re-sweep ──────────────────┘
+   analysis      validator ─► correlator ─► reporter ─► professional report
+```
+
+A chain bob follows on its own: **`api`** reads the OpenAPI spec → calls a `/JWTTest`-style endpoint →
+**harvests the JWT** into `IDENTITIES` → **`fuzzer` / `access` / `business-logic`** reuse it on the documented
+endpoints → BOLA + SQLi → **`correlator`** reports it as one high-severity chain → **`reporter`** writes it
+up (HackerOne-style: weakness · affected · steps to reproduce · evidence · impact · remediation).
+
+The agents, by layer:
+
+| Layer | Agents | Role |
+|---|---|---|
+| recon / map | `planner` `auth` `discovery` `browser` `js-analyzer` `recon-ranker` `fingerprint` `profile` | strategy, sessions, surface, **JS/SPA render**, JS mining, P1/P2/Kill ranking, stack + known-leak probes, and *what the app IS* |
+| surface | `api` `graphql` `exposure` `config-auditor` `visual` | documented APIs, GraphQL, nuclei/.git/secrets, misconfig, open admin UIs |
+| exploit | `fuzzer` `access` `business-logic` `lateral` | injection, BOLA/BFLA, rule/workflow abuse, deep-dive pivoting |
+| analysis | `validator` `correlator` `reporter` | disprove false positives, build chains, write the report |
+
+Each agent's prompt is assembled from four layers — shared **doctrine** + its **role objective** + a **tool
+reference** (only its tools) + a **judgment rubric** (only its vuln classes); inspect any of them with
+`boxcutter bob <target> --show-prompts`.
+
+### Self-managed auth & browser
+
+Give bob credentials (`--creds user:pass [--login-url …]`) and it **logs in itself**, parses the access +
+refresh tokens (JSON or cookie), attaches them to every in-scope request, and **auto-refreshes / re-logs-in on
+a 401** — like a real tester. For JS/SPA apps and OAuth/CSRF logins it drives a real headless browser via three
+**full-image** tools (require Playwright; auto-skipped otherwise): `browser-crawl` (render + capture the real
+XHR/route surface), `browser-login` (perform the actual login flow), and `browser-actions` (script clicks/typing:
+`--action "fill:#user=admin" --action "click:text=Log in"`, or `--actions-file`).
+
+### Trust the report
+
+Findings are **evidence-bound**: a finding is only `confirmed` if its evidence actually appears in a captured
+response (the validator re-tests, and the check is code-gated — the model can't confirm a bug that isn't there);
+otherwise it's demoted, never silently dropped. After the report, bob prints a **machine-generated `VERIFIED RUN
+FACTS`** block (tool-call counts, surface, findings by status, skipped agents, and a `LOW COVERAGE` flag for
+SPA/blocked/empty targets) that the model cannot fake. Honest ceiling: bob is a **self-driving, verified-lead
+generator** — not an oracle. It does **not** cover OOB/blind, non-HTTP, WAF-evasion, or CSRF-as-a-vuln.
+
+### Test checklist (needs a real key + an authorized target)
+
+```bash
+boxcutter bob https://YOUR-AUTHORIZED-TARGET --show-prompts        # 1. prompts assemble, no key needed
+ANTHROPIC_API_KEY=…  boxcutter bob https://YOUR-AUTHORIZED-TARGET --steps   # 2. watch the adaptive run
+#   verify: agents skip when irrelevant, the VERIFIED RUN FACTS block prints, findings carry a status
+boxcutter bob https://YOUR-TARGET/openapi.json --steps            # 3. spec mode drives the API
+boxcutter bob https://YOUR-TARGET --creds user:pass --login-url … # 4. logs in + self-refreshes (full image for SPA login)
+```
 
 ## Output & dependencies
 

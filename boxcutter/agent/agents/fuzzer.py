@@ -5,8 +5,12 @@ from ..base import Agent
 
 class Fuzzer(Agent):
     name = "fuzzer"
-    tools = {"fuzz", "sqlmap", "http-request"}
+    tools = {"fuzz", "sqlmap", "http-request", "browser-actions"}
     max_steps = 22
+
+    def should_run(self, ctx):
+        s = ctx.surface
+        return bool(s.get("param_urls") or s.get("tier1") or s.get("endpoints"))
 
     def objective(self, ctx):
         return (
@@ -25,4 +29,8 @@ class Fuzzer(Agent):
             "used). Don't classify final severity - the reporter confirms.\n"
             "USE CONTEXT: SURFACE.tier1/param_urls/endpoints; the identities; and the APP PROFILE - prioritize "
             "inputs tied to its key_objects and sensitive_actions over random params.\n"
-            "HAND OFF: candidate injection findings (class, url, signal, reproduce) in findings.")
+            "HAND OFF: candidate injection findings (class, url, signal, reproduce) in findings.\n"
+            "Clever: hunt SECOND-ORDER injection (inject in one param, watch it surface in another response/page); "
+            "try the payload in headers (User-Agent / Referer / X-Forwarded-For), not only params; use "
+            "encoding/parser tricks (double-encode, unicode, content-type swap); and always diff against a benign "
+            "control so a reflect-everything page doesn't fool you.")

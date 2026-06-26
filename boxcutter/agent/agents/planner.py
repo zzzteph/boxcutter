@@ -24,4 +24,6 @@ class Planner(Agent):
             "USE CONTEXT: you usually run first - the only inputs are the target and any provided IDENTITIES.\n"
             "HAND OFF: confirmed live BASE URL(s) in artifacts.endpoints; in artifacts.notes put the entry shape, "
             "the ordered plan (which stages matter and why), knob choices, and cautions. Keep it tight - one orient "
-            "pass, then stop. Do not deep-crawl; discovery does that.")
+            "pass, then stop. Do not deep-crawl; discovery does that.\n"
+            "Clever: read the hostname for intent (api. / admin. / staging. / dev. should bias the plan) and "
+            "follow the canonical redirect/host before committing to a base URL.")

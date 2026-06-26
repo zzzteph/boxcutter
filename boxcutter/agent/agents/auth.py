@@ -5,7 +5,7 @@ from ..base import Agent
 
 class Auth(Agent):
     name = "auth"
-    tools = {"http-request"}
+    tools = {"http-request", "browser-login"}
     max_steps = 8
 
     def objective(self, ctx):
@@ -26,4 +26,7 @@ class Auth(Agent):
             "USE CONTEXT: the provided IDENTITIES and BASE url.\n"
             "HAND OFF: in artifacts.notes - which identities are live, which is higher-priv, the auth mechanism, "
             "and the liveness endpoint. Only echo a token under artifacts.tokens if you CONFIRMED it authenticates. "
-            "If no auth was provided, say 'unauthenticated' and continue - the run still proceeds anonymously.")
+            "If no auth was provided, say 'unauthenticated' and continue - the run still proceeds anonymously.\n"
+            "Clever: decode the JWT (header + claims, no signature verify) to flag alg=none / weak alg, a long "
+            "expiry, or role/scope claims worth tampering; and check whether the session works across subdomains "
+            "(cookie scope).")

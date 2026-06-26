@@ -45,6 +45,21 @@ Returns {status, title, content, headers}. The response `headers` include Set-Co
     "screenshot": """screenshot <url>   - render a page (title/visual signal); use to spot open admin panels.
   e.g.  screenshot https://example.com/admin""",
 
+    "browser-crawl": """browser-crawl <url> [--header ...]   - render a JS/SPA headless and capture routes +
+every XHR/fetch API call a raw fetch misses. Use when the page is an empty shell.
+  e.g.  browser-crawl https://example.com""",
+
+    "browser-login": """browser-login <login-url> --creds user:pass   - perform a REAL login flow
+(SPA/CSRF/redirect) and return the resulting cookie + bearer token.
+  e.g.  browser-login https://example.com/login --creds admin:secret""",
+
+    "browser-actions": """browser-actions <start-url> --action "verb:args" ...   - drive a real browser like a
+human and capture XHR + final state (url/cookie/token). Repeatable & ordered, or --actions-file FILE.
+  verbs: goto:URL | click:SEL | fill:SEL=VAL | type:SEL=VAL | select:SEL=VAL | press:SEL=KEY | check/uncheck:SEL |
+         hover:SEL | scroll:bottom|top|X,Y | wait:MS | waitfor:SEL | eval:JS
+  SEL:   id=x -> #x | name=x -> [name="x"] | text=Foo | css=... | raw CSS
+  e.g.  browser-actions https://x/login --action "fill:#user=admin" --action "fill:#pass=pw" --action "click:text=Log in" """,
+
     "nuclei": """nuclei <url> [--opt-args "<native nuclei flags>"] [--severity critical,high] [-H "Name: Value"]
   --opt-args passes raw nuclei flags (e.g. -tags, -t).
   e.g.  nuclei https://example.com --opt-args "-tags exposure,misconfig,cve,kev,panel" --severity critical,high""",
@@ -87,6 +102,7 @@ RCE/XXE/NoSQL/GraphQL/error-disclosure + time-blind.
 # canonical order so the block reads recon -> exploit
 _ORDER = [
     "httpx", "subfinder", "katana-crawl", "js-endpoints", "dirsearch", "dirb", "wayback", "screenshot",
+    "browser-crawl", "browser-login", "browser-actions",
     "swagger-specs", "swagger-parser", "swagger-endpoints", "graphql-detect", "graphql-audit",
     "nuclei", "git-extract", "scan-secrets", "fuzz", "sqlmap", "http-request",
 ]

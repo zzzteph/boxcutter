@@ -5,7 +5,7 @@ from ..base import Agent
 
 class Discovery(Agent):
     name = "discovery"
-    tools = {"httpx", "subfinder", "katana-crawl", "js-endpoints", "dirsearch", "dirb", "wayback"}
+    tools = {"httpx", "subfinder", "katana-crawl", "js-endpoints", "dirsearch", "dirb", "wayback", "browser-crawl"}
     max_steps = 20
 
     def objective(self, ctx):
@@ -29,4 +29,7 @@ class Discovery(Agent):
             "USE CONTEXT: the BASE url and entry shape from the planner; don't re-confirm liveness.\n"
             "HAND OFF: put Tier-1 URLs plus every spec / GraphQL / admin / panel / .git / upload URL in "
             "artifacts.endpoints (later agents act on exactly these); summarize counts and the notable paths + any "
-            "stack hints you saw in artifacts.notes.")
+            "stack hints you saw in artifacts.notes.\n"
+            "Clever: set a soft-404 baseline (request a random path) to separate real hits from catch-alls; mine "
+            "params from JS + wayback, not just paths; check robots.txt / sitemap.xml / .well-known; and prefer "
+            "versioned API roots (/v1, /v2 - older versions are often less guarded).")

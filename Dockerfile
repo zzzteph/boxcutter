@@ -33,6 +33,11 @@ RUN apk add --no-cache \
         libpcap-dev nss freetype harfbuzz ttf-freefont
 ENV HTTPX_NO_COLOR=1
 
+# Playwright for the browser-crawl / browser-login tools - driven against the system chromium above
+# (no `playwright install`: Playwright's bundled glibc Chromium won't run on Alpine/musl).
+RUN pip3 install --no-cache-dir --break-system-packages playwright
+ENV CHROMIUM_PATH=/usr/bin/chromium-browser
+
 ARG ZAP_VERSION=2.17.0
 RUN mkdir -p /usr/share/zaproxy /tmp/zap && \
     wget -O /tmp/zap.zip "https://github.com/zaproxy/zaproxy/releases/download/v${ZAP_VERSION}/ZAP_${ZAP_VERSION}_Crossplatform.zip" && \

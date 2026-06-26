@@ -6,8 +6,12 @@ from ..base import Agent
 class Lateral(Agent):
     name = "lateral"
     tools = {"http-request", "fuzz", "dirsearch", "js-endpoints", "git-extract", "scan-secrets",
-             "swagger-endpoints", "graphql-audit"}
+             "swagger-endpoints", "graphql-audit", "browser-crawl", "browser-actions"}
     max_steps = 26
+
+    def should_run(self, ctx):
+        harvested = any(k.startswith("H") for k in ctx.identities)
+        return bool(harvested or ctx.secrets or ctx.surface.get("endpoints"))
 
     def objective(self, ctx):
         return (
@@ -25,4 +29,7 @@ class Lateral(Agent):
             "paths, fuzz new params, request new endpoints with the harvested session.\n"
             "- CHAIN COMPONENTS: admin -> panel -> exposed source/config -> new endpoints/subdomains -> repeat.\n"
             "Record every NEW credential/endpoint you reach under artifacts so the reporter can chain it. Keep "
-            "pivoting until you run out of leads. Respect the RULES line; flag (don't run) any crack/brute/RCE step.")
+            "pivoting until you run out of leads. Respect the RULES line; flag (don't run) any crack/brute/RCE step.\n"
+            "Clever: REUSE the harvested credential on OTHER subdomains/services (one SSO token often unlocks many "
+            "hosts); act on internal hostnames you leaked; turn a low-priv read that exposes an id into a "
+            "high-priv action; and follow refresh tokens to keep the foothold alive.")

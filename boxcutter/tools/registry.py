@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from . import (
     bob,
+    browser_actions,
+    browser_crawl,
+    browser_login,
     dirb,
     dirsearch,
     dnsx,
@@ -49,6 +52,9 @@ TOOLS = [
     katana_crawl,
     zap_crawl,
     js_endpoints,
+    browser_crawl,
+    browser_login,
+    browser_actions,
     # Vuln scanners
     nuclei,
     sqlmap,

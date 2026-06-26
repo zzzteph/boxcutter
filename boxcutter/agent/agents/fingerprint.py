@@ -27,7 +27,7 @@ KNOWN_LEAKS = {
 
 class Fingerprint(Agent):
     name = "fingerprint"
-    tools = {"httpx", "http-request", "screenshot"}
+    tools = {"httpx", "http-request", "screenshot", "browser-crawl"}
     max_steps = 12
 
     def objective(self, ctx):
@@ -41,4 +41,7 @@ class Fingerprint(Agent):
             "report any that return real data (redact secrets):\n" + leaks + "\n\n"
             "3) Hand off the detected stack + the nuclei `-tags` to use (default exposure,misconfig,cve,kev,panel "
             "plus a stack tag like wordpress/springboot/laravel) in artifacts.notes, and add a `profile` field "
-            '{"tech":"<stack>"} so the model is shared. Put any exposure you find in findings.')
+            '{"tech":"<stack>"} so the model is shared. Put any exposure you find in findings.\n'
+            "Clever: pivot the detected version to its known default paths; from Next.js read "
+            "__NEXT_DATA__.buildId -> /_next/data routes; infer the backend from session cookies "
+            "(JSESSIONID=Java, laravel_session=PHP, .AspNet=.NET) and probe that stack's defaults.")

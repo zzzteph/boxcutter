@@ -13,15 +13,72 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+from urllib.parse import urlparse
 
 OUT_CAP = 12000          # chars of a tool's output fed back to the model
 MUTATING = {"put", "patch", "delete"}
+
+# tools that accept --header, so the managed session token can be auto-injected
+_HEADER_TOOLS = {
+    "http-request", "fuzz", "nuclei", "katana-crawl", "dirsearch", "screenshot",
+    "browser-crawl", "browser-actions",
+    "zap-scan-url", "zap-scan-full", "zap-scan-openapi",
+    "swagger-parser", "swagger-endpoints", "swagger-specs", "graphql-detect", "graphql-audit",
+}
+
+
+def _strip_auth(argv):
+    """Drop any existing Authorization/Cookie --header pair so a fresh token can replace it."""
+    out, i = [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--header", "-H") and i + 1 < len(argv) and \
+                str(argv[i + 1]).lower().startswith(("authorization:", "cookie:")):
+            i += 2
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
+# --- scope guard: keep active calls on the target's domain (set BOB_SCOPE to widen) ---
+_SCOPE_EXEMPT = {"--list", "--help", "workflow"}
+_DOMAIN_ONLY = {"subfinder", "wayback-domains"}   # subdomain enumeration: only for a bare-domain target
+
+
+def _apex(host):
+    parts = (host or "").split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (host or "")
+
+
+def _scope_extra():
+    return [h.strip().lower() for h in os.environ.get("BOB_SCOPE", "").split(",") if h.strip()]
+
+
+def _host_of(argv):
+    for a in argv[1:]:
+        if isinstance(a, str) and a.startswith(("http://", "https://")):
+            return (urlparse(a).hostname or "").lower()
+    if len(argv) > 1 and isinstance(argv[1], str) and "." in argv[1] and "/" not in argv[1] and " " not in argv[1]:
+        return argv[1].split(":")[0].lower()          # bare host arg, e.g. swagger-specs example.com
+    return ""
+
+
+def _in_scope(thost, base_host, extra):
+    if not thost or not base_host:
+        return True
+    apex = _apex(base_host)
+    if thost == base_host or thost == apex or thost.endswith("." + apex):
+        return True
+    return any(thost == e or thost.endswith("." + e) for e in extra)
 
 ALLOWED = {
     "httpx", "subfinder", "dnsx", "wayback", "wayback-domains", "katana-crawl", "js-endpoints",
     "dirsearch", "dirb", "path-fuzz", "nuclei", "git-extract", "scan-secrets", "screenshot",
     "fuzz", "sqlmap", "zap-scan-url", "zap-scan-full", "zap-scan-openapi", "swagger-parser",
     "swagger-endpoints", "swagger-specs", "graphql-detect", "graphql-audit", "http-request",
+    "browser-crawl", "browser-login", "browser-actions",
     "workflow", "--list", "--help",
 }
 _ALWAYS = {"--list", "--help", "workflow"}
@@ -69,14 +126,67 @@ def _check(argv, allowed, aggressive):
 class InProcessRunner:
     """`runner(argv, allowed=agent.tools)` -> JSON envelope text, dispatched in-process."""
 
-    def __init__(self, tool_timeout=600, aggressive=False):
+    def __init__(self, tool_timeout=600, aggressive=False, max_calls=500):
         self.tool_timeout = tool_timeout
         self.aggressive = aggressive
+        self.max_calls = max_calls
+        self._calls = 0
+        self._cache = {}   # argv -> output (shared across agents for the whole run)
+        self._count = {}   # argv -> times requested (loop/repeat breaker)
 
-    def __call__(self, argv, allowed=None):
+    def __call__(self, argv, allowed=None, ctx=None):
         err = _check(argv, allowed, self.aggressive)
         if err:
             return err
+        self._calls += 1
+        if self._calls > self.max_calls:
+            return json.dumps({"success": False, "error": f"run budget reached ({self.max_calls} tool calls) - stopping"})
+        if ctx and getattr(ctx, "base_url", "") and argv[0] not in _SCOPE_EXEMPT:
+            entry = getattr(ctx, "entry", "domain")
+            if entry != "domain" and argv[0] in _DOMAIN_ONLY:
+                return json.dumps({"success": False,
+                                   "error": f"'{argv[0]}' (subdomain enumeration) is off for a {entry} target"})
+            base_host = (urlparse(ctx.base_url).hostname or "").lower()
+            thost = _host_of(argv)
+            extra = _scope_extra()
+            ok = _in_scope(thost, base_host, extra) if entry == "domain" \
+                else (not thost or thost == base_host or thost in extra)
+            if not ok:
+                return json.dumps({"success": False,
+                                   "error": f"'{thost}' is out of scope ({entry} target {base_host}); set BOB_SCOPE to widen"})
+        argv = self._inject_auth(list(argv), ctx)
+        key = tuple(argv)
+        self._count[key] = self._count.get(key, 0) + 1
+        # 1st run: execute + cache. 2nd identical: serve cache (free). 3rd+: refuse - it's a loop.
+        if self._count[key] > 2:
+            return json.dumps({"success": False, "error":
+                               "this exact call already ran - reuse the earlier result and move on "
+                               "(repeating it makes no progress)"})
+        if key in self._cache:
+            self._record(ctx, argv, self._cache[key], cached=True)
+            return self._cache[key]
+        out = self._maybe_reauth(argv, self._dispatch(argv), ctx)
+        self._cache[key] = out
+        self._record(ctx, argv, out, cached=False)
+        return out
+
+    def _record(self, ctx, argv, out, cached):
+        if not ctx:
+            return
+        try:
+            env = json.loads(out)
+        except Exception:  # noqa: BLE001
+            env = {}
+        data = env.get("data") if isinstance(env.get("data"), list) else []
+        status = data[0].get("status") if data and isinstance(data[0], dict) else None
+        ctx.record(argv[0], argv[1] if len(argv) > 1 else "", bool(env.get("success")),
+                   env.get("kind"), len(data), status, cached)
+        ctx.responses[tuple(argv)] = out
+        if not getattr(ctx, "baseline", "") and argv[0] == "http-request" and len(argv) > 1 \
+                and str(argv[1]).rstrip("/") == (ctx.base_url or "").rstrip("/") and data and isinstance(data[0], dict):
+            ctx.baseline = str(data[0].get("content") or "")[:8000]
+
+    def _dispatch(self, argv):
         from ..cli import main as cli_main  # deferred: avoids a circular import at module load
         buf = io.StringIO()
         try:
@@ -86,5 +196,36 @@ class InProcessRunner:
             pass
         except Exception as exc:  # noqa: BLE001 - a tool blowing up must not kill the pipeline
             return json.dumps({"success": False, "error": f"{argv[0]} failed: {exc}"})
-        out = buf.getvalue().strip()
-        return out[:OUT_CAP] if out else json.dumps({"success": True, "data": [], "error": None})
+        raw = buf.getvalue().strip()
+        return _truncate(raw) if raw else json.dumps({"success": True, "data": [], "error": None})
+
+    def _inject_auth(self, argv, ctx):
+        """Append the active managed session's token to an app-targeted, header-capable call."""
+        if not ctx or not argv or argv[0] not in _HEADER_TOOLS:
+            return argv
+        sess = ctx.active_session()
+        if not sess or not sess.access:
+            return argv
+        host = urlparse(ctx.base_url).hostname if ctx.base_url else None
+        target = next((a for a in argv if isinstance(a, str) and a.startswith(("http://", "https://"))), "")
+        if not host or not target or urlparse(target).hostname != host:
+            return argv
+        if any(isinstance(a, str) and a.lower().startswith(("authorization:", "cookie:")) for a in argv):
+            return argv                       # caller set an explicit identity - respect it
+        header = sess.auth_header()
+        return argv + ["--header", header] if header else argv
+
+    def _maybe_reauth(self, argv, out, ctx):
+        """If an app http-request came back 401/403, refresh the session and retry once."""
+        if not ctx or not argv or argv[0] != "http-request":
+            return out
+        from . import session as S
+        if not S.is_unauthorized(out):
+            return out
+        sess = ctx.active_session()
+        if not sess or not (sess.refresh or sess.creds):
+            return out
+        if S.refresh(sess, self):             # refresh drives http-request through this same runner
+            ctx.sync_identity(sess)
+            return self._dispatch(self._inject_auth(_strip_auth(argv), ctx))
+        return out

@@ -11,7 +11,7 @@ from ..base import Agent
 
 class Profile(Agent):
     name = "profile"
-    tools = {"http-request", "httpx"}
+    tools = {"http-request", "httpx", "browser-crawl"}
     max_steps = 8
 
     def objective(self, ctx):
@@ -33,4 +33,6 @@ class Profile(Agent):
             '    "risk": "High|Medium|Low"\n'
             "  }\n"
             "Be concrete about sensitive_actions and key_objects (use real paths you observed) — the access "
-            "and fuzzer agents test exactly these. Leave a list empty rather than guessing.")
+            "and fuzzer agents test exactly these. Leave a list empty rather than guessing.\n"
+            "Clever: also capture the THREAT MODEL - who profits from abusing this app, the crown-jewel object, "
+            "and the tenancy/role boundaries - so access and business-logic aim where it actually hurts.")

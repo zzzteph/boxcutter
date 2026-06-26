@@ -27,4 +27,7 @@ class Exposure(Agent):
             "UIs, debug endpoints. Keep the boundary - flag a crack/login/RCE lead, do not run it.\n"
             "USE CONTEXT: nuclei_tags + stack from fingerprint; SURFACE.paths/js; admin/.git hints from discovery.\n"
             "HAND OFF: candidate exposures/secrets in findings; any new endpoints/credentials you uncovered in "
-            "artifacts.endpoints/tokens.")
+            "artifacts.endpoints/tokens.\n"
+            "Clever: when one leak appears, sweep its siblings (.git -> .svn / .hg / .env / .DS_Store / "
+            "backup.zip) and backup suffixes (~ .bak .old .orig) on discovered files; pull source maps; and a "
+            "found admin panel -> test for default creds (flag it, do not brute-force).")

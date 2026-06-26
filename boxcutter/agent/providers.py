@@ -10,6 +10,7 @@ Add a provider by implementing those five methods and registering it in PROVIDER
 from __future__ import annotations
 
 import json
+import os
 import time
 
 import requests
@@ -58,10 +59,13 @@ TOOLS = [{
 
 
 class Anthropic:
-    api, default_model, env = "https://api.anthropic.com/v1/messages", "claude-sonnet-4-6", "ANTHROPIC_API_KEY"
+    default_model, env = "claude-sonnet-4-6", "ANTHROPIC_API_KEY"
+    _default_base, _base_env = "https://api.anthropic.com", "ANTHROPIC_BASE_URL"
 
-    def __init__(self, model, key):
+    def __init__(self, model, key, base_url=None):
         self.model, self.key = model, key
+        base = (base_url or os.environ.get(self._base_env) or self._default_base).rstrip("/")
+        self.api = base + "/v1/messages"
 
     def _headers(self):
         return {"x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
@@ -96,10 +100,13 @@ class Anthropic:
 
 
 class OpenAI:
-    api, default_model, env = "https://api.openai.com/v1/chat/completions", "gpt-4o", "OPENAI_API_KEY"
+    default_model, env = "gpt-4o", "OPENAI_API_KEY"
+    _default_base, _base_env = "https://api.openai.com", "OPENAI_BASE_URL"
 
-    def __init__(self, model, key):
+    def __init__(self, model, key, base_url=None):
         self.model, self.key = model, key
+        base = (base_url or os.environ.get(self._base_env) or self._default_base).rstrip("/")
+        self.api = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
 
     def _headers(self):
         return {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
@@ -135,4 +142,14 @@ class OpenAI:
         return r.json()["choices"][0]["message"].get("content") or ""
 
 
-PROVIDERS = {"anthropic": Anthropic, "openai": OpenAI}
+class LiteLLM(OpenAI):
+    """LiteLLM gateway - OpenAI-compatible, so it reuses OpenAI's wire format and __init__.
+
+    Point it with --base-url or LITELLM_BASE_URL (default http://localhost:4000) and a key via --api-key
+    or LITELLM_API_KEY; pick the routed model with --model. Fronts any provider through one gateway.
+    """
+    default_model, env = "gpt-4o", "LITELLM_API_KEY"
+    _default_base, _base_env = "http://localhost:4000", "LITELLM_BASE_URL"
+
+
+PROVIDERS = {"anthropic": Anthropic, "openai": OpenAI, "litellm": LiteLLM}

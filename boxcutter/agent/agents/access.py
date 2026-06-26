@@ -5,8 +5,12 @@ from ..base import Agent
 
 class Access(Agent):
     name = "access"
-    tools = {"http-request", "fuzz"}
+    tools = {"http-request", "fuzz", "browser-actions"}
     max_steps = 20
+
+    def should_run(self, ctx):
+        s = ctx.surface
+        return bool(s.get("endpoints") or s.get("param_urls") or s.get("tier1") or ctx.identities)
 
     def objective(self, ctx):
         return (
@@ -32,4 +36,8 @@ class Access(Agent):
             "the exact reproduce argv (include the identity header used).\n"
             "USE CONTEXT: the APP PROFILE (your test plan), SURFACE object/ID endpoints, and all IDENTITIES.\n"
             "HAND OFF: candidate access/logic findings (unconfirmed) with evidence + reproduce; note any check you "
-            "couldn't run (e.g. only one identity) for coverage.")
+            "couldn't run (e.g. only one identity) for coverage.\n"
+            "Clever: don't just walk sequential ids - LEAK a real id/UUID from a list or another user's response, "
+            "then request it under the other identity; tamper tenancy/role headers (X-Tenant-Id, X-Role, "
+            "X-User-Id); for a weak / alg=none JWT flip the role/sub claim (flag it, do not forge crypto); and "
+            "compare response SIZE/fields, not only status.")
