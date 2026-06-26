@@ -116,11 +116,23 @@ def _login_sessions(ctx, runner):
 def run(args) -> int:
     if args.show_prompts:
         ctx = _build_ctx(args)
+        tot_sys = tot_mem = 0
         for cls in PIPELINE:
             agent = cls(None, None, args)
             sp = agent.system_prompt(ctx)
-            print(f"\n{'=' * 80}\n# {agent.name}  -  {len(sp)} chars  "
-                  f"(BASE doctrine + role objective + tool reference + judgment rubric)\n{'=' * 80}\n{sp}")
+            mem = agent.context_block(ctx)          # the shared memory (Context) sent with every turn
+            tot_sys += len(sp); tot_mem += len(mem)
+            print(f"\n{'=' * 80}\n# {agent.name}  -  system {len(sp)} chars (~{len(sp) // 4} tok) "
+                  f"+ shared-memory {len(mem)} chars (~{len(mem) // 4} tok) "
+                  f"= {len(sp) + len(mem)} chars (~{(len(sp) + len(mem)) // 4} tok)\n"
+                  f"  (system = BASE doctrine + role objective + tool reference + judgment rubric; "
+                  f"shared-memory = the live Context, grows as agents add findings/identities/surface)\n"
+                  f"{'=' * 80}\n{sp}")
+        print(f"\n{'=' * 80}\n# TOTALS  -  {len(PIPELINE)} agents: "
+              f"system {tot_sys} chars (~{tot_sys // 4} tok), "
+              f"shared-memory[seed] {tot_mem} chars (~{tot_mem // 4} tok)\n"
+              f"  shared-memory shown is the INITIAL SEED; it grows during a run as findings, identities, "
+              f"surface and handoffs accumulate (run with --steps to see live per-agent payload sizes).\n{'=' * 80}")
         return 0
 
     provider_cls = PROVIDERS[args.provider]

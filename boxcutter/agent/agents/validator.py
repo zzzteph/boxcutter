@@ -5,11 +5,12 @@ from ..base import Agent
 
 class Validator(Agent):
     name = "validator"
-    tools = {"http-request", "fuzz", "nuclei", "scan-secrets"}
+    tools = {"http-request", "fuzz", "sqlmap", "nuclei", "scan-secrets", "git-extract"}
     max_steps = 24
 
     def should_run(self, ctx):
-        return any(f.status == "candidate" for f in ctx.findings)
+        # judge everything not already adjudicated - an unverified claim MUST be re-fired or dropped
+        return any(f.status in ("candidate", "unverified") for f in ctx.findings)
 
     def context_block(self, ctx):
         return ctx.brief() + "\n\nCANDIDATE FINDINGS (challenge EACH one):\n" + ctx.findings_dump()
@@ -21,8 +22,11 @@ class Validator(Agent):
             "if it needs auth) and put it through this gate:\n"
             "1. Is there REAL, verbatim evidence (not paraphrased, not empty)?\n"
             "2. Is it actual data, or an auth-rejection / error / login page mistaken for a finding?\n"
-            "3. injection/xss: does the payload truly execute / the DB error name a table - or is it only "
-            "reflected in JSON/plain (-> not exploitable)?\n"
+            "3. injection: a DB error alone proves a parser broke, NOT impact - to CONFIRM SQLi at full severity "
+            "you must EXTRACT real data (run `sqlmap <url>` for version/current-user/a dumped row, or a UNION/"
+            "boolean that returns actual rows). An error with no extraction is at most 'downgrade' to "
+            "error-disclosure. XSS: does the payload execute in an HTML context, or only reflect in JSON/plain "
+            "(-> not exploitable)?\n"
             "4. BOLA/IDOR: is it genuinely another owner's data, or a public resource identical for every id?\n"
             "5. In scope, and NOT on the IGNORE noise list (missing headers/clickjacking/CORS/cookie flags)?\n"
             "6. Is the claimed severity justified by the evidence (per the judgment rubric)?\n"

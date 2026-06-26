@@ -64,9 +64,38 @@ Test/debug endpoint: reachable -> SUGGESTION; executes logic or returns data -> 
 AWS AKIA... / Stripe sk_live... / private key / DB_PASSWORD with a value -> High.
 JWT eyJ... -> Medium (note alg/claims).    Google API key AIza... -> SUGGESTION.
 A clearly public/test key (publishable pk_..., example placeholder) -> omit.""",
+
+    # Distilled from web-CTF / bug-bounty writeups - the recurring CHAINS, mapped to boxcutter actions.
+    # Universal tradecraft (helps CTF and real targets): recover-then-exploit, pivot on every result.
+    "chaining": """## Chaining & exploitation tradecraft (build a CHAIN, don't list bugs)
+The win is almost always a CHAIN, not one isolated bug. After EVERY result ask "what does this UNLOCK?" - then
+pivot to the next link. Never stop at the first signal when a further link is reachable.
+RECOVER THEN EXPLOIT (precision beats blind fuzzing):
+- exposed .git/.svn or a backup/source leak -> `git-extract` the FULL tree (or fetch the file) and READ the
+  source: the exact SQL query, real routes, secret keys, how ids/tokens are built - then craft the PRECISE
+  exploit instead of guessing.
+- any file-read (LFI / path traversal) -> read the app's OWN source/config (index.php, config.php, .env,
+  settings.py, web.config) to recover queries, creds, and hidden endpoints, then act on them immediately.
+KNOWN CHAINS (see the left -> drive to the right):
+- numeric `id=` / any reflected param -> SQL: `sqlmap <url>` then enumerate + UNION/--dump. SQLite: read
+  `sqlite_master` for table/column names, then dump the interesting table; MySQL: use `information_schema`. A
+  credential/key in a dumped row is the NEXT link, not the finish.
+- verbose error / stack trace / debug page -> the exact path, query, framework or filename it names is your
+  next probe target.
+- a decoy/placeholder at an interesting path (an /admin that is a static image or a default welcome page) is a
+  TELL, not a dead end - the real panel/route is hidden one level deeper or named in the source/JS; recover it.
+- leaked/forgeable credential/JWT/cookie -> reuse it across the WHOLE authed surface (retry everything that
+  401'd); decode the JWT for alg=none / weak secret / role claims to tamper.
+- SSTI ({{7*7}}->49) / deserialization / file-upload -> escalate toward code execution; if it needs an RCE
+  shell boxcutter lacks, report the CONFIRMED primitive + the exact manual next step (don't fake it).
+GOAL ORIENTATION: if the target exposes a goal artifact (a flag, /flag.php, a secret/token table, an admin-only
+record) that is the OBJECTIVE - reach it through the chain and quote it (redacted) as proof. On a real
+(non-CTF) target there is no flag: the objective is the maximum-impact data the chain reaches - state the blast
+radius.""",
 }
 
-# which cheatsheet(s) each specialist gets (agents not listed judge nothing -> no block)
+# Per-specialist JUDGMENT cheatsheets (agents not listed judge nothing). Chaining is NOT here - it's
+# universal (every agent both feeds and follows the chain) and added to all of them by for_agent().
 _AGENT_TOPICS = {
     "reporter": ["classify"],                 # writes the report; needs the whole rubric
     "validator": ["classify"],                # the judge; needs the whole rubric to disprove
@@ -86,7 +115,8 @@ _AGENT_TOPICS = {
 
 
 def for_agent(name: str) -> str:
-    """Concatenate the judgment cheatsheets relevant to this agent (empty if it judges nothing)."""
-    topics = _AGENT_TOPICS.get(name, [])
-    blocks = [_BLOCKS[t] for t in topics if t in _BLOCKS]
+    """Chaining tradecraft is UNIVERSAL - every agent both feeds and follows the chain, so it leads every
+    agent's knowledge; this specialist's judgment cheatsheet(s) follow."""
+    topics = [t for t in _AGENT_TOPICS.get(name, []) if t != "chaining"]
+    blocks = [_BLOCKS["chaining"]] + [_BLOCKS[t] for t in topics if t in _BLOCKS]
     return "\n\n".join(blocks)

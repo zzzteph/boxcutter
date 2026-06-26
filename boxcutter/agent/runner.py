@@ -44,7 +44,7 @@ def _strip_auth(argv):
 
 # --- scope guard: keep active calls on the target's domain (set BOB_SCOPE to widen) ---
 _SCOPE_EXEMPT = {"--list", "--help", "workflow"}
-_DOMAIN_ONLY = {"subfinder", "wayback-domains"}   # subdomain enumeration: only for a bare-domain target
+_DOMAIN_ONLY = {"wayback", "wayback-domains"}   # broad archive/subdomain recon: only for a bare-domain target
 
 
 def _apex(host):
@@ -74,7 +74,7 @@ def _in_scope(thost, base_host, extra):
     return any(thost == e or thost.endswith("." + e) for e in extra)
 
 ALLOWED = {
-    "httpx", "subfinder", "dnsx", "wayback", "wayback-domains", "katana-crawl", "js-endpoints",
+    "httpx", "dnsx", "wayback", "wayback-domains", "katana-crawl", "js-endpoints",
     "dirsearch", "dirb", "path-fuzz", "nuclei", "git-extract", "scan-secrets", "screenshot",
     "fuzz", "sqlmap", "zap-scan-url", "zap-scan-full", "zap-scan-openapi", "swagger-parser",
     "swagger-endpoints", "swagger-specs", "graphql-detect", "graphql-audit", "http-request",
@@ -115,6 +115,14 @@ def _check(argv, allowed, aggressive):
         return json.dumps({"success": False, "error": f"'{tool or '(empty)'}' is not a boxcutter sub-command"})
     if allowed is not None and tool not in allowed and tool not in _ALWAYS:
         return json.dumps({"success": False, "error": f"'{tool}' is not permitted for this agent"})
+    # a bare `--data {FUZZ}` posts ONE payload as the entire body - a structured (JSON/form) API just 400s it
+    if tool == "fuzz":
+        for i, t in enumerate(argv):
+            if t == "--data" and i + 1 < len(argv) and argv[i + 1].strip() in ("{FUZZ}", "{NUMBERS}"):
+                return json.dumps({"success": False, "error":
+                    "bare '--data {FUZZ}' sends one payload as the ENTIRE body - a structured API rejects it. "
+                    "Build a real body with {FUZZ} in ONE field, e.g. --data '{\"email\":\"{FUZZ}\",\"password\":\"x\"}' "
+                    "(get the field names from swagger-parser), and add --header 'Content-Type: application/json' for JSON."})
     if not aggressive:
         for i, t in enumerate(argv):
             if t in ("--method", "-X") and i + 1 < len(argv) and argv[i + 1].lower() in MUTATING:
@@ -145,7 +153,9 @@ class InProcessRunner:
             entry = getattr(ctx, "entry", "domain")
             if entry != "domain" and argv[0] in _DOMAIN_ONLY:
                 return json.dumps({"success": False,
-                                   "error": f"'{argv[0]}' (subdomain enumeration) is off for a {entry} target"})
+                                   "error": f"'{argv[0]}' (broad archive/subdomain recon) is noise for a {entry} "
+                                            f"target - test the {entry} directly (swagger-parser/swagger-endpoints "
+                                            f"for a spec; the given URL for an endpoint)"})
             base_host = (urlparse(ctx.base_url).hostname or "").lower()
             thost = _host_of(argv)
             extra = _scope_extra()

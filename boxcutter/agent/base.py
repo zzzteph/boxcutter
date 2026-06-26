@@ -29,7 +29,19 @@ Prove impact with a minimal, NON-DESTRUCTIVE proof of concept:
 - XSS: land a reflected/stored alert(1)-class payload and show where it executes.
 - SQLi: pull one row marker (version()/a username) or a deterministic boolean/time signal.
 - BFLA/privesc: reach ONE privileged action as a lower-privileged identity.
-Chase each bug to the point a triager would accept it. Hard limits: authorized targets only; NO DoS or
+Chase each bug to the point a triager would accept it - then GO FURTHER: once a bug is confirmed, EXTRACT THE
+MAXIMUM non-destructive impact and gather everything that proves full severity. NEVER stop at the first signal.
+- SQLi: don't stop at the error - `sqlmap <url>` and enumerate banner / current-user / current-db / --dbs /
+  --tables / --columns, then --dump a SMALL sample (read-only) to prove real data access.
+- BOLA/IDOR: enumerate the id range ({NUMBERS}) and QUANTIFY how many other users'/orgs' records are reachable;
+  quote fields from several to show the scope, not just one.
+- exposed .git/source/config: `git-extract` the FULL tree, then mine it for credentials, new endpoints, and how
+  auth/ids are built - and immediately act on what you find.
+- a leaked credential/token: reuse it across the WHOLE authed surface and report everything it unlocks.
+- admin/panel/privileged action: don't stop at reaching the page - perform the actual privileged READ (list
+  users, read settings) to prove the access is real.
+State the BLAST RADIUS (records / users / tenants / secrets reached) in the finding. Read-extraction is expected
+and in-scope; only the destructive-WRITE limit below still holds. Hard limits: authorized targets only; NO DoS or
 volumetric/credential-stuffing; NO destructive writes (PUT/PATCH/DELETE) unless aggressive mode is ON (the
 RULES line in the context tells you); redact secret/PII values to pattern+location in everything you report.
 
@@ -76,7 +88,10 @@ exact manual next step (do not fake it).
 # Scope, noise, evidence (binds every agent)
 OUT OF SCOPE - do not chase: SSRF/CSRF/open-redirect, authenticated login/OAuth/MFA flows, stateful multi-step
 logic (coupon reuse, OTP brute, sequenced checkout), environment/infra (ports, subdomain takeover, CORS).
-NEVER report as a finding (noise): missing security headers, clickjacking, CORS wildcards, cookie flags.
+NEVER report as a finding (noise): missing security headers, clickjacking, CORS wildcards, cookie flags; a
+WAF/CDN/bot-challenge/rate-limit that BLOCKS you (Cloudflare "Just a moment", a 403/429, a captcha) - that is a
+control WORKING, not a bug; "could not confirm / coverage or visibility limitation / unable to determine" - a
+thing you were PREVENTED from testing is COVERAGE, put it in artifacts.notes, never in findings.
 EVIDENCE: every finding needs verbatim, <=100-char, redacted evidence; no evidence -> at most [SUGGESTION], never [VULN].
 ENTRY MODE (shown in the context): domain = full recon incl subdomains; url = stay on THIS host only, no
 subdomain enumeration; endpoint = focus the given endpoint, minimal crawl; spec = drive the documented API from
@@ -91,6 +106,47 @@ the finding needed auth, include the exact `--header` identity you used, or the 
 unauthenticated and wrongly discard a real bug. Only include what you actually observed; use [] when empty."""
 
 _JSON_BLOCK = re.compile(r"```json\s*(\{.*\})\s*```", re.S)
+
+# A "finding" that merely describes a control blocking us (WAF/CDN/captcha/rate-limit) or admits it could not
+# confirm anything is COVERAGE, not a vulnerability - route it to notes so it never reaches the report.
+_COVERAGE_NOISE = re.compile(
+    r"(?i)just a moment|cloudflare|captcha|bot[- ]?challenge|\bwaf\b|rate[- ]?limit"
+    r"|could not (?:confirm|verify|determine)|unable to (?:confirm|verify|determine|access)"
+    r"|coverage[ /]|visibility limitation|rather than a confirmed")
+
+
+def _is_coverage_noise(f) -> bool:
+    blob = " ".join(str(f.get(k, "")) for k in ("title", "info", "evidence"))
+    return bool(_COVERAGE_NOISE.search(blob))
+
+
+def _extract_handoff(text):
+    """The agent's structured handoff dict: a fenced ```json block if present, otherwise the last bare
+    {...} object carrying findings/artifacts/verdicts/profile. Models routinely emit bare JSON despite the
+    doctrine; silently dropping it is what leaves ctx.findings empty -> validator/correlator skip and
+    nothing gets verified. raw_decode is brace/string-safe, so braces inside evidence don't trip it."""
+    if not text:
+        return None
+    m = _JSON_BLOCK.search(text)
+    if m:
+        try:
+            obj = json.loads(m.group(1))
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+    dec = json.JSONDecoder()
+    best, idx = None, text.find("{")
+    while idx != -1:
+        try:
+            obj, end = dec.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            idx = text.find("{", idx + 1)
+            continue
+        if isinstance(obj, dict) and any(k in obj for k in ("findings", "artifacts", "verdicts", "profile")):
+            best = obj                       # keep the LAST qualifying object - the handoff is at the end
+        idx = text.find("{", max(end, idx + 1))
+    return best
 
 
 def _summary(out):
@@ -158,7 +214,11 @@ class Agent:
     def run(self, ctx) -> str:
         ctx.current_agent = self.name
         system = self.system_prompt(ctx)
-        messages = [{"role": "user", "content": f"Engagement context:\n{self.context_block(ctx)}\n\nPerform your role now."}]
+        mem = self.context_block(ctx)
+        if getattr(self.args, "steps", False):
+            self.say(f"payload: system {len(system)} chars (~{len(system) // 4} tok) "
+                     f"+ shared-memory {len(mem)} chars (~{len(mem) // 4} tok)")
+        messages = [{"role": "user", "content": f"Engagement context:\n{mem}\n\nPerform your role now."}]
         final, requested, stall, reason = "", set(), 0, "capped"
         for _ in range(self.max_steps):
             try:
@@ -200,17 +260,17 @@ class Agent:
 
     # -- structured handoff -> shared context ----------------------------
     def _merge(self, ctx, final):
-        m = _JSON_BLOCK.search(final or "")
-        if not m:
+        obj = _extract_handoff(final or "")
+        if obj is None:
             ctx.handoffs[self.name] = (final or "").strip()[:200] or "(no structured handoff)"
-            return
-        try:
-            obj = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            ctx.handoffs[self.name] = "(unparsable handoff)"
             return
         findings = obj.get("findings") or []
         for f in findings:
+            # a control blocked us / we couldn't confirm -> COVERAGE note, not a finding
+            if _is_coverage_noise(f):
+                ctx.note("coverage: " + str(f.get("title", "")).strip()[:120]
+                         + " (control or visibility limitation - not a finding)")
+                continue
             evid = str(f.get("evidence", ""))[:100]
             fobj = ctx.add(Finding(
                 self.name, str(f.get("severity", "info")).title(), f.get("title", ""), f.get("url", ""),
@@ -233,6 +293,9 @@ class Agent:
         # validator verdicts update existing findings in place (confirm / downgrade / drop)
         for v in obj.get("verdicts") or []:
             self._apply_verdict(ctx, v)
+        # one-line handoff summary for the next agent (count + a snippet of this agent's own prose)
+        head = ((final or "").split("```")[0]).strip()[:160]
+        ctx.handoffs[self.name] = (f"{len(findings)} finding(s). {head}").strip()
 
     def _apply_verdict(self, ctx, v):
         url, title = v.get("url", ""), (v.get("title") or "").strip().lower()
@@ -254,5 +317,3 @@ class Agent:
                 if ev:
                     g.evidence = ev
                 return
-        head = (final.split("```")[0]).strip()[:160]
-        ctx.handoffs[self.name] = f"{len(findings)} finding(s). {head}"

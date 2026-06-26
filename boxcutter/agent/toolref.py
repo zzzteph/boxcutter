@@ -22,9 +22,6 @@ Returns {status, title, content, headers}. The response `headers` include Set-Co
   JSON login:      http-request https://x/api/login -H "Content-Type: application/json" -D '{"u":"a","p":"b"}'
   GOTCHA: there is NO --method flag; passing -D/--data is what makes it a POST.""",
 
-    "subfinder": """subfinder <domain>   - passive subdomain enumeration.
-  e.g.  subfinder example.com""",
-
     "katana-crawl": """katana-crawl <url> [--js] [--params]   - crawl for links/endpoints.
   --js = only .js URLs | --params = only URLs with query params.
   e.g.  katana-crawl https://example.com""",
@@ -101,7 +98,7 @@ RCE/XXE/NoSQL/GraphQL/error-disclosure + time-blind.
 
 # canonical order so the block reads recon -> exploit
 _ORDER = [
-    "httpx", "subfinder", "katana-crawl", "js-endpoints", "dirsearch", "dirb", "wayback", "screenshot",
+    "httpx", "katana-crawl", "js-endpoints", "dirsearch", "dirb", "wayback", "screenshot",
     "browser-crawl", "browser-login", "browser-actions",
     "swagger-specs", "swagger-parser", "swagger-endpoints", "graphql-detect", "graphql-audit",
     "nuclei", "git-extract", "scan-secrets", "fuzz", "sqlmap", "http-request",
