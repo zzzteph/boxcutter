@@ -5,7 +5,7 @@ from ..base import Agent
 
 class Lateral(Agent):
     name = "lateral"
-    tools = {"http-request", "fuzz", "dirsearch", "js-endpoints", "git-extract", "scan-secrets",
+    tools = {"http-request", "fuzz", "sqlmap", "dirsearch", "js-endpoints", "git-extract", "scan-secrets",
              "swagger-endpoints", "graphql-audit", "browser-crawl", "browser-actions"}
     max_steps = 26
 

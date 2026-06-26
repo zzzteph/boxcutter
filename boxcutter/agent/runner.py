@@ -166,15 +166,21 @@ class InProcessRunner:
                                    "error": f"'{thost}' is out of scope ({entry} target {base_host}); set BOB_SCOPE to widen"})
         argv = self._inject_auth(list(argv), ctx)
         key = tuple(argv)
-        self._count[key] = self._count.get(key, 0) + 1
-        # 1st run: execute + cache. 2nd identical: serve cache (free). 3rd+: refuse - it's a loop.
-        if self._count[key] > 2:
-            return json.dumps({"success": False, "error":
-                               "this exact call already ran - reuse the earlier result and move on "
-                               "(repeating it makes no progress)"})
+        # Anti-spin is PER-AGENT (one agent repeating itself = a loop). A LATER agent re-running the same
+        # call - the validator re-firing a finding's reproduce, or a re-sweep - is legitimate and must NOT be
+        # refused: serve it free from the shared cache. (A global refusal was silently sabotaging the
+        # validator, which then DROPPED findings it couldn't re-confirm, and made re-sweep calls no-op
+        # instantly.) Cache check comes first so a repeat is always answered with the real result.
+        agent = getattr(ctx, "current_agent", "") if ctx else ""
+        ckey = (agent, key)
+        self._count[ckey] = self._count.get(ckey, 0) + 1
         if key in self._cache:
             self._record(ctx, argv, self._cache[key], cached=True)
             return self._cache[key]
+        if self._count[ckey] > 2:
+            return json.dumps({"success": False, "error":
+                               "this exact call already ran for this agent - reuse the earlier result and move on "
+                               "(repeating it makes no progress)"})
         out = self._maybe_reauth(argv, self._dispatch(argv), ctx)
         self._cache[key] = out
         self._record(ctx, argv, out, cached=False)

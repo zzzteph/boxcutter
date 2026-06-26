@@ -5,7 +5,7 @@ from ..base import Agent
 
 class Correlator(Agent):
     name = "correlator"
-    tools = {"http-request", "fuzz"}
+    tools = {"http-request", "fuzz", "sqlmap"}
     max_steps = 16
 
     def should_run(self, ctx):
