@@ -33,9 +33,12 @@ RUN apk add --no-cache \
         libpcap-dev nss freetype harfbuzz ttf-freefont
 ENV HTTPX_NO_COLOR=1
 
-# Playwright for the browser-crawl / browser-login tools - driven against the system chromium above
-# (no `playwright install`: Playwright's bundled glibc Chromium won't run on Alpine/musl).
-RUN pip3 install --no-cache-dir --break-system-packages playwright
+# Browser-driven tools (browser-crawl/login/actions) target the system chromium above.
+# NOTE: Playwright Python publishes no Alpine/musl wheel (and no sdist), so it cannot be
+# pip-installed on this base - `pip install playwright` fails with "No matching distribution".
+# The tools import playwright lazily inside run(), so without it they degrade gracefully
+# (emit a "not installed" envelope). chromium + chromium-chromedriver are already present
+# for a future musl-compatible (Selenium/CDP) port.
 ENV CHROMIUM_PATH=/usr/bin/chromium-browser
 
 ARG ZAP_VERSION=2.17.0

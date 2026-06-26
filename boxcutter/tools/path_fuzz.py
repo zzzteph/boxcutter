@@ -22,7 +22,7 @@ _INTERESTING = {200, 201, 204, 301, 302, 307, 308, 401, 403}
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="URL template with FUZZ marker, e.g. https://x/api/FUZZ")
     parser.add_argument("--method", default="GET", help="HTTP method")
-    parser.add_argument("--header", action="append", default=[], metavar="NAME: VALUE",
+    parser.add_argument("-H", "--header", action="append", default=[], metavar="NAME: VALUE",
                         help="Extra header (repeatable)")
     parser.add_argument("--timeout", type=int, default=300, help="Max total seconds")
     add_common_args(parser)

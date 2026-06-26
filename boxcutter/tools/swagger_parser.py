@@ -17,7 +17,7 @@ HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head"}
 def add_arguments(parser) -> None:
     parser.add_argument("spec_url", help="Full URL of the OpenAPI/Swagger spec (JSON or YAML)")
     parser.add_argument("--base-url", dest="base_url", default="", help="Base URL to prepend to all paths")
-    parser.add_argument("--header", action="append", default=[], metavar="NAME: VALUE",
+    parser.add_argument("-H", "--header", action="append", default=[], metavar="NAME: VALUE",
                         help="Extra header (repeatable)")
     add_common_args(parser)
 

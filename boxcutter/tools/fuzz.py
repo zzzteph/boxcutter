@@ -76,7 +76,7 @@ def add_arguments(parser) -> None:
     parser.add_argument("--method", default="GET", help="HTTP method (GET or POST)")
     parser.add_argument("--data", default=None, metavar="BODY",
                         help="Request body; put {FUZZ} where the payload goes")
-    parser.add_argument("--header", action="append", default=[], metavar="NAME: VALUE",
+    parser.add_argument("-H", "--header", action="append", default=[], metavar="NAME: VALUE",
                         help="Extra header (repeatable)")
     parser.add_argument("--status", default="200,201,204,301,302,307",
                         help="Status codes to report in numeric mode (default excludes 401/403/5xx)")
