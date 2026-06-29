@@ -1,6 +1,5 @@
 """fuzz - parameter / path / numeric-ID fuzzer.
-
-Ported from jet-pentest's ``fuzz.py`` detection model, adapted to boxcutter's
+``fuzz.py`` detection model, adapted to boxcutter's
 envelope and finding shape. An explicit marker in the target (or body) picks the
 mode:
 
