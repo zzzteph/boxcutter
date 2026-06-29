@@ -68,6 +68,8 @@ class Context:
     aggressive: bool = False                            # allow state-mutating methods (PUT/PATCH/DELETE)
     findings: list = field(default_factory=list)
     notes: list = field(default_factory=list)          # coverage notes
+    follow_ups: list = field(default_factory=list)     # explicit finding-derived next-step directives (flows.py)
+    plan: list = field(default_factory=list)            # explicit ordered worklist: what orca did/queued + WHY
     handoffs: dict = field(default_factory=dict)       # agent -> short summary
     ledger: list = field(default_factory=list)          # every tool call - deterministic ground truth
     responses: dict = field(default_factory=dict)       # argv -> captured output (for evidence checks)
@@ -97,6 +99,51 @@ class Context:
     def note(self, msg: str):
         if msg and msg not in self.notes:
             self.notes.append(msg)
+
+    def add_follow_up(self, cls: str, url: str, steps, agents=(), src: str = ""):
+        """Stage an explicit, finding-derived next-step directive (deduped by class+url). flows.py fills these;
+        an agent reads the ones addressed to it via follow_ups_block()."""
+        for e in self.follow_ups:
+            if e["cls"] == cls and e["url"] == url:
+                return
+        self.follow_ups.append({"cls": cls, "url": url, "steps": list(steps),
+                                "agents": list(agents), "src": src})
+        self.plan_add(f"follow-up: {cls.upper()} @ {url}", f"chained from {src or cls}",
+                      by="flows", status="queued")
+
+    def plan_add(self, action: str, reason: str = "", by: str = "", status: str = "done"):
+        """Append one explicit step to the execution plan - the auditable record of WHAT was done/queued and
+        WHY. Deterministic tool steps (coverage fuzz, follow-ups) cost no LLM tokens; only `agent:` steps do,
+        which is what makes the plan a basis for cost estimation."""
+        self.plan.append({"n": len(self.plan) + 1, "action": action, "reason": reason,
+                          "by": by or self.current_agent, "status": status})
+
+    def plan_render(self, limit: int = 200) -> str:
+        if not self.plan:
+            return ""
+        out = ["=== EXECUTION PLAN (ordered - WHAT was done/queued and WHY) ==="]
+        for e in self.plan[:limit]:
+            line = f"{e['n']:>3}. [{e['status']}] {e['action']}"
+            if e.get("reason"):
+                line += f"  <- {e['reason']}"
+            if e.get("by"):
+                line += f"  ({e['by']})"
+            out.append(line)
+        if len(self.plan) > limit:
+            out.append(f"     ...(+{len(self.plan) - limit} more steps)")
+        return "\n".join(out)
+
+    def follow_ups_block(self, agent: str, limit: int = 10) -> str:
+        rel = [e for e in self.follow_ups if not e["agents"] or agent in e["agents"]]
+        if not rel:
+            return ""
+        out = ["EXPLICIT FOLLOW-UPS (chained from what earlier agents already FOUND - these are REQUIRED next "
+               "steps for you, bound to the real URL; do them before exploring elsewhere):"]
+        for e in rel[:limit]:
+            out.append(f"- {e['cls'].upper()} @ {e['url']}:")
+            for i, s in enumerate(e["steps"], 1):
+                out.append(f"    {i}. {s}")
+        return "\n".join(out)
 
     def add_identity(self, label: str, headers: list, source: str = ""):
         self.identities[label] = headers
@@ -209,4 +256,8 @@ class Context:
             out.append("agents stopped early (partial coverage): " + ", ".join(partial))
         if self.low_coverage:
             out.append("LOW COVERAGE: " + (self.coverage_reason or "results likely incomplete"))
+        plan = self.plan_render()
+        if plan:
+            out.append("")
+            out.append(plan)
         return "\n".join(out)

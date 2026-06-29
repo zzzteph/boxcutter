@@ -215,6 +215,9 @@ class Agent:
         ctx.current_agent = self.name
         system = self.system_prompt(ctx)
         mem = self.context_block(ctx)
+        followups = ctx.follow_ups_block(self.name)
+        if followups:
+            mem += "\n\n" + followups
         if getattr(self.args, "steps", False):
             self.say(f"payload: system {len(system)} chars (~{len(system) // 4} tok) "
                      f"+ shared-memory {len(mem)} chars (~{len(mem) // 4} tok)")

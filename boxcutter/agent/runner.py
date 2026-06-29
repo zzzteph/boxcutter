@@ -14,7 +14,7 @@ import contextlib
 import io
 import json
 import os
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qsl
 
 OUT_CAP = 12000          # chars of a tool's output fed back to the model
 MUTATING = {"put", "patch", "delete"}
@@ -65,6 +65,25 @@ def _host_of(argv):
     return ""
 
 
+def _url_of(argv):
+    return next((a for a in argv[1:] if isinstance(a, str) and a.startswith(("http://", "https://"))), "")
+
+
+def _struct_sig(argv):
+    """Structural signature of an active-test target: same path BASENAME + same query-param NAMES is the
+    same functionality even under a different directory (…/bugs/verify.php vs …/mantis/verify.php vs
+    …/verify.php). Returns None when there are no query params - too coarse to call 'same functionality'."""
+    url = _url_of(argv)
+    if not url:
+        return None
+    u = urlparse(url)
+    params = frozenset(k.lower() for k, _ in parse_qsl(u.query))
+    if not params:
+        return None
+    basename = (u.path.rstrip("/").rsplit("/", 1)[-1] or "/").lower()
+    return (argv[0], (u.hostname or "").lower(), basename, params)
+
+
 def _in_scope(thost, base_host, extra):
     if not thost or not base_host:
         return True
@@ -72,6 +91,10 @@ def _in_scope(thost, base_host, extra):
     if thost == base_host or thost == apex or thost.endswith("." + apex):
         return True
     return any(thost == e or thost.endswith("." + e) for e in extra)
+
+# recon/spec tools whose URL output auto-populates the shared surface, so the FULL documented/discovered
+# endpoint set lands in ctx (deterministically) instead of only what a model happens to echo into artifacts.
+_URL_SOURCES = {"swagger-endpoints", "katana-crawl", "js-endpoints", "wayback", "dirsearch", "dirb"}
 
 ALLOWED = {
     "httpx", "dnsx", "wayback", "wayback-domains", "katana-crawl", "js-endpoints",
@@ -115,6 +138,11 @@ def _check(argv, allowed, aggressive):
         return json.dumps({"success": False, "error": f"'{tool or '(empty)'}' is not a boxcutter sub-command"})
     if allowed is not None and tool not in allowed and tool not in _ALWAYS:
         return json.dumps({"success": False, "error": f"'{tool}' is not permitted for this agent"})
+    # http-request has no method override - turn the cryptic argparse error into actionable guidance
+    if tool == "http-request" and any(t in ("-X", "--method") for t in argv):
+        return json.dumps({"success": False, "error":
+            "http-request does GET (default) or POST (when you pass -D/--data) ONLY - there is no -X/--method "
+            "override, so OPTIONS/TRACE/HEAD/PUT/DELETE are unsupported. Drop the -X flag."})
     # a bare `--data {FUZZ}` posts ONE payload as the entire body - a structured (JSON/form) API just 400s it
     if tool == "fuzz":
         for i, t in enumerate(argv):
@@ -141,6 +169,7 @@ class InProcessRunner:
         self._calls = 0
         self._cache = {}   # argv -> output (shared across agents for the whole run)
         self._count = {}   # argv -> times requested (loop/repeat breaker)
+        self._sigs = {}    # structural signature -> first URL tested (same-functionality dedupe)
 
     def __call__(self, argv, allowed=None, ctx=None):
         err = _check(argv, allowed, self.aggressive)
@@ -164,6 +193,18 @@ class InProcessRunner:
             if not ok:
                 return json.dumps({"success": False,
                                    "error": f"'{thost}' is out of scope ({entry} target {base_host}); set BOB_SCOPE to widen"})
+        # same-functionality dedupe: a second active test whose path basename + query-param names match an
+        # already-tested URL (…/bugs/verify.php vs …/mantis/verify.php) is the same code - skip the waste.
+        if argv and argv[0] in ("fuzz", "sqlmap"):
+            sig = _struct_sig(argv)
+            if sig is not None:
+                first = self._sigs.get(sig)
+                cur = _url_of(argv)
+                if first and first != cur:
+                    return json.dumps({"success": False, "error":
+                        f"skipped: '{cur}' is structurally identical to already-tested '{first}' (same path "
+                        f"basename + same query parameters = same functionality). Test a different endpoint/param."})
+                self._sigs.setdefault(sig, cur)
         argv = self._inject_auth(list(argv), ctx)
         key = tuple(argv)
         # Anti-spin is PER-AGENT (one agent repeating itself = a loop). A LATER agent re-running the same
@@ -198,6 +239,17 @@ class InProcessRunner:
         ctx.record(argv[0], argv[1] if len(argv) > 1 else "", bool(env.get("success")),
                    env.get("kind"), len(data), status, cached)
         ctx.responses[tuple(argv)] = out
+        # deterministic surface ingestion: pull every endpoint URL a recon/spec tool returned into the
+        # shared surface, so later agents + the coverage sweep act on the WHOLE set (not the model's sample)
+        if argv[0] in _URL_SOURCES and data:
+            eps = []
+            for d in data:
+                u = d if isinstance(d, str) else (d.get("url") if isinstance(d, dict) else None)
+                if isinstance(u, str) and u.startswith(("http://", "https://")):
+                    eps.append(u)
+            if eps:
+                ctx.add_surface("param_urls", [u for u in eps if "?" in u])
+                ctx.add_surface("endpoints", [u for u in eps if "?" not in u])
         if not getattr(ctx, "baseline", "") and argv[0] == "http-request" and len(argv) > 1 \
                 and str(argv[1]).rstrip("/") == (ctx.base_url or "").rstrip("/") and data and isinstance(data[0], dict):
             ctx.baseline = str(data[0].get("content") or "")[:8000]

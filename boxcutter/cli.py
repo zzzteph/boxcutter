@@ -177,7 +177,20 @@ def _desugar_workflow(argv: list[str]) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
-    args = parser.parse_args(_desugar_workflow(raw_argv))
+    args, extras = parser.parse_known_args(_desugar_workflow(raw_argv))
+    # Passthrough tolerance: a tool that wraps an external binary and exposes
+    # --opt-args should accept that binary's NATIVE flags directly instead of
+    # failing with "unrecognized arguments". Fold any leftover tokens into
+    # opt_args (forwarded verbatim) so `sqlmap <url> --dump -T users` or
+    # `nuclei <url> -tags cve` work without the caller knowing the wrapper's
+    # quoting convention. Tools without --opt-args still reject unknown flags.
+    if extras:
+        if hasattr(args, "opt_args"):
+            import shlex
+            extra = shlex.join(extras)
+            args.opt_args = f"{args.opt_args} {extra}".strip() if args.opt_args else extra
+        else:
+            parser.error("unrecognized arguments: " + " ".join(extras))
 
     if getattr(args, "list_all", False):
         _print_tool_list(show_all=True)

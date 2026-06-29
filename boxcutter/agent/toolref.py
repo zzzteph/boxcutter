@@ -20,7 +20,8 @@ Returns {status, title, content, headers}. The response `headers` include Set-Co
                    then read headers.Set-Cookie in the result and REUSE it: -H "Cookie: session=..."
                    and report it under artifacts.tokens so later agents keep the session.
   JSON login:      http-request https://x/api/login -H "Content-Type: application/json" -D '{"u":"a","p":"b"}'
-  GOTCHA: there is NO --method flag; passing -D/--data is what makes it a POST.""",
+  GOTCHA: GET or POST ONLY - there is NO --method/-X flag; passing -D/--data is what makes it a POST. You CANNOT
+  send OPTIONS/TRACE/HEAD/PUT/DELETE with this tool, so don't try `-X OPTIONS` (it just errors).""",
 
     "katana-crawl": """katana-crawl <url> [--js] [--params]   - crawl for links/endpoints.
   --js = only .js URLs | --params = only URLs with query params.
@@ -29,10 +30,14 @@ Returns {status, title, content, headers}. The response `headers` include Set-Co
     "js-endpoints": """js-endpoints <js-url> [--base-url URL]   - extract API paths from a JS file.
   e.g.  js-endpoints https://example.com/static/app.js""",
 
-    "dirsearch": """dirsearch <url>   - brute unlinked dirs/files. Recurse by pointing at a found dir.
-  e.g.  dirsearch https://example.com/        then  dirsearch https://example.com/admin/""",
+    "dirsearch": """dirsearch <url>   - brute-force unlinked DIRECTORIES/paths under a base URL (it appends a
+  wordlist to the path; it is NOT a file fetcher). Recurse by pointing at a found dir.
+  e.g.  dirsearch https://example.com/        then  dirsearch https://example.com/admin/
+  Run it together with `dirb` - they ship DIFFERENT wordlists, so each finds paths the other misses.
+  DON'T point it at one known file (…/robots.txt, …/app.js) - that discovers nothing; fetch a file with http-request.""",
 
-    "dirb": """dirb <url>   - directory brute-force (alternative to dirsearch).
+    "dirb": """dirb <url>   - directory brute-force with a DIFFERENT wordlist than dirsearch (complementary, NOT a substitute).
+  Run it ALONGSIDE dirsearch on the same base so the two wordlists together cover more paths.
   e.g.  dirb https://example.com/""",
 
     "wayback": """wayback <domain> [--params] [--js] [--all] [--cc-indexes N]   - archived URLs from public indexes.
@@ -92,8 +97,15 @@ RCE/XXE/NoSQL/GraphQL/error-disclosure + time-blind.
   IDOR scan:   fuzz "https://x/api/orders/{NUMBERS}"
   precise re-check (use in verify): fuzz "https://x/p?q=1" --payload "<svg onload=alert(1)>" --pattern "onload=alert" """,
 
-    "sqlmap": """sqlmap <url>   - confirm a SQL-injection signal on a single URL.
-  e.g.  sqlmap "https://example.com/product?id=1" """,
+    "sqlmap": """sqlmap <url> [<native sqlmap flags>] [-H "Name: Value"]   - confirm AND exploit SQLi.
+  Pass sqlmap's OWN flags straight through (they are forwarded verbatim); the base run already applies
+  --batch --random-agent --level 1 --risk 1, so don't repeat those. Auth goes through -H, not --cookie.
+  confirm + fingerprint:  sqlmap "https://x/p?id=1" --banner --current-user --current-db --dbs
+  EXTRACT DATA (required to confirm real impact): list then dump -
+        sqlmap "https://x/p?id=1" --tables             (find table names)
+        sqlmap "https://x/p?id=1" --dump -T users      (dump a table's rows)
+  if id=1 isn't flagged, go deeper:  sqlmap "https://x/p?id=1" --level 3 --risk 2 --technique=BEUST --dbs
+  with a harvested session:  sqlmap "https://x/p?id=1" -H "Cookie: PHPSESSID=abc" --tables """,
 }
 
 # canonical order so the block reads recon -> exploit

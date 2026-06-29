@@ -8,6 +8,7 @@ analysis tail (validator -> correlator -> reporter) always runs last over whatev
 
 from __future__ import annotations
 
+from . import coverage, flows
 from .agents import AGENTS, PIPELINE
 
 _TAIL = ("validator", "correlator", "reporter")     # analysis layer, always last, in this order
@@ -17,7 +18,10 @@ _MAX_ROUNDS = 3                                       # times the consumers may 
 
 def _surface_sig(ctx):
     s = ctx.surface
-    return (len(ctx.identities), sum(len(s.get(k, [])) for k in ("endpoints", "param_urls", "tier1")))
+    # include the findings count so a consumer re-sweeps when NEW findings appear (e.g. the coverage sweep
+    # turns up SQLi), not only when the URL surface or identities grow.
+    return (len(ctx.identities), sum(len(s.get(k, [])) for k in ("endpoints", "param_urls", "tier1")),
+            len(ctx.findings))
 
 
 def _keep_alive(ctx, runner):
@@ -42,16 +46,26 @@ def run_pipeline(provider, runner, ctx, agent_names, args):
                 ctx.skipped.append(name)
             return
         agent.say("starting" + note)
+        ctx.plan_add(f"agent: {name}", (note.strip() or "scheduled pipeline stage"), by="orca")
         ran_at[name] = _surface_sig(ctx)
         try:
             agent.run(ctx)
         except Exception as exc:  # noqa: BLE001 - one agent failing must not abort the engagement
             agent.say(f"error: {exc}")
             ctx.note(f"{name} aborted: {exc}")
+        # stage explicit follow-ups from whatever this agent just found, so the NEXT agent gets concrete
+        # next steps bound to the real URL (not just its generic objective)
+        flows.expand(ctx)
 
     body = [n for n in agent_names if n not in _TAIL]
     for name in body:
         run_one(name)
+
+    # DETERMINISTIC coverage: once recon/api have populated the surface, fuzz EVERY endpoint in code (the
+    # routine injection battery isn't left to model discretion), then stage follow-ups from what it found.
+    ctx.plan_add("coverage sweep", "deterministic fuzz of every surface endpoint", by="orca")
+    coverage.sweep(runner, ctx)
+    flows.expand(ctx)
 
     # keep the session fresh, then ITERATE the consumers until no new credentials/endpoints appear
     _keep_alive(ctx, runner)

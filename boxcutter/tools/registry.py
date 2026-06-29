@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from . import (
     bob,
+    orca,
+    irvin,
     browser_actions,
     browser_crawl,
     browser_login,
@@ -80,6 +82,10 @@ TOOLS = [
     http_request,
     # Agentic (LLM-driven multi-agent bug-hunter over the tools above)
     bob,
+    # Agentic (LLM planner + advisors + executors over a dynamic queue; standalone from bob)
+    orca,
+    # Agentic (explicit pipeline: suggester council -> concluder -> planner -> executors -> reporter)
+    irvin,
 ]
 
 BY_NAME = {module.NAME: module for module in TOOLS}
