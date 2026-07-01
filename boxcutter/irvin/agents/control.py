@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import time
+
 from ..context import extract_json
 
 
@@ -20,7 +22,10 @@ class Concluder:
         "You are the CONCLUDER of IRVIN - the HEAD of the suggester council and the overseer of possible "
         "actions. The profiles each advised what to do next. Collect ALL of their suggestions, merge "
         "duplicates/overlaps, and PRIORITIZE them into one ordered plan, balancing impact, prerequisites "
-        "(recon/surface before testing it), and cost.\n"
+        "(recon/surface before testing it), and cost - some executors (e.g. dirbust's brute-force, sqli's "
+        "extraction runs, spa's browser rendering) are expensive per call; weigh that against what they're "
+        "actually yielding. A LOW-YIELD LANE below (running repeatedly with zero findings) is a cost sink even "
+        "if it still turns up new surface each time - don't keep feeding an expensive lane on that alone.\n"
         "Weigh the council's TRACK RECORD: a profile whose advice has produced findings has earned priority; "
         "give its advice more weight. And the MINORITY-REPORT (the dissent) is mandatory input - never "
         "auto-decline it; engage with it seriously even when it diverges, because it exists to catch what the "
@@ -40,9 +45,11 @@ class Concluder:
             lines.append(f"  {r.id} (from {r.agent}){tag}: {d.get('action')} {d.get('target', '')}  "
                          f"[suggested p{d.get('priority', '?')}]  — {d.get('why', '')}")
         dead = ctx.dead_commissions_render()
+        low = ctx.low_yield_render()
         user = (f"LANDSCAPE:\n{ctx.landscape_digest()}\n\nCOUNCIL TRACK RECORD (success earns priority):\n"
                 f"{ctx.credibility_render()}\n\nSUGGESTIONS THIS ROUND:\n" + "\n".join(lines) +
                 (f"\n\nALREADY ATTEMPTED (ran, returned nothing - decline any repeat of these):\n{dead}" if dead else "") +
+                (f"\n\nLOW-YIELD LANES (ran >=2x total, 0 findings so far - weigh cost before accepting more):\n{low}" if low else "") +
                 "\n\nReturn a verdict for every id above. JSON only.")
         try:
             raw = provider.chat(self.SYSTEM, user)
@@ -141,6 +148,73 @@ class Planner:
         return steps
 
 
+class Thinner:
+    """Runs BETWEEN the planner and the executors so the run never loops on work already done. Two passes:
+      1) HARD GATE (deterministic) - drop any step whose (executor, target) already ran this engagement, or is
+         duplicated within this plan. Recon included: re-running recon on an endpoint it already mapped just
+         re-reads the same links; a genuinely new area is a different target that passes the gate on its own.
+      2) LLM PRUNE (conservative, exclude-only) - over the survivors, the model may EXCLUDE any the log shows
+         are subsumed/pointless. It can ONLY exclude (never add/modify), so its worst case is over-pruning one
+         step, never a loop or invented work."""
+    name = "thinner"
+    role = "thinner"
+
+    SYSTEM = (
+        "You are the THINNER of IRVIN. A deterministic gate has ALREADY removed every action whose "
+        "(executor, target) ran before. From the SHORTLIST that remains, your ONLY job is to EXCLUDE actions "
+        "the evidence shows are WASTED or SUBSUMED - e.g. a target the log already proved dead/absent, or an "
+        "action a prior result makes pointless. You may ONLY exclude; you cannot add, reorder, or modify. Be "
+        "CONSERVATIVE: exclude an action only with concrete evidence from the log/landscape; when in doubt, "
+        "KEEP it - it is far worse to drop a useful action than to let one extra run.\n"
+        'Reply with ONLY JSON: {"rationale":"<one line>","exclude":[{"step":<index>,"reason":"<why it is '
+        'wasted/subsumed, citing the evidence>"}]}. Exclude nothing if every action is worth running.')
+
+    def thin(self, ctx, provider, steps) -> dict:
+        # 1) deterministic hard gate: exact (executor, target) repeats + intra-plan duplicates
+        gated, dropped, seen = [], [], set()
+        for st in steps:
+            ex, tgt = st.get("executor"), ctx.commission_target(st)
+            key = (ex, ctx._norm_target(ex, tgt))
+            if key in seen:
+                dropped.append({"executor": ex, "target": tgt, "by": "gate", "reason": "duplicate within this plan"})
+                continue
+            seen.add(key)
+            if ctx.was_committed(ex, tgt):
+                dropped.append({"executor": ex, "target": tgt, "by": "gate", "reason": "already ran this engagement"})
+            else:
+                gated.append(st)
+        # 2) conservative LLM prune over the survivors (exclude-only)
+        kept = []
+        excluded = self._llm_exclude(ctx, provider, gated) if gated else {}
+        for i, st in enumerate(gated):
+            if i in excluded:
+                dropped.append({"executor": st.get("executor"), "target": ctx.commission_target(st),
+                                "by": "llm", "reason": excluded[i]})
+            else:
+                kept.append(st)
+        return {"kept": kept, "dropped": dropped}
+
+    def _llm_exclude(self, ctx, provider, gated) -> dict:
+        """Returns {index: reason} for survivors the model judges wasted. On any error, excludes nothing."""
+        lines = [f"  [{i}] {st.get('executor')} {ctx.commission_target(st) or '(base)'}  - "
+                 f"{(st.get('brief') or st.get('why') or '').strip()}" for i, st in enumerate(gated)]
+        dead = ctx.dead_commissions_render()
+        user = (f"LANDSCAPE:\n{ctx.landscape_digest()}\n\nWHAT ALREADY HAPPENED (tail):\n{ctx.recent_trail()}\n\n"
+                + (f"ALREADY ATTEMPTED, RETURNED NOTHING:\n{dead}\n\n" if dead else "")
+                + "SHORTLIST (exact repeats already removed) - exclude only the wasted/subsumed:\n"
+                + "\n".join(lines) + "\n\nJSON only.")
+        try:
+            raw = provider.chat(self.SYSTEM, user)
+        except Exception:  # noqa: BLE001 - on error exclude nothing (never over-prune on a failure)
+            return {}
+        obj = extract_json(raw)
+        out = {}
+        for e in (obj.get("exclude") or []):
+            if isinstance(e, dict) and isinstance(e.get("step"), int) and 0 <= e["step"] < len(gated):
+                out[e["step"]] = str(e.get("reason", ""))[:160]
+        return out
+
+
 class Adjuster:
     """Intermediate controller that runs AFTER each executor. The plan was fixed before the latest results
     came in, so it goes stale mid-round; the adjuster prunes/fixes the REMAINING steps with what was just
@@ -235,19 +309,57 @@ class Reporter:
     role = "reporter"
 
     SYSTEM = (
-        "You are the REPORTER of IRVIN. The hunt is over. Using the VERIFIED findings and the decision trail, "
-        "write a concise pentest report: a short executive summary, then each finding (severity, location, "
-        "verbatim evidence, impact), then a one-paragraph coverage note (what was mapped and tested). Report "
-        "ONLY verified findings - never invent. Plain markdown, no preamble.")
+        "You are the REPORTER of IRVIN. The hunt is over. Using ONLY the VERIFIED findings and the RUN FACTS "
+        "given (use those numbers verbatim - never invent findings or counts), fill the TEMPLATE below EXACTLY: "
+        "same headings and order, one line per finding, evidence <=100 chars and redacted. Findings are already "
+        "verified; add [SUGGESTION] lines only for concrete leads the trail shows are worth a human's follow-up. "
+        "Plain text, no preamble, no markdown fences.\n\n"
+        "TEMPLATE:\n"
+        "SCAN REPORT: <target>\n"
+        "MODE: IRVIN (autonomous)   DATE: <date>   ROUNDS: <n>\n"
+        "NOTE: Automated analysis - findings need human validation; not all are exploitable in context.\n\n"
+        "TESTED: endpoints <N> | params <N> | hosts <N> | commissions <N> | verified <N>\n\n"
+        "Recon       · <surface mapped>\n"
+        "Content     · <hidden paths discovered>\n"
+        "Exposure    · <misconfig / sensitive-file checks>\n"
+        "Secrets     · <secrets found / files scanned>\n"
+        "Injection   · <classes triaged / confirmed>\n"
+        "Access      · <objects x identities, result>\n"
+        "Exploit     · <sqli/lfi/git extraction outcome>\n\n"
+        "FINDINGS:\n"
+        "- [VULN:High]   <title> @ <url>: <what is exposed> | Reproduce: <exact request/step> | Evidence: <<=100 chars>\n"
+        "- [VULN:Medium] <...>\n"
+        "- [SUGGESTION]  <title>: <why worth a human's follow-up>\n\n"
+        "COVERAGE:\n"
+        "  injection: <classes | no> | exposure: <y/n> | secrets: <N files> | access-control: <identities/objects | not run>\n"
+        "  NOT covered: authenticated multi-step flows, SSRF/CSRF/open-redirect, environment/infra (ports, CORS, "
+        "subdomain takeover), stateful logic - IRVIN is application-layer, single-pass.\n"
+        "SUMMARY: Vulns <n> (High <n>, Medium <n>, Low <n>) | Suggestions <n>\n"
+        "CONCLUSION: <1-2 sentences: posture, top risk, highest-impact fix>")
 
     def report(self, ctx, provider) -> str:
+        fnds = ctx.landscape["findings"]
         findings = "\n".join(
             f"- [{f['severity']}|{f['status']}] {f['cls'] or '?'} :: {f['title']} @ {f['url']}\n"
-            f"    evidence: {f['evidence']}  (by {f['by']}, from {','.join(f['from']) or '-'})"
-            for f in ctx.landscape["findings"]) or "(no verified findings)"
-        user = (f"TARGET: {ctx.target}\nROUNDS: {ctx.round}\n\nVERIFIED FINDINGS:\n{findings}\n\n"
-                f"LANDSCAPE:\n{ctx.landscape_digest()}\n\nDECISION TRAIL (tail):\n{ctx.recent_trail(30)}\n\n"
-                "Write the report.")
+            f"    evidence: {f['evidence']}  (by {f['by']})" for f in fnds) or "(no verified findings)"
+        sev = {}
+        for f in fnds:
+            sev[f["severity"]] = sev.get(f["severity"], 0) + 1
+        cov = {}
+        for key, slot in ctx.commissions.items():          # per-executor coverage from the ledger
+            ex = key.split("|", 1)[0]
+            c = cov.setdefault(ex, {"targets": 0, "findings": 0})
+            c["targets"] += 1
+            c["findings"] += slot.get("findings", 0)
+        cov_lines = "\n".join(f"  {ex}: {d['targets']} target(s), {d['findings']} finding(s)"
+                              for ex, d in sorted(cov.items())) or "  (nothing ran)"
+        s = ctx.landscape["surface"]
+        facts = (f"date={time.strftime('%Y-%m-%d')} rounds={ctx.round} endpoints={len(s['endpoints'])} "
+                 f"params={len(s['params'])} hosts={len(s['hosts'])} commissions={len(ctx.commissions)} "
+                 f"verified={len(fnds)}\nseverity counts: {sev or '{}'}\nper-executor coverage:\n{cov_lines}")
+        user = (f"TARGET: {ctx.target}\n\nRUN FACTS (use these numbers verbatim):\n{facts}\n\n"
+                f"VERIFIED FINDINGS:\n{findings}\n\nLANDSCAPE:\n{ctx.landscape_digest()}\n\n"
+                f"DECISION TRAIL (tail):\n{ctx.recent_trail(30)}\n\nFill the template exactly.")
         try:
             return provider.chat(self.SYSTEM, user)
         except Exception as exc:  # noqa: BLE001

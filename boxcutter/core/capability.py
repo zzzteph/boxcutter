@@ -28,9 +28,9 @@ REQUIREMENTS: dict[str, str] = {
     "zap-scan-url": "zap.sh",
     "zap-scan-full": "zap.sh",
     "zap-scan-openapi": "zap.sh",
-    "browser-crawl": "py:playwright",
-    "browser-login": "py:playwright",
-    "browser-actions": "py:playwright",
+    "browser-crawl": "chromium-browser",
+    "browser-login": "chromium-browser",
+    "browser-actions": "chromium-browser",
 }
 
 

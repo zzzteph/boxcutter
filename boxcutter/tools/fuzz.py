@@ -1,7 +1,6 @@
 """fuzz - parameter / path / numeric-ID fuzzer.
-``fuzz.py`` detection model, adapted to boxcutter's
-envelope and finding shape. An explicit marker in the target (or body) picks the
-mode:
+
+An explicit marker in the target (or body) picks the mode:
 
   ``{NUMBERS}`` / ``{NUMBERS[m-n]}``   numeric-ID probing (IDOR enumeration)
   ``{FUZZ}`` in the URL or ``--data``  inject security payloads at that position

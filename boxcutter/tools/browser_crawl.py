@@ -1,19 +1,19 @@
 """browser-crawl - render and interact with a JS/SPA app to capture routes + XHR/fetch.
 
-The raw HTTP tools fetch a SPA's empty shell; this renders it in a headless browser, records every
-XHR/fetch (the real API surface), extracts same-origin routes, and clicks a bounded set of elements to
-trigger more. Capability-gated: needs Playwright + Chromium (auto-pruned where unavailable).
+The raw HTTP tools fetch a SPA's empty shell; this renders it in a headless browser (CDP over the system
+chromium, see core.cdp) and records every XHR/fetch the page makes - the real API surface, INCLUDING the
+cross-origin backend a SPA talks to (e.g. an api.* host) - plus same-origin routes, clicking a bounded set of
+elements to trigger more. Full-image tool: needs chromium + websocket-client, and degrades gracefully without.
 
 Emits items: {url, method, type: xhr|route}.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
 from urllib.parse import urlparse
 
-from ..core.args import add_common_args
+from ..core.args import add_common_args, add_header_arg
+from ..core.cdp import CDPError, Chrome
 from ..core.envelope import debug_logger, output_result
 from ..core.validators import is_valid_url
 
@@ -26,8 +26,7 @@ _SKIP_WORDS = ("logout", "sign out", "log out", "delete", "remove", "deactivate"
 
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="URL to render")
-    parser.add_argument("--header", action="append", default=[], metavar="NAME: VALUE",
-                        help="Request header, e.g. an auth token (repeatable)")
+    add_header_arg(parser)
     parser.add_argument("--timeout", type=int, default=45, help="Per-page timeout (seconds)")
     parser.add_argument("--max-actions", dest="max_actions", type=int, default=25,
                         help="Max elements to click while exploring")
@@ -40,62 +39,98 @@ def run(args) -> int:
     if not is_valid_url(target):
         output_result([], args.output, "Invalid URL.")
         return 1
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception:  # noqa: BLE001
-        output_result([], args.output, "playwright is not installed (browser-crawl is a full-image tool)")
-        return 1
 
     headers = {}
     for raw in args.header or []:
         if ":" in raw:
             k, v = raw.split(":", 1)
             headers[k.strip()] = v.strip()
-    base_host = urlparse(target).hostname or ""
-
-    def same(url):
-        return (urlparse(url).hostname or "") == base_host
-
-    captured = {}   # (method, url) -> True   (XHR/fetch)
-    routes = set()
+    site_hosts = {urlparse(target).hostname or ""}
 
     try:
-        exe = os.environ.get("CHROMIUM_PATH") or shutil.which("chromium-browser") or shutil.which("chromium")
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True, **({"executable_path": exe} if exe else {}))
-            ctx = browser.new_context(extra_http_headers=headers, ignore_https_errors=True)
-            page = ctx.new_page()
+        with Chrome(headers=headers, timeout=args.timeout, debug=dbg) as page:
+            page.navigate(target, wait="networkidle")
+            site_hosts.add(urlparse(page.current_url()).hostname or "")
+            routes = _same_site_links(page, site_hosts)
 
-            def on_request(req):
-                if req.resource_type in ("xhr", "fetch") and same(req.url):
-                    captured[(req.method, req.url.split("#")[0])] = True
+            filled = _auto_fill(page, args.max_actions, dbg)
+            if filled:
+                site_hosts.add(urlparse(page.current_url()).hostname or "")
+                routes.update(_same_site_links(page, site_hosts))
 
-            page.on("request", on_request)
-            page.goto(target, wait_until="networkidle", timeout=args.timeout * 1000)
+            clicked = _auto_click(page, args.max_actions, dbg)
+            site_hosts.add(urlparse(page.current_url()).hostname or "")
+            routes.update(_same_site_links(page, site_hosts))
 
-            def collect_routes():
-                for href in (page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)") or []):
-                    if same(href):
-                        routes.add(href.split("#")[0])
-
-            collect_routes()
-            for el in (page.query_selector_all("button, [role=button], a[href]") or [])[:args.max_actions]:
-                try:
-                    label = (el.inner_text() or "").strip().lower()
-                    if any(w in label for w in _SKIP_WORDS):
-                        continue
-                    el.click(timeout=2000, no_wait_after=True)
-                    page.wait_for_timeout(300)
-                except Exception:  # noqa: BLE001 - a click that navigates/throws is fine, keep going
-                    continue
-            collect_routes()
-            browser.close()
+            captured = page.xhr()
+            landed_url, landed_title = page.current_url(), page.title()
+            cookie_names = ", ".join(sorted({c.split("=", 1)[0] for c in page.cookies().split("; ") if c})) or "(none)"
+    except CDPError as exc:
+        output_result([], args.output, f"browser-crawl unavailable: {exc}")
+        return 1
     except Exception as exc:  # noqa: BLE001
         output_result([], args.output, f"browser-crawl failed: {exc}")
         return 1
 
-    items = [{"url": url, "method": method, "type": "xhr"} for (method, url) in sorted(captured)]
-    items += [{"url": url, "method": "GET", "type": "route"} for url in sorted(routes)]
-    dbg(f"browser-crawl: {len(captured)} api calls, {len(routes)} routes")
+    items = [{"url": u, "method": m, "type": "xhr"} for (m, u) in captured]
+    items += [{"url": u, "method": "GET", "type": "route"} for u in sorted(routes)]
+    dbg(f"browser-crawl: {len(captured)} api calls, {len(routes)} routes "
+        f"({filled} field(s) filled, {clicked} element(s) clicked)")
+    # diagnostic for the "did it actually render, or get blocked/redirected?" question - names only, never
+    # cookie values, since this line is printed on every --debug run.
+    dbg(f"browser-crawl: landed on {landed_url!r} titled {landed_title!r}; cookies set: {cookie_names}")
     output_result(items, args.output)
     return 0
+
+
+def _same_site_links(page, hosts) -> set:
+    """Links matching ANY host the navigation actually touched (the original target's host plus wherever it
+    redirected to) - a single pre-navigation host misses every link once the site redirects (e.g. apex ->
+    www), which silently zeroes out 'routes' on an otherwise fully-rendered page."""
+    out = set()
+    for h in {h for h in hosts if h}:
+        out.update(page.links(same_host=h))
+    return out
+
+
+def _auto_fill(page, budget, dbg) -> int:
+    """Type a plausible probe value into empty text-like inputs (search/address/email/...) and press Enter.
+    Many SPA landing pages ('enter your address to see what's near you') never call their real API until this
+    happens - clicking buttons alone never reaches it. Capped well below the click budget: most pages have at
+    most a handful of these fields."""
+    filled = 0
+    for _ in range(min(5, budget)):
+        val = page.fill_nth(0)
+        if not val:
+            break
+        filled += 1
+        dbg(f"browser-crawl: filled a field with {val!r}, pressing enter")
+        try:
+            page.press("enter")
+        except CDPError:
+            pass
+        page.wait(400)
+    return filled
+
+
+def _auto_click(page, budget, dbg) -> int:
+    """Click through clickable elements up to the budget. Re-checks the LIVE DOM each step (see
+    Chrome._CLICKABLE_SEL) instead of a one-shot snapshot, so content revealed by an earlier click (e.g. behind
+    a just-dismissed cookie banner) gets explored too. Peeks each element's label BEFORE clicking so a
+    dangerous-looking action (logout/delete/pay/purchase) is skipped WITHOUT ever being clicked - not clicked
+    first and only silently un-waited-for, which is what happened here before."""
+    clicked = 0
+    while clicked < budget:
+        try:
+            if page.clickable(1) < 1:
+                break
+            label = (page.peek_nth(0) or "").lower()
+            if label and any(w in label for w in _SKIP_WORDS):
+                page.mark_done(0)
+                continue
+            page.click_nth(0)
+        except CDPError:
+            break                                            # navigation mid-click or similar - stop here
+        clicked += 1
+        page.wait(300)
+    return clicked

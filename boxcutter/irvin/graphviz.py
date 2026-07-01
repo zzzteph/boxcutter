@@ -1,16 +1,14 @@
-"""Graphviz DOT for IRVIN. Two views:
+"""Graphviz DOT for IRVIN's run views:
 
-  - dot()         : the STATIC pipeline (built from the live agent registries, so it never drifts). Print
-                    with `boxcutter irvin --graphviz`.
-  - trace_dot(ctx): what ACTUALLY happened in a run - the decision trail as a causal graph (rounds,
-                    suggestions, verdicts, plans, results, findings). Emit at the end with `--graph`.
+  - trace_dot(ctx)  : what ACTUALLY happened in a run - the decision trail as a causal graph (rounds,
+                      suggestions, verdicts, plans, results, findings). Emit at the end with `--graph`.
+  - actions_dot(ctx): the narrower per-step timeline (plan -> thin -> execute -> escalate -> adjust).
+                      Emit with `--actions`.
 
-Render either yourself, e.g.:  boxcutter irvin --graphviz | dot -Tpng -o irvin.png
+Render either yourself, e.g.:  boxcutter irvin <target> --graph out.dot && dot -Tpng out.dot -o irvin.png
 """
 
 from __future__ import annotations
-
-from .agents import EXECUTORS, SUGGESTERS
 
 
 def _nid(name: str) -> str:
@@ -28,96 +26,6 @@ def _esc(s: str, n: int = 40) -> str:
 def _lbl(*fields) -> str:
     """Join already-escaped fields into a multi-line DOT label (\\n is a DOT line break)."""
     return "\\n".join(f for f in fields if f)
-
-
-def dot() -> str:
-    council = [s for s in SUGGESTERS if not s.dissent]
-    dissent = [s for s in SUGGESTERS if s.dissent]
-    L = []
-    a = L.append
-
-    a("digraph irvin {")
-    a('  rankdir=TB; fontname="Helvetica"; labelloc=t;')
-    a('  label="IRVIN - pipeline bug-hunter (council + separate oversight org)";')
-    a('  node [fontname="Helvetica", shape=box, style="rounded,filled", fillcolor="#eef3fb", color="#3b5b92"];')
-    a('  edge [fontname="Helvetica", color="#3b5b92"];')
-    a('  start [shape=oval, fillcolor="#d9ead3", label="boxcutter irvin <target>"];')
-
-    # ---- the round ----
-    a('  subgraph cluster_round {')
-    a('    label="ROUND (repeats until convergence / max-rounds)"; style="rounded,dashed"; color="#888";')
-
-    # 1 SUGGEST
-    a('    subgraph cluster_suggest {')
-    a('      label="1 - SUGGEST (council)"; style="rounded,filled"; fillcolor="#f6f6f6"; color="#999";')
-    for s in council:
-        a(f'      {_nid(s.name)} [label="{s.name}"];')
-    a('      _dynamic [label="...dynamic profiles\\n(spawned by reviewer)", '
-      'style="rounded,filled,dashed", fillcolor="#fff2cc"];')
-    for s in dissent:
-        a(f'      {_nid(s.name)} [label="{s.name}\\n(DISSENT - always speaks)", '
-          'fillcolor="#fde9e9", color="#a33"];')
-    a('    }')
-
-    # 2 CONCLUDE / 3 REVIEW / 4 PLAN
-    a('    conclude [label="2 - CONCLUDE (council head)\\nverdict per suggestion:\\n'
-      'accept/defer/decline +reason\\nweighs track record", fillcolor="#dbe7c9"];')
-    a('    review [label="3 - REVIEW (separate oversight org)\\nmonitors decision FOR THE USER\\n'
-      'never overrides - can grow council", fillcolor="#fff2cc", color="#bf9000"];')
-    a('    plan [label="4 - PLAN (planner)\\nknows every executor;\\n'
-      'tailors brief+context+avoid", fillcolor="#dbe7c9"];')
-
-    # 5 EXECUTE
-    a('    subgraph cluster_exec {')
-    a('      label="5 - EXECUTE (do + self-verify)"; style="rounded,filled"; fillcolor="#f6f6f6"; color="#999";')
-    for name in EXECUTORS:
-        a(f'      e_{_nid(name)} [label="{name}"];')
-    a('    }')
-    a('  }')
-
-    # ---- terminals + store ----
-    a('  report [shape=oval, fillcolor="#d9ead3", label="6 - REPORT (reporter)"];')
-    a('  user [shape=note, fillcolor="#fde9e9", color="#a33", label="USER\\n(recommendations + trail)"];')
-    a('  ctx [shape=cylinder, fillcolor="#e6e6e6", color="#555", '
-      'label="CONTEXT\\nlandscape + append-only TRAIL\\n(uniform records, causal refs)"];')
-
-    # ---- flow ----
-    first_sug = _nid((council or dissent)[0].name)
-    first_exe = f"e_{_nid(next(iter(EXECUTORS)))}"
-    a(f'  start -> {first_sug} [lhead=cluster_suggest];')
-    for s in council + dissent:
-        a(f'  {_nid(s.name)} -> conclude;')
-    a('  conclude -> review -> plan;')
-    a(f'  plan -> {first_exe} [lhead=cluster_exec];')
-    a(f'  {first_exe} -> report [ltail=cluster_exec, label="converged"];')
-    a(f'  {first_exe} -> {first_sug} [ltail=cluster_exec, lhead=cluster_suggest, '
-      'label="next round\\n(enriched landscape)", style=dashed, constraint=false];')
-    a('  report -> user [style=dashed];')
-
-    # oversight org's two non-authoritative levers
-    a('  review -> user [label="recommendation:\\nwas the decision good?", style=dashed, color="#bf9000", '
-      'fontcolor="#bf9000"];')
-    a('  review -> _dynamic [label="spawn profile\\n(joins next round)", style=dashed, color="#bf9000", '
-      'fontcolor="#bf9000", constraint=false];')
-
-    # context read/writes
-    for n in ("conclude", "plan", "review"):
-        a(f'  {n} -> ctx [style=dotted, color="#777", arrowhead=none];')
-    a(f'  {first_exe} -> ctx [ltail=cluster_exec, style=dotted, color="#777", arrowhead=none, '
-      'label="findings + new surface"];')
-
-    # ---- causal trail legend ----
-    a('  subgraph cluster_trail {')
-    a('    label="TRAIL - causal chain (cross-checkable)"; style="rounded,filled"; fillcolor="#fbfbf0"; color="#bbb";')
-    a('    t_s [label="suggestion s{r}.{n}"];')
-    a('    t_c [label="verdict c{r}.{n}", fillcolor="#dbe7c9"];')
-    a('    t_p [label="plan p{r}.{n}", fillcolor="#dbe7c9"];')
-    a('    t_x [label="result x{r}.{n} -> finding f{n}"];')
-    a('    t_s -> t_c -> t_p -> t_x [label="refs", color="#999", fontcolor="#999"];')
-    a('  }')
-
-    a("}")
-    return "\n".join(L)
 
 
 # node style per trail record kind: (fillcolor, color, shape)
@@ -220,6 +128,70 @@ def trace_dot(ctx) -> str:
             for f in ctx.landscape["findings"]:
                 if f["title"].lower() == title and f["url"] == url:
                     a(f'  {_nid(rec.id)} -> fnd_{_nid(f["id"])} [color="#a33333"];')
+                    break
+
+    a("}")
+    return "\n".join(L)
+
+
+# node fill/border for the actions view, keyed by the acting role
+_ACTION_STYLE = {
+    "planner": ("#dbe7c9", "#38761d"), "thinner": ("#fce5cd", "#b45f06"),
+    "executor": ("#eef3fb", "#3b5b92"), "escalator": ("#fff2cc", "#bf9000"),
+    "adjuster": ("#fce5cd", "#b45f06"),
+}
+
+
+def _action_label(rec) -> str:
+    tag = {"planner": "PLAN", "thinner": "THIN", "escalator": "ESCALATE", "adjuster": "ADJUST"}.get(rec.agent)
+    if tag:
+        return _lbl(tag, _esc(rec.summary))
+    if rec.kind == "result":                                   # an executor ran
+        v = rec.data.get("verification") or {}
+        return _lbl(_esc(rec.agent), _esc(rec.summary),
+                    _esc(f"verify {v.get('verified', '?')}/{v.get('candidates', '?')}"))
+    return _lbl(_esc(rec.agent), _esc(rec.summary))
+
+
+def actions_dot(ctx) -> str:
+    """What the engine DID: per round, the steps run and decisions made (plan -> thin -> execute -> escalate ->
+    adjust) chained in order, with the findings each step produced. A visual walkthrough of the run - narrower
+    than --graph's full council trace. Emit with `boxcutter irvin --actions`."""
+    def is_action(r):
+        return (r.phase == "plan" and r.kind in ("plan", "adjustment")) or r.phase == "execute"
+
+    L = []
+    a = L.append
+    a("digraph irvin_actions {")
+    a('  rankdir=TB; fontname="Helvetica"; labelloc=t;')
+    a(f'  label="IRVIN actions - {_esc(ctx.target, 60)}  ({ctx.round} round(s), '
+      f'{len(ctx.landscape["findings"])} finding(s))";')
+    a('  node [fontname="Helvetica", shape=box, style="rounded,filled"];')
+    a('  edge [fontname="Helvetica", color="#666"];')
+
+    prev = None
+    for rd in sorted({r.round for r in ctx.trail if r.round and is_action(r)}):
+        a(f'  subgraph cluster_a{rd} {{ label="round {rd}"; style="rounded,dashed"; color="#999";')
+        for rec in [r for r in ctx.trail if r.round == rd and is_action(r)]:
+            role = rec.agent if rec.agent in _ACTION_STYLE else rec.role
+            fill, col = _ACTION_STYLE.get(role, ("#eeeeee", "#777"))
+            a(f'    {_nid(rec.id)} [label="{_action_label(rec)}", fillcolor="{fill}", color="{col}"];')
+            if prev:
+                a(f'    {_nid(prev)} -> {_nid(rec.id)};')     # sequential timeline across the whole run
+            prev = rec.id
+        a("  }")
+
+    for f in ctx.landscape["findings"]:
+        a(f'  fa_{_nid(f["id"])} [shape=note, fillcolor="#fde9e9", color="#a33333", '
+          f'label="{_lbl(_esc(f["id"] + "  " + f["severity"]), _esc(f["title"]))}"];')
+    for rec in ctx.trail:
+        if rec.kind != "result":
+            continue
+        for fd in rec.data.get("findings", []):
+            title, url = (fd.get("title") or "").strip().lower(), fd.get("url", "")
+            for f in ctx.landscape["findings"]:
+                if f["title"].lower() == title and f["url"] == url:
+                    a(f'  {_nid(rec.id)} -> fa_{_nid(f["id"])} [color="#a33333"];')
                     break
 
     a("}")

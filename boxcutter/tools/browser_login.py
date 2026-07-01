@@ -1,16 +1,15 @@
 """browser-login - perform a real login flow in a headless browser and return the session.
 
 For SPA / CSRF-token / redirect logins that a raw POST can't do: it fills the login form with --creds,
-submits, follows redirects, and returns the resulting cookies (and any bearer token found in storage).
-Capability-gated: needs Playwright + Chromium. Emits one item: {url, cookie, token, status}.
+submits, follows redirects, and returns the resulting cookies (and any bearer token found in storage). Driven
+via CDP over the system chromium (core.cdp). Full-image tool: needs chromium + websocket-client. Emits one
+item: {url, cookie, token, status}.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
-
 from ..core.args import add_common_args
+from ..core.cdp import CDPError, Chrome
 from ..core.envelope import debug_logger, output_result
 from ..core.validators import is_valid_url
 
@@ -34,14 +33,22 @@ def add_arguments(parser) -> None:
     add_common_args(parser)
 
 
-def _fill_first(page, selectors, value):
+def _fill_first(page, selectors, value) -> bool:
     for sel in selectors:
         try:
-            el = page.query_selector(sel)
-            if el:
-                el.fill(value, timeout=2000)
-                return True
-        except Exception:  # noqa: BLE001
+            page.fill(sel, value)
+            return True
+        except CDPError:
+            continue
+    return False
+
+
+def _click_first(page, selectors) -> bool:
+    for sel in selectors:
+        try:
+            page.click(sel)
+            return True
+        except CDPError:
             continue
     return False
 
@@ -56,43 +63,23 @@ def run(args) -> int:
         output_result([], args.output, "Use --creds user:pass")
         return 1
     user, pw = args.creds.split(":", 1)
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception:  # noqa: BLE001
-        output_result([], args.output, "playwright is not installed (browser-login is a full-image tool)")
-        return 1
 
     try:
-        exe = os.environ.get("CHROMIUM_PATH") or shutil.which("chromium-browser") or shutil.which("chromium")
-        with sync_playwright() as pw_ctx:
-            browser = pw_ctx.chromium.launch(headless=True, **({"executable_path": exe} if exe else {}))
-            ctx = browser.new_context(ignore_https_errors=True)
-            page = ctx.new_page()
-            resp = page.goto(target, wait_until="networkidle", timeout=args.timeout * 1000)
-            status = resp.status if resp else None
+        with Chrome(timeout=args.timeout, debug=dbg) as page:
+            status = page.navigate(target, wait="networkidle")
             if not _fill_first(page, _USER_SEL, user) or not _fill_first(page, _PASS_SEL, pw):
-                browser.close()
                 output_result([], args.output, "could not locate login fields")
                 return 1
-            for sel in _SUBMIT_SEL:
-                try:
-                    btn = page.query_selector(sel)
-                    if btn:
-                        btn.click(timeout=3000)
-                        break
-                except Exception:  # noqa: BLE001
-                    continue
+            _click_first(page, _SUBMIT_SEL)
+            page.wait(2000)                       # let the login POST + redirect / SPA transition settle
+            cookie = page.cookies()
             try:
-                page.wait_for_load_state("networkidle", timeout=args.timeout * 1000)
-            except Exception:  # noqa: BLE001
-                pass
-            cookies = ctx.cookies()
-            cookie = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
-            try:
-                token = page.evaluate(_TOKEN_JS) or ""
-            except Exception:  # noqa: BLE001
+                token = page.eval_fn(_TOKEN_JS) or ""
+            except CDPError:
                 token = ""
-            browser.close()
+    except CDPError as exc:
+        output_result([], args.output, f"browser-login unavailable: {exc}")
+        return 1
     except Exception as exc:  # noqa: BLE001
         output_result([], args.output, f"browser-login failed: {exc}")
         return 1

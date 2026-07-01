@@ -7,8 +7,6 @@ can resolve a tool by its NAME without importing each other.
 from __future__ import annotations
 
 from . import (
-    bob,
-    orca,
     irvin,
     browser_actions,
     browser_crawl,
@@ -80,10 +78,6 @@ TOOLS = [
     graphql_audit,
     # Generic
     http_request,
-    # Agentic (LLM-driven multi-agent bug-hunter over the tools above)
-    bob,
-    # Agentic (LLM planner + advisors + executors over a dynamic queue; standalone from bob)
-    orca,
     # Agentic (explicit pipeline: suggester council -> concluder -> planner -> executors -> reporter)
     irvin,
 ]

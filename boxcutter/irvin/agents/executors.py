@@ -10,26 +10,53 @@ one class here + one line in agents/__init__.py.
 
 from __future__ import annotations
 
+import uuid
+
+from ..verify import _strongest_identity
 from .base import Executor
 
 
 class Recon(Executor):
     name = "recon"
-    description = "Reconnaissance (attack surface): the linked/spec/JS-derived surface with method+params+auth, deduped and existence-gated."
+    description = "Reconnaissance: linked/spec/JS surface + sibling hosts, with method+params+auth, deduped and existence-gated."
     tools = {"httpx", "http-request", "katana-crawl", "js-endpoints", "swagger-specs",
-             "swagger-endpoints", "graphql-detect"}
+             "swagger-endpoints", "graphql-detect", "subfinder", "dnsx"}
     verify_paths_exist = True       # the agentic existence gate is the authoritative liveness check at handoff
     max_steps = 16
     objective = (
         "You are a RECONNAISSANCE specialist - your deliverable is the target's LINKED, spec-derived and "
-        "JS-derived attack surface, never an invented one (unlinked brute paths are dirbust's lane). Prefer "
-        "authoritative sources: enumerate every operation an OpenAPI/GraphQL schema declares, confirm liveness "
-        "and fingerprint the stack, crawl for routes and query parameters, and mine every in-scope JS bundle for "
-        "API paths. Treat a spec as a baseline and DIFF it against crawl/JS-observed routes, flagging "
-        "stale/partial gaps. Stay in-scope-host-only (drop or flag off-host URLs). For each endpoint capture the "
-        "HTTP method, observed params/body shape, and auth-required-vs-anonymous. Hand off FACTS: drop asset "
-        "URLs (.js/.css/.png/.woff) and duplicates (same normalized path+method) - the existence gate confirms "
-        "the survivors - and return the distinct set with a raw->kept count in artifacts.endpoints.")
+        "JS-derived attack surface PLUS the sibling hosts the app really uses, never an invented one (unlinked "
+        "brute paths are dirbust's lane). Enumerate authoritatively: an OpenAPI/GraphQL schema is usually the "
+        "whole API (swagger-endpoints --fuzzable). Discover sibling hosts with `subfinder` (subdomains of the "
+        "apex) and confirm which resolve / are live with `dnsx` and `httpx` - an api.* or backend host is prime "
+        "surface, BUT scope is exact-host-only: a live sibling is OUT OF SCOPE until the operator adds it with "
+        "--scope, so record it in artifacts.notes (never silently drop it, never call http-request/katana-crawl "
+        "on it yourself - that call will just be rejected as out of scope). Crawl for routes and query "
+        "parameters (katana --params/--js); mine in-scope JS for API paths (js-endpoints) AND for absolute API "
+        "base URLs - if the app's JS calls a CROSS-ORIGIN API, record that origin in artifacts.notes the same "
+        "way (never silently drop it; --scope can bring it in). "
+        "Detect GraphQL. Capture HTTP method, observed params/body shape, and auth-required-vs-anonymous per "
+        "endpoint. Hand off FACTS: drop asset URLs and duplicates (same normalized path+method) - the existence "
+        "gate confirms the survivors - and return the distinct live set with a raw->kept count in "
+        "artifacts.endpoints.")
+
+
+class Spa(Executor):
+    name = "spa"
+    description = "SPA/JS rendering: drive a headless browser to capture the real (often cross-origin) API a single-page app calls."
+    tools = {"browser-crawl", "http-request"}
+    cost = "high"        # headless browser render per call
+    max_steps = 8
+    objective = (
+        "You are a SPA / CLIENT-SIDE-RENDERING specialist. Static HTTP fetches only see a single-page app's "
+        "empty shell; you render it in a real headless browser (`browser-crawl`) and capture the API it actually "
+        "calls at RUNTIME - the XHR/fetch endpoints, INCLUDING a cross-origin backend (an api.* host or a "
+        "separate domain) that recon and crawling never see. Report every captured API endpoint in "
+        "artifacts.endpoints so the rest of IRVIN can test it. If the app calls an API on a DIFFERENT host than "
+        "the target, CALL IT OUT: add an artifacts.note and a Low finding 'SPA API backend at <host>' so the "
+        "operator can bring it in scope (--scope <host>) - never silently drop it. Use http-request only to "
+        "sanity-check a captured in-scope endpoint. Do not brute or fuzz here - your job is to reveal the real "
+        "client-side surface.")
 
 
 class Dirbust(Executor):
@@ -37,6 +64,7 @@ class Dirbust(Executor):
     description = "Content discovery: unlinked paths proven to EXIST vs the soft-404 baseline, classified - sensitivity is not its call."
     tools = {"dirsearch", "dirb", "http-request"}
     verify_paths_exist = True       # brute output is noisy AND 200-on-miss hosts lie - confirm each really exists
+    cost = "high"        # full wordlist brute across two tools
     max_steps = 12
     objective = (
         "You are a CONTENT-DISCOVERY specialist - your deliverable is the set of paths that demonstrably EXIST "
@@ -78,8 +106,10 @@ class WebVulnTriage(Executor):
     objective = (
         "You are an OWASP-TOP-10 BREADTH-DETECTION specialist - your job is to detect which vuln CLASS each "
         "input carries and ROUTE it to the right specialist; you confirm a class reproduces, you do NOT extract. "
-        "Drive `fuzz` against every query parameter and id-like path segment, reasoning from a class-specific "
-        "differential, not a bare status:\n"
+        "Drive `fuzz` against every query parameter and id-like path segment WITHOUT --payload/--payload-file - "
+        "the default battery already covers every class below (baseline-diffed, reliability-reconfirmed), so "
+        "hand-picking a handful of payloads yourself is a WEAKER, narrower test than just running it plain. "
+        "Reason from a class-specific differential, not a bare status:\n"
         "- SQLi -> a SQL error string or a deterministic boolean/time oracle (escalate to the sqli specialist).\n"
         "- XSS -> a marker reflected UNESCAPED in its context (escalate to xss).\n"
         "- LFI/path-traversal -> a traversal/wrapper signal (escalate to path-traversal).\n"
@@ -94,6 +124,7 @@ class Sqli(Executor):
     name = "sqli"
     description = "SQL injection (A03): confirm the technique/DBMS with sqlmap, then extract minimal redacted proof."
     tools = {"sqlmap", "http-request", "fuzz"}
+    cost = "high"        # sqlmap fingerprinting/extraction runs many requests, more so at higher level/risk
     max_steps = 12
     objective = (
         "You are a SQL-INJECTION specialist (A03) - sqlmap is your instrument, not your identity. Given a "
@@ -143,6 +174,7 @@ class GitDumper(Executor):
     name = "git-dumper"
     description = "Exposed VCS (A05): confirm a live .git, reconstruct the repo, and scan it for real secrets."
     tools = {"git-extract", "http-request", "scan-secrets"}
+    cost = "low"        # one targeted dump + scan, not a battery of calls
     max_steps = 10
     objective = (
         "You are an EXPOSED-VCS specialist (A05) and the SOLE owner of the .git -> dump -> secret chain. FIRST "
@@ -158,6 +190,7 @@ class Secrets(Executor):
     name = "secrets"
     description = "Secrets exposure (A02): live keys/tokens/credentials shipped in JS/config, corroborated and redacted."
     tools = {"scan-secrets", "http-request", "js-endpoints"}
+    cost = "low"        # scans a handful of known resources, not a battery of calls
     max_steps = 10
     objective = (
         "You are a SECRETS-EXPOSURE specialist (A02) - find live credentials, API keys, tokens, and connection "
@@ -180,7 +213,8 @@ class Exposure(Executor):
         "You are a MISCONFIGURATION & SENSITIVE-FILE-DISCLOSURE specialist (A05) - prove an externally reachable "
         "artifact discloses something it should not. Hypotheses: directory listing enabled, backup/source served "
         "(.bak/.zip/.old/~), env/config exposed (.env/web.config/appsettings), debug/actuator/health/metrics "
-        "endpoint, unauthenticated admin/debug panel; nuclei is one corroborating means, not the mission. You do "
+        "endpoint, unauthenticated admin/debug panel; run `nuclei --tags exposure,misconfig,cve` as one "
+        "corroborating means, not the mission. You do "
         "NOT re-brute (dirbust's lane) and do NOT dump .git or scan for secrets (git-dumper/secrets own those). "
         "Take the mapped + dirbust surface plus a SMALL FIXED well-known checklist - no product-name "
         "extrapolation (e.g. /mantisBT/), no probing beneath a 404 dir. Before declaring a path real, baseline "
@@ -189,3 +223,167 @@ class Exposure(Executor):
         "credentials/keys, source/backups, internal hosts/IPs, stack traces with paths, env/config, or an "
         "unauthenticated console; quote the redacted snippet as proof and drop generic 200s and template "
         "false-positives.")
+
+
+class Auth(Executor):
+    name = "auth"
+    description = ("Session management: establish OR re-establish a login session for one identity (the "
+                   "first login before round 1, and any mid-run refresh, both go through here). The DECISION "
+                   "to (re-)auth is the agent's (auth-profile weighs the auth-signal evidence for a refresh; "
+                   "the pipeline always bootstraps the first one); the CREDENTIAL never reaches the model - "
+                   "only a stored-credential placeholder does.")
+    tools = {"browser-login", "browser-actions", "http-request"}
+    cost = "low"        # one login flow, not a battery of calls
+    objective = (
+        "You are the SESSION/AUTH specialist - your ONLY job is getting ONE identity an ACTIVE login session, "
+        "whether this is its first login or a refresh of one that went stale. RELEVANT CONTEXT below names the "
+        "identity and a stored-credential PLACEHOLDER token - never the real password: you never see or need "
+        "it, it is substituted right before a call actually dispatches, so never alter, guess, or invent a "
+        "credential value of your own.\n"
+        "FIND THE LOGIN PAGE. RELEVANT CONTEXT gives a login URL only when the operator supplied one - it is a "
+        "HINT, not a guarantee. If NO login URL is given, discover it yourself: check ENGAGEMENT STATE for a "
+        "login/sign-in/account endpoint already mapped; else fetch the base URL with http-request and follow a "
+        "login/sign-in link, or try common paths (/login, /signin, /account/login, /auth, /users/sign_in) and "
+        "SPA routes. Confirm you're really on a login page before submitting anything.\n"
+        "LOG IN. With a known simple form, START with browser-login(target=login_url, creds=placeholder) - it "
+        "handles a single-page username+password form on its own. If it can't complete the flow (a multi-step "
+        "/ identifier-first flow that asks for username, THEN password on a separate screen; fields with no "
+        "usable id/name; an unexpected consent/MFA/extra step or redirect), switch to browser-actions and USE "
+        "YOUR EYES: call it with a 'screenshot' action AND a 'describe' action together - the screenshot lets "
+        "you SEE the rendered page (which form, which step, any banner/error you'd otherwise miss) and describe "
+        "lists the CURRENT page's actual fields (type/name/id/placeholder/aria-label + a ready-to-use css "
+        "selector for each). Read both, then issue a SEPARATE browser-actions call using the css selectors "
+        "describe gave you: fill the username field, click 'next' if there is one, waitfor the password field "
+        "to appear, fill it with the SAME placeholder, click submit. Screenshot + describe again after any step "
+        "whose result you're unsure of - each browser-actions call re-navigates fresh, so describe's selectors "
+        "(based on the page's static structure) stay valid across calls to the same URL.\n"
+        "Report the outcome: on a fresh session, put the new cookie/token in artifacts.tokens with \"label\" "
+        "set to the identity you (re-)established (e.g. \"A\") so it REPLACES any stale session instead of "
+        "adding a new identity alongside it; on failure (wrong creds, an MFA/captcha you can't complete, a "
+        "flow you can't resolve even after seeing and describing it), say so plainly in artifacts.notes - a "
+        "clear failure beats a silent no-op.")
+
+    def _resolve_label(self, ctx, step: dict) -> str:
+        """Which identity this commission is for. The planner/suggester is SUPPOSED to pass a bare identity
+        LABEL ("A"/"B"), but it sometimes passes a URL or a phrase instead - and a raw target that isn't a
+        known label must NOT be trusted as one (a URL would otherwise become "H" from "https://..."). A real
+        label is a single letter; anything else is a slip, so fall back to the sole identity that actually
+        has creds when there's exactly one, else "A"."""
+        raw = str(ctx.commission_target(step) or (step.get("args") or {}).get("identity") or "").strip()
+        cand = raw.upper() if (len(raw) == 1 and raw.isalpha()) else ""
+        if cand and ctx.has_creds(cand):
+            return cand
+        cred_labels = sorted({c["label"] for c in ctx._creds.values()})
+        if len(cred_labels) == 1:            # only one identity has creds - a garbled target obviously means it
+            return cred_labels[0]
+        return cand or "A"
+
+    def _enrich_step(self, ctx, step: dict) -> dict:
+        """Resolve WHICH identity into a credential placeholder (and a login_url IF the operator gave one), so
+        the planner (an LLM) never needs to know anything about credentials - it just carries the identity
+        label through from the suggestion (auth-profile sets suggestion.target to the label, e.g. "A"; the
+        pipeline's bootstrap sets step.target directly the same way). The login URL is only a HINT: when it's
+        absent the agent is told to DISCOVER the login page itself before logging in."""
+        label = self._resolve_label(ctx, step)
+        placeholder = ctx.placeholder_for(label)
+        if not placeholder:
+            return {**step, "args": {},
+                    "context": (f"No stored credential for identity {label} - the operator never supplied "
+                                "--creds for it. Report this in artifacts.notes and stop; there is nothing to "
+                                "log in with.")}
+        login_url = ctx.creds_login_url(label)
+        if login_url:
+            return {**step, "args": {"target": login_url, "creds": placeholder},
+                    "context": (f"Identity {label} needs an active session. Start with browser-login using "
+                               f"target={login_url!r} and creds={placeholder!r} EXACTLY as shown (a safe "
+                               "reference token, not a real password). On success, set artifacts.tokens[0].label "
+                               f"to {label!r}.")}
+        # creds but NO login URL: the operator couldn't give one, so FIND the login page first, then log in.
+        return {**step, "args": {"creds": placeholder},
+                "context": (f"Identity {label} needs an active session and you hold its credential placeholder "
+                           f"{placeholder!r} (a safe reference token, not a real password - use it EXACTLY as "
+                           "shown), but NO login URL was supplied: you must FIND the login page yourself before "
+                           f"logging in. Start from the base URL {ctx.base_url!r}. First check ENGAGEMENT STATE "
+                           "for an already-discovered login/sign-in/account endpoint; if none, fetch the base "
+                           "URL with http-request and follow a login/sign-in link, or try common paths "
+                           "(/login, /signin, /account/login, /auth, /users/sign_in) and SPA routes. Confirm "
+                           "you are on a real login form with a 'describe' browser-actions call before "
+                           f"submitting, then log in and set artifacts.tokens[0].label to {label!r}.")}
+
+    def _rewrite_call(self, ctx, name: str, args: dict) -> dict:
+        if name != "browser-login" or not isinstance(args.get("creds"), str):
+            return args
+        real = ctx.creds_for_placeholder(args["creds"])
+        return {**args, "creds": real} if real else args
+
+
+class Explorer(Executor):
+    name = "explore"
+    description = ("Human-like SPA exploration: drive a PERSISTENT, already-logged-in browser session, click "
+                   "through the real UI, and read the full request/response traffic to map the TRUE "
+                   "authenticated API surface the static crawlers never see.")
+    tools = {"browser-actions", "http-request"}
+    cost = "high"        # a real browser render + traffic capture per turn, many turns
+    max_steps = 24
+    objective = (
+        "You are a MANUAL-EXPLORATION specialist - you use the app like a real human at the keyboard to reveal "
+        "the REAL authenticated API surface that static crawling (recon/dirbust) cannot see, because it only "
+        "exists once a logged-in user actually clicks through the SPA. Drive `browser-actions` - it holds ONE "
+        "PERSISTENT browser session for you: it stays logged in and keeps its page/route state ACROSS your "
+        "calls, so you continue where you left off (it does NOT re-navigate on each call - move with a `goto` "
+        "action). The browser is ALREADY authenticated as the strongest identity (its auth is attached for you "
+        "automatically) - do NOT try to log in; if you ever land on a login screen, note that the session went "
+        "stale and stop.\n"
+        "EACH call, combine a few human actions with your senses: include a `screenshot` action to SEE the "
+        "rendered page (you receive it as an image) and a `describe` action when a control/form is unclear; "
+        "each call hands back the screenshot, the page state, AND the full request/response (method, url, "
+        "status, request & response bodies) of every API call your actions triggered. Read what you see, then "
+        "do the next human thing: open the menu, a list, a detail view; run a search; apply a filter; open "
+        "account/settings/orders; submit a benign form. Reach the authenticated areas a real user reaches.\n"
+        "Your DELIVERABLE is the true authenticated API surface: put every DISTINCT real endpoint you "
+        "exercised (the actual request URL, with its method) into artifacts.endpoints, so the specialists "
+        "(access-control, injection, secrets) test REAL authenticated requests instead of guesses. Flag "
+        "anything notable you observed as a Low finding or a note (a response carrying another user's data "
+        "shape, an admin-only action reachable, a token/secret in a response body) - but you MAP and DETECT; "
+        "deep exploitation is the specialists' lane. Do NOT brute-force or fuzz here. Verify a captured "
+        "endpoint is real (the browser genuinely called it - it is) and hand back FACTS.")
+
+    def __init__(self):
+        # one persistent browser session per commission; opened on the first browser-actions call, torn down
+        # in run()'s finally. A unique id keeps a stale session from a previous commission out of this one.
+        self._sid = f"explore-{uuid.uuid4().hex[:8]}"
+
+    def _enrich_step(self, ctx, step: dict) -> dict:
+        tgt = ctx.commission_target(step) or ctx.base_url
+        if not str(tgt).startswith(("http://", "https://")):
+            tgt = ctx.base_url
+        authed = bool(ctx.landscape["identities"])
+        note = (("The persistent browser is authenticated as the strongest established identity - you are "
+                 "logged in already. ") if authed else
+                ("NO identity has been established yet, so the browser is UNAUTHENTICATED - explore what a "
+                 "logged-out user can reach and note that an authenticated pass needs credentials/--creds. "))
+        return {**step, "args": {"target": tgt},
+                "context": ((step.get("context") or "") + " " +
+                            f"Start URL: {tgt}. {note}Explore the live UI like a user and map the API from the "
+                            "captured request/response flows.").strip()}
+
+    def _rewrite_call(self, ctx, name: str, args: dict) -> dict:
+        """Pin every browser call to THIS commission's persistent session, and attach the strongest identity's
+        auth header so the browser is logged in - both injected at dispatch, so the model never sees the
+        session plumbing or the credential/cookie value (same discipline as the auth executor's placeholder)."""
+        if name != "browser-actions":
+            return args
+        new = {**args, "session": self._sid}
+        frag = _strongest_identity(ctx)                    # e.g. ["--header", "Cookie: ..."] or []
+        ident = [frag[i + 1] for i in range(len(frag) - 1) if frag[i] == "--header"]
+        if ident:
+            existing = list(args.get("header") or [])
+            new["header"] = existing + [h for h in ident if h not in existing]
+        return new
+
+    def run(self, ctx, step, runner, provider) -> dict:
+        from ...core.cdp import close_session
+        try:
+            return super().run(ctx, step, runner, provider)
+        finally:
+            close_session(self._sid)                       # persistent session lives only for this commission

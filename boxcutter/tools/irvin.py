@@ -4,8 +4,8 @@ a boxcutter subcommand.
 `boxcutter irvin <target>` runs the IRVIN pipeline: each round the suggester COUNCIL advises (plus a
 mandated MINORITY-REPORT dissent), the CONCLUDER (council head) prioritizes with a verdict for every
 suggestion, the PLANNER tailors executor steps, the EXECUTORS do+verify the work, and on convergence the
-REPORTER writes up. The full decision trail is machine-parsable. irvin is standalone - it reuses only the
-boxcutter tool layer (orca's runner + LLM provider) and shares no hunting logic with bob or orca.
+REPORTER writes up. The full decision trail is machine-parsable. irvin is standalone: its own runner + LLM
+provider, its own agent registry.
 
   docker run --rm -e ANTHROPIC_API_KEY ghcr.io/zzzteph/boxcutter irvin https://target
   OPENAI_API_KEY=...  python3 boxcutter.py irvin https://target --provider openai
@@ -17,10 +17,10 @@ import os
 import sys
 from urllib.parse import urlparse
 
-from ..irvin import pipeline
+from ..irvin import briefing, pipeline
 from ..irvin.context import Context
-from ..orca.provider import PROVIDERS
-from ..orca.runner import Runner
+from ..irvin.provider import PROVIDERS
+from ..irvin.runner import Runner
 
 NAME = "irvin"
 KIND = "items"
@@ -39,20 +39,52 @@ def add_arguments(parser) -> None:
                         help="Auth header for identity A (repeatable)")
     parser.add_argument("--header-b", dest="header_b", action="append", default=[], metavar="NAME: VALUE",
                         help="Auth header for a 2nd identity B, for BOLA (repeatable)")
+    parser.add_argument("--creds", dest="creds", default=None, metavar="USER:PASS",
+                        help="Log in as identity A before round 1 - agent-driven, so it can handle a "
+                             "multi-step/identifier-first login flow, not just a simple form. --login-url is an "
+                             "optional hint: without it the agent DISCOVERS the login page itself. If the "
+                             "session later appears to expire mid-run, the same agent re-logs-in itself using "
+                             "this credential - it is never shown to any LLM, only a placeholder is")
+    parser.add_argument("--login-url", dest="login_url", default=None, metavar="URL",
+                        help="Optional hint: identity A's login page. Omit it and the agent finds the login "
+                             "page itself from the target")
+    parser.add_argument("--creds-b", dest="creds_b", default=None, metavar="USER:PASS",
+                        help="Log in as a 2nd identity B before the run starts, for BOLA (--login-url-b optional)")
+    parser.add_argument("--login-url-b", dest="login_url_b", default=None, metavar="URL",
+                        help="Optional hint: identity B's login page (agent discovers it if omitted)")
+    parser.add_argument("--context", dest="context", default="", metavar="TEXT",
+                        help="Free-text briefing for every agent - what the target IS, what's out of scope, "
+                             "what to focus on, e.g. \"a food-ordering platform; the /admin panel is out of "
+                             "scope; focus on checkout and account APIs\". You can also state RULES here in "
+                             "plain language and they're applied automatically: scope hosts/wildcards (e.g. "
+                             "*.example.com) and request headers/tokens to send on every call (e.g. a "
+                             "Tester-Token) - a token you mention is kept private, not broadcast to the model")
+    parser.add_argument("--scope", dest="scope", action="append", default=[], metavar="HOST",
+                        help="Extra in-scope host (repeatable) - an exact host OR a wildcard like "
+                             "*.example.com (which covers every subdomain AND the apex). Scope defaults to "
+                             "ONLY the target host (no automatic subdomains); add each host/wildcard you want "
+                             "tested explicitly, e.g. a SPA's cross-origin API backend the browser tools "
+                             "surfaced, or a subdomain recon reports as found-but-out-of-scope")
     parser.add_argument("--max-rounds", dest="max_rounds", type=int, default=8,
                         help="Cap on pipeline rounds (default 8); the loop also stops when the council converges")
+    parser.add_argument("--agent", dest="agent", default=None, metavar="NAME",
+                        help="Sanity-run ONE agent standalone against the target - no council/planner/loop. An "
+                             "executor name (e.g. explore, recon, access-control, auth) runs it and prints its "
+                             "verified handoff + action summary; a suggester name prints its advice. Great for "
+                             "evaluating a single agent's output and actions in isolation")
+    parser.add_argument("--agent-brief", dest="agent_brief", default="", metavar="TEXT",
+                        help="Commission text for --agent (what you want it to do). Defaults to a generic "
+                             "'do your job against the target' brief")
     parser.add_argument("--trail", dest="trail", nargs="?", const="-", default=None, metavar="PATH",
                         help="Emit the full machine-parsable decision trail (JSON). Bare --trail prints it to "
                              "the console; --trail PATH writes it to that file")
     parser.add_argument("--graph", dest="graph", nargs="?", const="-", default=None, metavar="PATH",
                         help="At the end, emit a Graphviz DOT of what actually happened (the run trace, from "
                              "the context). Bare --graph prints it; --graph PATH writes it. Render with dot")
-    parser.add_argument("--show-roster", dest="show_roster", action="store_true",
-                        help="Print the suggester/executor roster and exit (no API key needed)")
-    parser.add_argument("--graphviz", dest="graphviz", action="store_true",
-                        help="Print the pipeline diagram as Graphviz DOT and exit (render it yourself with dot)")
-    parser.add_argument("--check", dest="check", action="store_true",
-                        help="Validate that every executor's tools/flags are real, then exit (no API key needed)")
+    parser.add_argument("--actions", dest="actions", nargs="?", const="-", default=None, metavar="PATH",
+                        help="At the end, emit a Graphviz DOT of the ACTIONS taken (steps + decisions per round: "
+                             "plan->thin->execute->escalate->adjust) for a visual walkthrough. Bare --actions "
+                             "prints it; --actions PATH writes it. Render with dot")
 
 
 def _as_headers(values):
@@ -63,22 +95,19 @@ def _as_headers(values):
 
 
 def run(args) -> int:
-    if args.show_roster:
-        from ..irvin.agents import roster
-        print(roster())
-        return 0
-
-    if args.graphviz:
-        from ..irvin.graphviz import dot
-        print(dot())
-        return 0
-
-    if args.check:
-        from ..irvin.selfcheck import report
-        return report()
+    from ..irvin.agents import validate_registry
+    validate_registry()
 
     if not args.target:
-        sys.stderr.write("boxcutter irvin: a target is required (or use --show-roster)\n")
+        sys.stderr.write("boxcutter irvin: a target is required\n")
+        return 2
+    # --login-url is only a HINT for where to log in; --creds is what actually logs in. A login URL with no
+    # credentials to submit is meaningless, but credentials with no URL are fine - the agent discovers the page.
+    if args.login_url and not args.creds:
+        sys.stderr.write("boxcutter irvin: --login-url needs --creds (a login page with no identity to log in as)\n")
+        return 2
+    if args.login_url_b and not args.creds_b:
+        sys.stderr.write("boxcutter irvin: --login-url-b needs --creds-b\n")
         return 2
 
     provider_cls = PROVIDERS[args.provider]
@@ -89,18 +118,79 @@ def run(args) -> int:
         return 2
 
     base_url = args.target if args.target.startswith(("http://", "https://")) else "https://" + args.target
-    ctx = Context(target=args.target, base_url=base_url)
+    base_host = (urlparse(base_url).hostname or "").lower()
+    ctx = Context(target=args.target, base_url=base_url, brief=args.context.strip())
     if args.header:
         ctx.add_identity("A", _as_headers(args.header), "cli")
     if args.header_b:
         ctx.add_identity("B", _as_headers(args.header_b), "cli")
 
     provider = provider_cls(args.model or provider_cls.default_model, key, base_url=args.base_url)
-    runner = Runner(aggressive=True, base_host=(urlparse(base_url).hostname or "").lower())
-    sys.stderr.write(f"irvin :: target={args.target} provider={args.provider} "
-                     "[council -> concluder -> planner -> executors -> reporter]\n")
 
-    pipeline.run(provider, ctx, runner, max_rounds=args.max_rounds)
+    # RULES-IN-CONTEXT: let the operator express settings in the plain-language --context instead of flags -
+    # an LLM pass pulls scope host-patterns and global request headers (a Tester-Token, an org auth header) out
+    # of the briefing. Secrets it finds move into the private global-header channel and are stripped from the
+    # broadcast focus, so a token in --context is a convenience, not a leak. Explicit flags still stack on top.
+    brief_cfg = briefing.parse(provider, args.context, base_host)
+    if brief_cfg.get("focus"):
+        ctx.brief = brief_cfg["focus"]        # cleaned focus (secrets removed) becomes what's broadcast
+    global_headers = brief_cfg.get("headers", [])
+    if global_headers:
+        sys.stderr.write(f"irvin :: {len(global_headers)} global header(s) from --context applied to every "
+                         "request (values hidden)\n")
+
+    # a login URL the operator explicitly gave us is obviously meant to be reachable, even when it's on a
+    # separate host (a common SSO/auth subdomain) - both for this bootstrap login and for the agent-driven
+    # re-login later, which reuses this same Runner/scope. Scope entries may be exact hosts OR *.wildcards.
+    ctx_login_hosts = [urlparse(c["login_url"]).hostname for c in brief_cfg.get("creds", []) if c.get("login_url")]
+    login_hosts = [urlparse(u).hostname for u in (args.login_url, args.login_url_b) if u] + ctx_login_hosts
+    extra_hosts = [*args.scope, *brief_cfg.get("scope", []), *(h for h in login_hosts if h)]
+    if brief_cfg.get("scope"):
+        sys.stderr.write(f"irvin :: scope from --context: {', '.join(brief_cfg['scope'])}\n")
+
+    runner = Runner(aggressive=True, base_host=base_host, extra_hosts=extra_hosts, global_headers=global_headers)
+
+    if args.creds:
+        user, _, pw = args.creds.partition(":")
+        ctx.store_creds("A", user, pw, args.login_url)
+    if args.creds_b:
+        user, _, pw = args.creds_b.partition(":")
+        ctx.store_creds("B", user, pw, args.login_url_b)
+    # credentials named in the plain-language --context are stored the SAME private way as --creds (the
+    # placeholder mechanism; never broadcast) so "creds are user:pass" in the prose just works and triggers the
+    # agent-driven bootstrap login. Explicit --creds for a label wins (don't overwrite it).
+    for c in brief_cfg.get("creds", []):
+        if not ctx.has_creds(c["label"]):
+            ctx.store_creds(c["label"], c["user"], c["password"], c["login_url"] or None)
+    if brief_cfg.get("creds"):
+        sys.stderr.write(f"irvin :: {len(brief_cfg['creds'])} credential(s) parsed from --context "
+                         "(stored privately, values hidden)\n")
+    # the actual login (initial AND any later refresh) is agent-driven - see pipeline.py:_bootstrap_auth and
+    # agents/suggesters.py:AuthProfile/agents/executors.py:Auth. A fixed selector-matching call can't reliably
+    # handle a multi-step/identifier-first flow (e.g. Keycloak splitting username and password across screens,
+    # or fields with no id/name at all) - that needs the same judgment a mid-run refresh needs.
+
+    if args.agent:
+        from ..irvin.agents import EXECUTORS, SUGGESTERS
+        if args.agent not in set(EXECUTORS) | {s.name for s in SUGGESTERS}:
+            sys.stderr.write(f"boxcutter irvin: no agent '{args.agent}'.\n"
+                             f"  executors:  {', '.join(sorted(EXECUTORS))}\n"
+                             f"  suggesters: {', '.join(sorted(s.name for s in SUGGESTERS))}\n")
+            return 2
+        sys.stderr.write(f"irvin :: target={args.target} provider={args.provider} "
+                         f"[single-agent sanity run :: {args.agent}]\n")
+    else:
+        sys.stderr.write(f"irvin :: target={args.target} provider={args.provider} "
+                         "[council -> concluder -> planner -> executors -> reporter]\n")
+
+    try:
+        if args.agent:
+            pipeline.run_agent(args.agent, provider, ctx, runner, brief=args.agent_brief, target=base_url)
+        else:
+            pipeline.run(provider, ctx, runner, max_rounds=args.max_rounds)
+    finally:
+        from ..core.cdp import close_all_sessions
+        close_all_sessions()          # tear down any persistent browser session the explorer left open
 
     if args.trail == "-":
         print("\n===== IRVIN DECISION TRAIL (JSON) =====")
@@ -120,4 +210,15 @@ def run(args) -> int:
             with open(args.graph, "w", encoding="utf-8") as fh:
                 fh.write(graph)
             sys.stderr.write(f"\nirvin :: run trace (DOT) written to {args.graph}\n")
+
+    if args.actions is not None:
+        from ..irvin.graphviz import actions_dot
+        graph = actions_dot(ctx)
+        if args.actions == "-":
+            print("\n===== IRVIN ACTIONS (Graphviz DOT) =====")
+            print(graph)
+        else:
+            with open(args.actions, "w", encoding="utf-8") as fh:
+                fh.write(graph)
+            sys.stderr.write(f"\nirvin :: actions graph (DOT) written to {args.actions}\n")
     return 0

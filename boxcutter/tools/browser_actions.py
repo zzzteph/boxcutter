@@ -1,22 +1,34 @@
 """browser-actions - drive a real headless browser through a scripted sequence of actions.
 
 Like a human (or a Gherkin script): click, type, select, press keys, hover, scroll, wait, eval - to reach
-multi-step flows, submit forms, and trigger SPA behaviour the auto-crawler can't. Captures every XHR/fetch
-along the way plus the final page state (url, title, cookies, any bearer token). Capability-gated: Playwright.
+multi-step flows, submit forms, and trigger SPA behaviour the auto-crawler can't. Captures the full
+request+response of every XHR/fetch along the way (method/url/status + request & response bodies for API
+content types) plus the final page state (url, title, cookies, any bearer token). With --session it drives a
+PERSISTENT browser that stays logged in and keeps its SPA state across calls, so an agent can explore the app
+like a real user. Driven via CDP over the system chromium (core.cdp). Full-image tool: needs chromium +
+websocket-client.
 
 Actions (repeatable, ordered) via --action "verb:args":
   goto:URL · click:SEL · dblclick:SEL · fill:SEL=VALUE · type:SEL=VALUE · press:SEL=KEY · press:KEY
   select:SEL=VALUE · check:SEL · uncheck:SEL · hover:SEL · scroll:bottom|top|X,Y · wait:MS · waitfor:SEL · eval:JS
-SEL shorthands: id=foo -> #foo · name=foo -> [name="foo"] · text=Foo -> text engine · css=... or raw CSS.
+  describe (no args) - snapshot the CURRENT page's visible inputs/buttons/links (tag/type/name/id/placeholder/
+  aria-label/text + a ready-to-use css selector for each) into this action's "result". Use it FIRST when a
+  form's fields have no clear id/name (obfuscated themes) or the flow is multi-step (e.g. an identifier-first
+  login) - read the result, then issue a SEPARATE browser-actions call using the css selectors it gave you;
+  they stay valid across a fresh reload of the same URL.
+  screenshot (no args) - capture the CURRENT page as a PNG; the agent SEES the rendered page (the real login
+  form, an unexpected consent/MFA/error screen) as an image, not just its DOM. Pair with describe when a
+  form's structure is unclear: describe gives the exact selectors, screenshot shows what's actually there.
+SEL shorthands: id=foo -> #foo · name=foo -> [name="foo"] · text=Foo -> text match · css=... or raw CSS.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
 from urllib.parse import urlparse
 
-from ..core.args import add_common_args
+from ..core import fsutil
+from ..core.args import add_common_args, add_header_arg
+from ..core.cdp import CDPError, Chrome, get_session
 from ..core.envelope import debug_logger, output_result
 from ..core.validators import is_valid_url
 
@@ -34,8 +46,11 @@ def add_arguments(parser) -> None:
                         help="A browser action; repeatable, run in order (e.g. fill:#user=admin, click:text=Log in)")
     parser.add_argument("--actions-file", dest="actions_file", default=None, metavar="FILE",
                         help="Read actions from a file (one 'verb:args' per line; # comments and blank lines ignored)")
-    parser.add_argument("--header", action="append", default=[], metavar="NAME: VALUE",
-                        help="Request header, e.g. an auth token (repeatable)")
+    parser.add_argument("--session", dest="session", default=None, metavar="ID",
+                        help="Attach to a PERSISTENT browser session by id (stays logged in / keeps SPA state "
+                             "across calls) instead of a fresh browser; on attach the start URL is NOT "
+                             "re-navigated - use a goto action to move. Omit for the default one-shot browser.")
+    add_header_arg(parser)
     parser.add_argument("--timeout", type=int, default=45, help="Per-step timeout (seconds)")
     add_common_args(parser)
 
@@ -54,22 +69,37 @@ def _sel(s):
 
 
 def _do(page, action):
+    """Perform one action; returns a result payload for actions that produce data (currently just
+    'describe'), or None for actions that only cause a side effect."""
     verb, _, rest = action.partition(":")
     verb = verb.strip().lower()
     if verb == "goto":
-        page.goto(rest.strip(), wait_until="networkidle")
+        page.navigate(rest.strip(), wait="networkidle")
+    elif verb == "describe":
+        return page.describe_form()
+    elif verb == "screenshot":
+        png = page.screenshot()
+        if not png:
+            return {"type": "screenshot", "image_path": "", "error": "empty screenshot"}
+        # write the PNG to a temp file and hand back only the PATH (not base64): the executor loop reads it
+        # back in-process and forwards it to the model as a real vision block, so a huge base64 blob never
+        # bloats (or gets truncated in) the JSON envelope.
+        path = fsutil.temp_file("bc_shot_")
+        with open(path, "wb") as fh:
+            fh.write(png)
+        return {"type": "screenshot", "image_path": path, "bytes": len(png)}
     elif verb in ("fill", "type"):
         sel, _, val = rest.partition("=")
         page.fill(_sel(sel), val)
     elif verb == "select":
         sel, _, val = rest.partition("=")
-        page.select_option(_sel(sel), val)
+        page.select(_sel(sel), val)
     elif verb == "press":
         if "=" in rest:
             sel, _, key = rest.partition("=")
-            page.press(_sel(sel), key)
+            page.press(key, _sel(sel))
         else:
-            page.keyboard.press(rest.strip())
+            page.press(rest.strip())
     elif verb == "click":
         page.click(_sel(rest))
     elif verb == "dblclick":
@@ -77,26 +107,47 @@ def _do(page, action):
     elif verb == "hover":
         page.hover(_sel(rest))
     elif verb == "check":
-        page.check(_sel(rest))
+        page.set_checked(_sel(rest), True)
     elif verb == "uncheck":
-        page.uncheck(_sel(rest))
+        page.set_checked(_sel(rest), False)
     elif verb == "waitfor":
-        page.wait_for_selector(_sel(rest))
+        page.waitfor(_sel(rest))
     elif verb == "wait":
-        page.wait_for_timeout(int(rest.strip() or "1000"))
+        page.wait(int(rest.strip() or "1000"))
     elif verb == "scroll":
-        r = rest.strip().lower()
-        if r == "bottom":
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        elif r == "top":
-            page.evaluate("window.scrollTo(0, 0)")
-        elif "," in r:
-            x, y = r.split(",", 1)
-            page.evaluate(f"window.scrollTo({int(x)}, {int(y)})")
+        page.scroll(rest)
     elif verb == "eval":
-        page.evaluate(rest)
+        page.eval(rest)
     else:
         raise ValueError(f"unknown action '{verb}'")
+
+
+def _drive(page, target, actions, fresh):
+    """Run the action sequence on `page` and return (state, flows). `fresh` navigates to the start URL first
+    (a brand-new browser or a just-opened session); an ATTACHED persistent session continues from wherever it
+    already is (move with a goto action). Flows captured are only those THIS call produced."""
+    marker = page.flow_marker()
+    if fresh:
+        page.navigate(target, wait="networkidle")
+    results = []
+    for action in actions:
+        try:
+            payload = _do(page, action)
+            page.wait(200)
+            rec = {"action": action, "ok": True}
+            if payload is not None:
+                rec["result"] = payload
+            results.append(rec)
+        except Exception as exc:  # noqa: BLE001 - record the failed step and keep going
+            results.append({"action": action, "ok": False, "error": str(exc)[:120]})
+    try:
+        token = page.eval_fn(_TOKEN_JS) or ""
+    except CDPError:
+        token = ""
+    state = {"type": "state", "url": page.current_url(), "title": page.title(), "cookie": page.cookies(),
+             "token": token, "actions_ok": sum(1 for r in results if r["ok"]),
+             "actions_failed": sum(1 for r in results if not r["ok"]), "results": results}
+    return state, page.flows(since=marker)
 
 
 def run(args) -> int:
@@ -104,11 +155,6 @@ def run(args) -> int:
     dbg = debug_logger(args.debug)
     if not is_valid_url(target):
         output_result([], args.output, "Invalid URL.")
-        return 1
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception:  # noqa: BLE001
-        output_result([], args.output, "playwright is not installed (browser-actions is a full-image tool)")
         return 1
 
     actions = list(args.action or [])
@@ -125,44 +171,24 @@ def run(args) -> int:
         if ":" in raw:
             k, v = raw.split(":", 1)
             headers[k.strip()] = v.strip()
-    base_host = urlparse(target).hostname or ""
-    captured = {}
-    results = []
-    exe = os.environ.get("CHROMIUM_PATH") or shutil.which("chromium-browser") or shutil.which("chromium")
 
-    def on_request(req):
-        if req.resource_type in ("xhr", "fetch") and (urlparse(req.url).hostname or "") == base_host:
-            captured[(req.method, req.url.split("#")[0])] = True
-
+    sid = (getattr(args, "session", None) or "").strip()
     try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True, **({"executable_path": exe} if exe else {}))
-            ctx = browser.new_context(extra_http_headers=headers, ignore_https_errors=True)
-            page = ctx.new_page()
-            page.on("request", on_request)
-            page.goto(target, wait_until="networkidle", timeout=args.timeout * 1000)
-            for action in actions:
-                try:
-                    _do(page, action)
-                    page.wait_for_timeout(200)
-                    results.append({"action": action, "ok": True})
-                except Exception as exc:  # noqa: BLE001 - record the failed step and keep going
-                    results.append({"action": action, "ok": False, "error": str(exc)[:120]})
-            title, final_url = page.title(), page.url
-            cookie = "; ".join(f"{c['name']}={c['value']}" for c in ctx.cookies())
-            try:
-                token = page.evaluate(_TOKEN_JS) or ""
-            except Exception:  # noqa: BLE001
-                token = ""
-            browser.close()
+        if sid:
+            # persistent session: attach to (or open) the live browser and LEAVE IT OPEN for the next call
+            page, fresh = get_session(sid, headers=headers, timeout=args.timeout, debug=dbg)
+            state, flows = _drive(page, target, actions, fresh)
+        else:
+            with Chrome(headers=headers, timeout=args.timeout, debug=dbg) as page:
+                state, flows = _drive(page, target, actions, True)
+    except CDPError as exc:
+        output_result([], args.output, f"browser-actions unavailable: {exc}")
+        return 1
     except Exception as exc:  # noqa: BLE001
         output_result([], args.output, f"browser-actions failed: {exc}")
         return 1
 
-    data = [{"type": "state", "url": final_url, "title": title, "cookie": cookie, "token": token,
-             "actions_ok": sum(1 for r in results if r["ok"]),
-             "actions_failed": sum(1 for r in results if not r["ok"]), "results": results}]
-    data += [{"url": u, "method": m, "type": "xhr"} for (m, u) in sorted(captured)]
-    dbg(f"browser-actions: {data[0]['actions_ok']} ok / {data[0]['actions_failed']} failed, {len(captured)} api calls")
+    data = [state] + flows
+    dbg(f"browser-actions: {state['actions_ok']} ok / {state['actions_failed']} failed, {len(flows)} api flow(s)")
     output_result(data, args.output)
     return 0

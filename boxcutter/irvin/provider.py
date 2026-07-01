@@ -1,8 +1,14 @@
-"""LLM providers for orca - requests-only HTTP wrappers (no SDKs), standalone (no bob imports).
+"""LLM providers for irvin - requests-only HTTP wrappers (no SDKs).
 
-Mirrors the provider contract orca needs: `chat(system, user)` for the planner/reporter (one-shot JSON
-or prose reasoning) and the send/parse/assistant_msg/tool_results tool-calling loop for any executor that
-wants to drive boxcutter through the model. Add a provider by implementing these and registering it below.
+Mirrors the provider contract irvin needs: `chat(system, user)` for the concluder/planner/reporter
+(one-shot JSON or prose reasoning) and the send/parse/assistant_msg/tool_results tool-calling loop for any
+executor that drives boxcutter through the model. Add a provider by implementing these and registering it
+below.
+
+`send(system, messages, tools)` takes NATIVE per-tool JSON schemas (see tools/toolschema.py - generated from
+each boxcutter sub-command's own argparse, so a call the schema allows is one the CLI actually accepts) rather
+than one generic "run_boxcutter(argv)" tool; `parse(resp)` returns each call as {id, name, args} - a tool name
+plus its structured arguments - which the caller turns back into an argv via toolschema.to_argv().
 """
 
 from __future__ import annotations
@@ -35,20 +41,6 @@ def _post(url, *, json, headers, timeout, attempts=4):
     raise RuntimeError("unreachable")
 
 
-# The single tool an executor drives if it wants the model to choose boxcutter calls directly.
-TOOLS = [{
-    "name": "run_boxcutter",
-    "description": (
-        "Run ONE boxcutter sub-command and get its JSON envelope {success,kind,data,error}. Pass argv as "
-        'a token list, e.g. ["fuzz","https://x/?id=1"], ["http-request","https://x/api","--header",'
-        '"Authorization: Bearer T"]. Only boxcutter sub-commands; no docker/podman, no PUT/PATCH/DELETE.'
-    ),
-    "schema": {"type": "object",
-               "properties": {"argv": {"type": "array", "items": {"type": "string"}}},
-               "required": ["argv"]},
-}]
-
-
 class Anthropic:
     default_model, env = "claude-sonnet-4-6", "ANTHROPIC_API_KEY"
     _default_base, _base_env = "https://api.anthropic.com", "ANTHROPIC_BASE_URL"
@@ -61,9 +53,9 @@ class Anthropic:
     def _headers(self):
         return {"x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
 
-    def send(self, system, messages):
+    def send(self, system, messages, tools):
         body = {"model": self.model, "max_tokens": 8192, "system": system, "messages": messages,
-                "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["schema"]} for t in TOOLS]}
+                "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["schema"]} for t in tools]}
         return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
 
     def parse(self, resp):
@@ -72,15 +64,26 @@ class Anthropic:
             if b.get("type") == "text":
                 text += b["text"]
             elif b.get("type") == "tool_use":
-                calls.append({"id": b["id"], "argv": (b.get("input") or {}).get("argv", [])})
+                calls.append({"id": b["id"], "name": b["name"], "args": b.get("input") or {}})
         return text, calls
 
     def assistant_msg(self, resp):
         return [{"role": "assistant", "content": resp.get("content", [])}]
 
     def tool_results(self, results):
-        return [{"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": r["id"], "content": r["output"]} for r in results]}]
+        content = []
+        for r in results:
+            imgs = r.get("images") or []
+            if imgs:
+                # Anthropic tool_result content may be a block list: the text plus each screenshot as a real
+                # image the model actually sees (base64 source), not an unreadable blob in the text.
+                blocks = [{"type": "text", "text": r["output"]}]
+                blocks += [{"type": "image", "source": {"type": "base64",
+                            "media_type": im.get("media_type", "image/png"), "data": im["data"]}} for im in imgs]
+                content.append({"type": "tool_result", "tool_use_id": r["id"], "content": blocks})
+            else:
+                content.append({"type": "tool_result", "tool_use_id": r["id"], "content": r["output"]})
+        return [{"role": "user", "content": content}]
 
     def chat(self, system, user, max_tokens=None):
         # Anthropic requires max_tokens; None means "use a generous budget" (no artificial cap).
@@ -102,10 +105,10 @@ class OpenAI:
     def _headers(self):
         return {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
 
-    def send(self, system, messages):
+    def send(self, system, messages, tools):
         body = {"model": self.model, "messages": [{"role": "system", "content": system}] + messages,
                 "tools": [{"type": "function", "function": {
-                    "name": t["name"], "description": t["description"], "parameters": t["schema"]}} for t in TOOLS]}
+                    "name": t["name"], "description": t["description"], "parameters": t["schema"]}} for t in tools]}
         return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
 
     def parse(self, resp):
@@ -113,17 +116,29 @@ class OpenAI:
         calls = []
         for c in (msg.get("tool_calls") or []):
             try:
-                argv = json.loads(c["function"].get("arguments") or "{}").get("argv", [])
+                args = json.loads(c["function"].get("arguments") or "{}")
             except json.JSONDecodeError:
-                argv = []
-            calls.append({"id": c["id"], "argv": argv})
+                args = {}
+            calls.append({"id": c["id"], "name": c["function"]["name"], "args": args})
         return msg.get("content") or "", calls
 
     def assistant_msg(self, resp):
         return [resp["choices"][0]["message"]]
 
     def tool_results(self, results):
-        return [{"role": "tool", "tool_call_id": r["id"], "content": r["output"]} for r in results]
+        # Every tool_call_id must be answered by a `tool` message FIRST; the OpenAI tool role only carries
+        # text, so any screenshots follow in a single `user` message with image_url blocks (a data: URL each)
+        # - which multimodal models (gpt-5.1 et al.) read as real vision.
+        msgs = [{"role": "tool", "tool_call_id": r["id"], "content": r["output"]} for r in results]
+        blocks = []
+        for r in results:
+            for im in (r.get("images") or []):
+                blocks.append({"type": "image_url", "image_url": {
+                    "url": f"data:{im.get('media_type', 'image/png')};base64,{im['data']}"}})
+        if blocks:
+            msgs.append({"role": "user", "content": [
+                {"type": "text", "text": "Screenshot(s) from the tool call(s) above:"}] + blocks})
+        return msgs
 
     def chat(self, system, user, max_tokens=None):
         # OpenAI/LiteLLM: max_tokens is optional - omit it so the model uses its full budget (no cap).

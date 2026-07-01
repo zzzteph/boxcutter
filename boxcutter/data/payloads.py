@@ -1,7 +1,6 @@
 """Injection payloads for the ``fuzz`` tool.
 
- ``assets/payloads.json`` detection model, extended with
-boxcutter's broader SSTI / SQLi-timing / XXE coverage. Every entry is a dict::
+Broad coverage across SSTI / SQLi-timing / XXE and the other injection classes. Every entry is a dict::
 
     {"class": <lower-case class>, "payload": <template>, "pattern": <regex|None>}
 

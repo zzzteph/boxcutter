@@ -14,28 +14,17 @@ agent (or you) cross-check why each action happened.
 
 from __future__ import annotations
 
+import json
 import sys
 
 from .agents import (ADJUSTER, CONCLUDER, ESCALATE, EXECUTORS, PLANNER, REPORTER, REVIEWER, SUGGESTERS,
-                     DynamicSuggester, executor_manual)
+                     THINNER, DynamicSuggester, executor_manual)
 
 _W = 64
 
 
 def _phase(title):
     sys.stderr.write(f"\n{'-' * _W}\n  {title}\n{'-' * _W}\n")
-
-
-def _commission_target(ctx, st) -> str:
-    """The (executor, target) a step commits to - explicit `target` (escalations set it), else the suggestion's
-    target, else the step args. Used to key the commission ledger and dedupe escalations."""
-    if st.get("target"):
-        return st["target"]
-    sug = ctx.get(st.get("ref")) if st.get("ref") else None
-    if sug:
-        return sug.data.get("target") or ""
-    a = st.get("args") or {}
-    return a.get("url") or a.get("target") or ""
 
 
 def _escalations(ctx, handoff, producer, scheduled) -> list:
@@ -48,7 +37,7 @@ def _escalations(ctx, handoff, producer, scheduled) -> list:
         url = f.get("url")
         if not ex or not url or ex == producer:
             continue
-        key = (ex, ctx._norm_target(url))
+        key = (ex, ctx._norm_target(ex, url))
         if key in scheduled or ctx.was_committed(ex, url):
             continue
         scheduled.add(key)
@@ -70,7 +59,82 @@ def _fingerprint(ctx) -> int:
             len(ctx.landscape["findings"]) + len(ctx.landscape["secrets"]))
 
 
+def _bootstrap_auth(ctx, runner, provider) -> None:
+    """Establish an initial session for every identity with stored creds (--creds/--login-url), BEFORE round 1
+    - agent-driven, via the same `auth` executor mid-run refresh uses, not a fixed selector-matching call.
+    A first login can hit exactly the same ambiguity a refresh can (an identifier-first OIDC/Keycloak flow
+    splitting username/password across screens, fields with no id/name, an unexpected extra step) - the
+    judgment needed to handle that doesn't disappear just because it's the FIRST login rather than the tenth."""
+    labels = sorted({c["label"] for c in ctx._creds.values()})
+    for label in labels:
+        sys.stderr.write(f"\n  [bootstrap] establishing initial session for identity {label}...\n")
+        step = {"executor": "auth", "target": label, "ref": None,
+                "brief": f"Establish the FIRST session for identity {label}.", "context": "", "avoid": ""}
+        handoff = EXECUTORS["auth"]().run(ctx, step, runner, provider)
+        merged = ctx.merge_handoff(handoff, by="auth", refs=[])
+        ctx.log_commission("auth", label, handoff, merged)
+        ok = bool(ctx.landscape["identities"].get(label))
+        sys.stderr.write(f"  [bootstrap] identity {label}: "
+                         f"{'session established' if ok else 'FAILED - see notes below'}\n")
+        for n in ctx.notes[-3:]:
+            sys.stderr.write(f"    note: {n}\n")
+
+
+def run_agent(name, provider, ctx, runner, brief="", target="") -> bool:
+    """Sanity-run ONE agent in isolation - no council/concluder/planner/loop. If `name` is an EXECUTOR,
+    commission it directly on the target and print its VERIFIED handoff plus an action/finding summary so you
+    can evaluate a single specialist's output and behaviour without the whole pipeline. If it's a SUGGESTER,
+    print its one-shot advice. Returns False (and lists the agents) if the name matches neither.
+
+    Credentials, if given, are still bootstrapped first so an agent that needs a session (explore, access
+    control, anything authenticated) actually has one - the point is to test the agent as it really runs."""
+    if ctx._creds:
+        _bootstrap_auth(ctx, runner, provider)
+
+    if name in EXECUTORS:
+        _phase(f"SINGLE AGENT :: executor {name}")
+        tgt = target or ctx.base_url
+        step = {"executor": name, "target": tgt, "ref": None, "avoid": "", "context": "",
+                "brief": brief or f"Sanity-run: do your job against {tgt} and hand back verified results."}
+        handoff = EXECUTORS[name]().run(ctx, step, runner, provider)
+        merged = ctx.merge_handoff(handoff, by=name, refs=[])
+        ctx.log_commission(name, ctx.commission_target(step), handoff, merged)
+        v = handoff.get("verification", {}) or {}
+        findings = handoff.get("findings") or []
+        arts = handoff.get("artifacts", {}) or {}
+        sys.stderr.write(
+            f"\n  {name}: {len(findings)} verified finding(s)  "
+            f"[candidates={v.get('candidates', '?')} verified={v.get('verified', '?')} "
+            f"dropped={v.get('dropped', '?')}]  endpoints={len(arts.get('endpoints') or [])} "
+            f"tokens={len(arts.get('tokens') or [])} notes={len(arts.get('notes') or [])}\n")
+        for f in findings:
+            sys.stderr.write(f"    [{f.get('severity')}|{f.get('cls')}] {f.get('title')} @ {f.get('url')}\n")
+        for n in (arts.get("notes") or [])[:8]:
+            sys.stderr.write(f"    note: {n}\n")
+        print(json.dumps(handoff, indent=2, ensure_ascii=False))
+        return True
+
+    sug = next((s for s in SUGGESTERS if s.name == name), None)
+    if sug is not None:
+        _phase(f"SINGLE AGENT :: suggester {name}")
+        res = sug.suggest(ctx, provider)
+        for one in res.get("suggestions") or []:
+            sys.stderr.write(f"  [{name}] SUGGEST p{one.get('priority', '?')} | "
+                             f"{one.get('action')} {one.get('target', '')}  - {one.get('why', '')}\n")
+        if res.get("skip"):
+            sys.stderr.write(f"  [{name}] SKIP - {res.get('rationale', '')}\n")
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return True
+
+    sys.stderr.write(f"irvin: no agent named '{name}'.\n  executors:  {', '.join(EXECUTORS)}\n"
+                     f"  suggesters: {', '.join(s.name for s in SUGGESTERS)}\n")
+    return False
+
+
 def run(provider, ctx, runner, max_rounds=8) -> None:
+    if ctx._creds:
+        _bootstrap_auth(ctx, runner, provider)
+
     council = [s for s in SUGGESTERS if not s.dissent]    # mutable: the reviewer can grow it
     dissent = [s for s in SUGGESTERS if s.dissent]
     known_names = {s.name for s in SUGGESTERS}
@@ -175,11 +239,27 @@ def run(provider, ctx, runner, max_rounds=8) -> None:
             sys.stderr.write("\n  -> planner: nothing actionable to schedule. Stopping.\n")
             break
 
+        # 4b -- THIN: drop actions already done (deterministic gate) + a conservative LLM prune of subsumed ones
+        _phase("THIN")
+        tres = THINNER.thin(ctx, provider, steps)
+        for d in tres["dropped"]:
+            sys.stderr.write(f"  [thinner] SKIP {d['executor']} {d['target'] or '(base)'}  - {d['by']}: {d['reason']}\n")
+        if tres["dropped"]:
+            ctx.add_record("plan", "thinner", "thinner", "adjustment",
+                           summary=f"{len(tres['dropped'])} already-done action(s) thinned",
+                           rationale="; ".join(f"{d['executor']} {d['target']} [{d['by']}]" for d in tres["dropped"][:6]),
+                           refs=[prec.id], data={"dropped": tres["dropped"]})
+        steps = tres["kept"]
+        if not steps:
+            sys.stderr.write("\n  -> thinner: every planned action was already done - nothing new to run. Stopping.\n")
+            break
+        sys.stderr.write(f"  [thinner] {len(steps)} action(s) kept\n")
+
         # 5 -- EXECUTE: run each step; spawn in-round escalations from confirmed leads; the ADJUSTER then
         #      prunes/fixes the rest with what was just learned --------------------------------------------
         _phase("EXECUTE")
         i = 0
-        scheduled = {(s["executor"], ctx._norm_target(_commission_target(ctx, s))) for s in steps}
+        scheduled = {(s["executor"], ctx._norm_target(s["executor"], ctx.commission_target(s))) for s in steps}
         while i < len(steps):
             st = steps[i]
             ref = st.get("ref")
@@ -187,8 +267,8 @@ def run(provider, ctx, runner, max_rounds=8) -> None:
             sys.stderr.write(f"\n  > step {i + 1}/{len(steps)} | {st['executor']}  (fulfils {ref} from {src})\n")
             handoff = EXECUTORS[st["executor"]]().run(ctx, st, runner, provider)
             refs = [prec.id] + ([ref] if ref else [])
-            ctx.merge_handoff(handoff, by=st["executor"], refs=refs)
-            ctx.log_commission(st["executor"], _commission_target(ctx, st), handoff)   # negative memory
+            merged = ctx.merge_handoff(handoff, by=st["executor"], refs=refs)
+            ctx.log_commission(st["executor"], ctx.commission_target(st), handoff, merged)   # negative memory
             v = handoff.get("verification", {})
             nf = len(handoff.get("findings") or [])
             dropped = v.get("dropped_titles") or []

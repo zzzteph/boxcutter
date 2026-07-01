@@ -14,14 +14,15 @@ class ReconProfile(Suggester):
     name = "recon-profile"
     profile = "a reconnaissance specialist"
     focus = "mapping the attack surface - liveness, crawl, OpenAPI/Swagger, JS endpoints, directory brute"
-    proposes = ("recon", "dirbust")
+    proposes = ("recon", "spa", "dirbust")
 
     def system(self):
         return super().system() + (
             "\nYou run the RECON desk: your deliverable is a mapped, deduped surface the other managers can act "
-            "on. Commission `recon` to map breadth (the linked/spec/JS surface) and `dirbust` to brute hidden, "
-            "unlinked paths. Open this when the surface is empty/thin or new hosts/paths have appeared unmapped; "
-            "stand down once the surface is covered and nothing new is showing up.")
+            "on. Commission `recon` to map breadth (linked/spec/JS surface + sibling hosts), `spa` to render a "
+            "JS/single-page app in a real browser and capture the API it calls at runtime (the cross-origin "
+            "backend static crawling misses), and `dirbust` to brute hidden, unlinked paths. Open this when the "
+            "surface is empty/thin or new hosts/paths have appeared unmapped; stand down once covered.")
 
 
 class AccessProfile(Suggester):
@@ -55,6 +56,24 @@ class InjectionProfile(Suggester):
             "testable or no confirmed class is waiting to escalate.")
 
 
+class ExplorationProfile(Suggester):
+    name = "exploration-profile"
+    profile = "a manual-testing lead who drives the live app like a real user"
+    focus = "exercising the real (authenticated) SPA UI to reveal the true API surface static crawlers miss"
+    proposes = ("explore",)
+
+    def system(self):
+        return super().system() + (
+            "\nYou run the EXPLORATION desk: your deliverable is the REAL authenticated API surface - the "
+            "endpoints that only appear once a logged-in human clicks through the single-page app, which "
+            "recon/dirbust (static crawling) structurally cannot see. Commission `explore` to drive a "
+            "persistent, already-logged-in browser through the live UI and capture the request/response traffic. "
+            "Open this when the target is a SPA / client-rendered app OR an identity is established and the "
+            "authenticated surface is still thin (few endpoints behind the login). Stand down once the live UI "
+            "has been walked and its endpoints handed to the other desks, or when there's no browser-reachable "
+            "app to explore (a pure JSON API with no UI).")
+
+
 class ExposureProfile(Suggester):
     name = "exposure-profile"
     profile = "an exposure lead (misconfig, exposed VCS, leaked secrets)"
@@ -68,6 +87,30 @@ class ExposureProfile(Suggester):
             "`git-dumper` (an exposed .git -> source/secrets), and `secrets` (keys/tokens shipped in JS/config) "
             "as the evidence warrants. Stand down once these have run and nothing new points at more to "
             "retrieve - do not re-commission a desk that already came back empty.")
+
+
+class AuthProfile(Suggester):
+    name = "auth-profile"
+    profile = "a session/authentication lead"
+    focus = "keeping every identity's session VALID - notice when access has actually degraded and get it refreshed"
+    proposes = ("auth",)
+
+    def system(self):
+        return super().system() + (
+            "\nYou run the AUTH desk: your ONLY job is deciding whether an identity's SESSION has gone bad and "
+            "needs a fresh login - this is NOT about whether an endpoint requires more privilege than an "
+            "identity has (a consistent 403 on an admin-only route is a correct, working access control, not a "
+            "broken session - access-profile owns that question, not you). Weigh the AUTH SIGNALS block below: "
+            "a run of 401/403s that STARTED partway through the engagement on endpoints/identities that worked "
+            "before is session expiry; 401/403 from the very first request on a given endpoint is more likely "
+            "just how that endpoint is protected. When you do see real degradation, commission `auth` with "
+            "target set to the exact identity LABEL (\"A\" or \"B\", never a URL) that needs re-login. Stand "
+            "down if nothing looks session-related, or if there is no stored credential for the affected "
+            "identity (recon can't fix a password it was never given).")
+
+    def _extra_parts(self, ctx) -> list:
+        sig = ctx.auth_signal_render()
+        return [sig] if sig else []
 
 
 class DynamicSuggester(Suggester):
@@ -91,7 +134,7 @@ class MinorityReport(Suggester):
     profile = "the dissenting opinion - the council's mandated minority voice"
     focus = "the overlooked path the majority dismisses: the ignored endpoint, the unglamorous chain, the " \
             "untested assumption, the high-impact long shot"
-    proposes = ("recon", "dirbust", "access-control", "web-vuln-triage", "sqli", "xss",
+    proposes = ("recon", "spa", "explore", "dirbust", "access-control", "web-vuln-triage", "sqli", "xss",
                 "path-traversal", "git-dumper", "secrets", "exposure")
     dissent = True
 
@@ -113,8 +156,16 @@ class MinorityReport(Suggester):
     def suggest(self, ctx, provider, peers=None):
         res = super().suggest(ctx, provider, peers=peers)
         if res["skip"] or not res["suggestions"]:   # the dissent is not allowed to abstain
+            target = ctx.base_url
+            if ctx.is_dead_commission("recon", target):
+                # re-examining the base is pointless if recon already came back empty there - point the
+                # fallback at a mapped host that hasn't been recon'd yet, instead of repeating a dead lead
+                hosts = ctx.landscape["surface"].get("hosts") or []
+                untried = next((h for h in hosts if not ctx.was_committed("recon", h)), None)
+                if untried:
+                    target = f"https://{untried}"
             res = {"skip": False,
                    "rationale": "dissent on the record: force a second look at what the majority deprioritized",
-                   "suggestions": [{"action": "recon", "target": ctx.base_url, "priority": 3,
+                   "suggestions": [{"action": "recon", "target": target, "priority": 3,
                                     "why": "re-examine the surface for the overlooked path"}]}
         return res

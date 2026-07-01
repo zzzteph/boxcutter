@@ -33,12 +33,10 @@ RUN apk add --no-cache \
         libpcap-dev nss freetype harfbuzz ttf-freefont
 ENV HTTPX_NO_COLOR=1
 
-# Browser-driven tools (browser-crawl/login/actions) target the system chromium above.
-# NOTE: Playwright Python publishes no Alpine/musl wheel (and no sdist), so it cannot be
-# pip-installed on this base - `pip install playwright` fails with "No matching distribution".
-# The tools import playwright lazily inside run(), so without it they degrade gracefully
-# (emit a "not installed" envelope). chromium + chromium-chromedriver are already present
-# for a future musl-compatible (Selenium/CDP) port.
+# Browser-driven tools (browser-crawl/login/actions) drive the system chromium above over the Chrome DevTools
+# Protocol (boxcutter/core/cdp.py) using the pure-Python websocket-client lib - which installs fine on musl,
+# unlike Playwright (no Alpine/musl wheel). The tools import it lazily and degrade gracefully if it is absent.
+RUN pip3 install --no-cache-dir --break-system-packages websocket-client
 ENV CHROMIUM_PATH=/usr/bin/chromium-browser
 
 ARG ZAP_VERSION=2.17.0
