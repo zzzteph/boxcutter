@@ -47,6 +47,10 @@ _NOTES = {
               "--level/--risk in opt_args only when a clean run fails.",
     "nuclei": "Target a category via tags (exposure,misconfig,cve,...) rather than an untagged full scan.",
     "swagger-endpoints": "Set fuzzable=true to get {FUZZ}-marked variants ready for the fuzz tool.",
+    "dirb": "The only wordlists in this image are dirb's own bundled set (default: "
+            "/usr/share/dirb/wordlists/common.txt). There is NO seclists or other path - do not invent one "
+            "(e.g. /usr/share/seclists/...). OMIT wordlist to use the default; a path that doesn't exist is "
+            "ignored and the default is used anyway.",
 }
 
 _TYPE = {int: "integer", float: "number"}

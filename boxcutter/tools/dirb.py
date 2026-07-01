@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 from ..core import fsutil, process
@@ -34,7 +35,18 @@ def run(args) -> int:
         output_result([], args.output, "Invalid URL.")
         return 1
 
+    # A caller (often an LLM) may pass a wordlist path that isn't in this image - e.g. a guessed
+    # /usr/share/seclists/... that was never installed. Rather than let dirb fail on a missing file, fall back
+    # to the bundled default so the brute still runs; only truly error if even the default is absent.
     wordlist = args.wordlist or DEFAULT_WORDLIST
+    if not os.path.isfile(wordlist):
+        if args.wordlist:
+            dbg(f"wordlist not found: {wordlist} - falling back to default {DEFAULT_WORDLIST}")
+        wordlist = DEFAULT_WORDLIST
+    if not os.path.isfile(wordlist):
+        output_result([], args.output, f"wordlist not found: {wordlist}")
+        return 1
+
     tmp = fsutil.temp_file("dirb_")
     # Isolated cwd so dirb's resume.cfg files from concurrent runs don't collide.
     work_dir = fsutil.temp_dir("dirb_")
