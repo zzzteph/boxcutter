@@ -157,3 +157,18 @@ class LiteLLM(OpenAI):
 
 
 PROVIDERS = {"anthropic": Anthropic, "openai": OpenAI, "litellm": LiteLLM}
+
+
+def add_ai_provider_args(parser) -> None:
+    """The shared LLM flags every `ai` agent (logio, prawlio, visor, irvin) takes - defined ONCE here so the
+    agents don't each redeclare them. NOTE: these live on each agent's OWN parser, not on the `ai` group: a
+    true argparse group-level flag is clobbered by the subparser's default, and the bare-name sugar
+    (`boxcutter logio ...`) puts flags AFTER the agent name - so a shared adder, not a group argument, is the
+    correct way to share them."""
+    parser.add_argument("--provider", default="anthropic", choices=list(PROVIDERS),
+                        help="LLM provider (default anthropic; 'litellm' fronts any provider via your gateway)")
+    parser.add_argument("--model", default=None, help="Model id (default: the provider's default)")
+    parser.add_argument("--api-key", dest="api_key", default=None,
+                        help="LLM API key (or set the provider's env var, e.g. ANTHROPIC_API_KEY)")
+    parser.add_argument("--base-url", dest="base_url", default=None, metavar="URL",
+                        help="LLM gateway base URL (e.g. a LiteLLM/OpenAI gateway)")

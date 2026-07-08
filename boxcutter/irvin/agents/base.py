@@ -12,19 +12,43 @@ Both return plain dicts; the pipeline records them into the context and streams 
 
 from __future__ import annotations
 
-import base64
 import json
-import os
 import re
 import sys
 from urllib.parse import urlsplit
 
+from ...core.envelope import harvest_images
 from ...tools import toolschema
 from ..context import extract_json
 from ..verify import reproduce
 
 _JWT = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}")
 _APIKEY = re.compile(r"(?i)(?:api[_-]?key|access[_-]?token|secret)[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9._-]{16,})")
+
+# A discovered admin/management/privileged PANEL must not just sit in the endpoint list - that is exactly how a
+# found panel gets orphaned: a discovery tool tags it and no lane ever pursues it. Turn it into a `panel` LEAD
+# so EXPOSURE is commissioned to report the reachable admin interface. Deterministic: it does NOT depend on the
+# model choosing to raise the lead or a manager choosing to pick it up.
+_PANEL_RE = re.compile(r"/(?:admin(?:istrator)?|manage(?:r|ment)?|dashboard|console|backend|cpanel|wp-admin|"
+                       r"phpmyadmin|adminer|controlpanel|panel)(?:/|$|\?|\.)", re.I)
+
+
+def _panel_leads(endpoints) -> list:
+    """A `panel` lead for every discovered admin/management panel path, so a reachable privileged surface is
+    always handed to EXPOSURE to report, instead of being left in the endpoint list untested."""
+    leads, seen = [], set()
+    for e in endpoints or []:
+        url = str(e).split()[0]                    # discovery tools may emit "url status class"; take the URL
+        if not url.startswith(("http://", "https://")):
+            continue
+        if _PANEL_RE.search(urlsplit(url).path) and url not in seen:
+            seen.add(url)
+            leads.append({"cls": "panel", "url": url, "param": "",
+                          "evidence": "admin/management panel path reachable from outside",
+                          "why": "a management/admin panel is reachable - EXPOSURE should report it "
+                                 "(login-gated = Low attack surface; a working console reachable without login "
+                                 "= High); do not leave it as just an endpoint"})
+    return leads
 
 _EXEC_BASE = """You are a PROFESSIONAL penetration tester inside IRVIN, an autonomous web/API bug-hunter
 PIPELINE, working ONE specialism - your area is defined under 'Your role' below. A manager (a suggester) has
@@ -48,9 +72,16 @@ VERIFY before you hand back - you OWN your output, the next stage trusts it blin
 false positives, and keep only what you can stand behind (e.g. 100 dirbust hits -> drop soft-404s/dupes and
 return the live, distinct ones; a "BOLA" that is byte-identical for every id is public, not a finding).
 
+STAY IN YOUR LANE, RAISE LEADS FOR THE REST: test and file FINDINGS only for YOUR specialism. If, while doing
+your job, you OBSERVE a vulnerability of a DIFFERENT class - e.g. you are access-control and a parameter throws
+a SQL error / DB stack trace, a page reflects your input, or an endpoint reads a file - do NOT test or exploit
+it yourself and do NOT file it as one of YOUR findings. RAISE it as a typed lead in artifacts.leads so the
+specialist that OWNS it (sqli, xss, path-traversal, ...) gets commissioned on it automatically. A cross-lane
+observation you drop into a note is LOST; a lead is how it reaches the right desk.
+
 End with ONE fenced ```json block and nothing after it:
 {"findings":[{"severity":"High|Medium|Low","title":"...","url":"...","cls":"sqli|xss|bola|bfla|exposure|secret|lfi|rce|...","evidence":"<=100 chars verbatim, redacted"}],
- "artifacts":{"endpoints":["<url>"],"tokens":[{"header":"Authorization: Bearer ...","source":"<url>"}],"notes":["..."]},
+ "artifacts":{"endpoints":["<url>"],"tokens":[{"header":"Authorization: Bearer ...","source":"<url>"}],"leads":[{"cls":"sqli|xss|lfi|rce|...","url":"<url incl. the parameter>","param":"<name>","evidence":"<=100 chars, e.g. the exact DB error>","why":"<why it looks like this class - a class OUTSIDE your lane>"}],"notes":["..."]},
  "verification":{"raw":<int raw results seen>,"kept":<int kept>,"dropped":<int discarded as noise/dupes/false>,"validated":true,"notes":"how you deduped/denoised/validated"}}"""
 
 # Independent re-test prompt: each executor re-checks its OWN findings from scratch with its own tools.
@@ -74,24 +105,37 @@ End with ONE fenced ```json block, nothing after it:
 # A 200 is NOT proof a path exists - many hosts are a CATCH-ALL / soft-404 (Caddy `try_files {path} /index.php`,
 # an SPA, any framework that 200s on a miss) that returns the SAME page for every path, real or not. The
 # executor must fingerprint that behaviour and drop the fallbacks (ghosts) itself.
-_GHOST_VERIFY = """You are RE-VERIFYING which of YOUR discovered paths on one host ACTUALLY EXIST. Do NOT trust
-an HTTP 200: many servers are a CATCH-ALL / soft-404 - Caddy `try_files {path} /index.php`, a single-page app,
-or any framework that returns 200 + the SAME page for EVERY path, real or not. There a 200 is meaningless, and
-a path exists ONLY if its response is MATERIALLY DIFFERENT from that catch-all page.
+_GHOST_VERIFY = """You are RE-VERIFYING which of YOUR discovered paths on one host ACTUALLY EXIST as DISTINCT
+resources. Do NOT trust an HTTP 200: many servers route EVERY path through ONE front controller (Caddy
+`try_files {path} /index.php`, an SPA, a PHP app whose index.php only reads the query string) - so a made-up
+path returns 200 and the SAME handler runs. A path 'exists' only if its response is MATERIALLY DIFFERENT from
+that catch-all AND that difference comes from the PATH, not from the QUERY STRING.
 
-Work through it with http-request (reuse the strongest identity on every request):
-1. FINGERPRINT the catch-all: request a path that cannot exist (e.g. /<random-string>, and a second different
-   random path). Record the status, title, and body shape they return. If they come back 404/410/error, the
-   host 404s honestly - then any non-error candidate is real.
-2. CLASSIFY each candidate: fetch it and compare to the fingerprint. REAL = clearly different (a distinct
-   title/structure/data, a real file, JSON, an error the catch-all never shows). GHOST = the catch-all page
-   again (same shell, only dynamic bits differ) = the fallback, not a real resource. The site ROOT "/" is
-   always REAL.
-Be strict: when a candidate is indistinguishable from the catch-all page, it is a GHOST - drop it. Do not guess
-from the URL; decide only from the fetched responses.
+THE QUERY-STRING TRAP (this is the whole point): if a candidate carries a query (?id=..., ?url=...), the QUERY -
+not the PATH - may be what makes it look 'different'. An index.php doing `...where id=$_GET['id']` returns the
+SAME SQL error / the SAME content for ANY path carrying that query, real or fake. So `/bugs/eam/vib?id=1`,
+`/mantis/verify.php?id=1`, `/verify.php?id=1` and `/totally-fake-9a7c?id=1` are ONE handler reached through many
+routes - at most ONE of those paths is a real resource; the rest are just the front controller, and must be
+dropped as GHOSTS even though the query makes them look alive.
+
+Work through it with http-request (reuse the strongest identity every request):
+1. BARE catch-all: request two DIFFERENT random paths with NO query (e.g. /<rand-a>, /<rand-b>). Record their
+   status/title/body shape. If they 404/error honestly, the host 404s - then any non-error candidate is real.
+2. QUERY control: for EACH distinct query string among the candidates, fingerprint the catch-all WITH that
+   query - request a RANDOM nonexistent path carrying the SAME query (e.g. /<rand>?id=/etc/issue, /<rand>?id=1).
+   This is the real control for query-driven differences.
+3. CLASSIFY each candidate from the fetched responses:
+   - Fetch the candidate PATH WITHOUT its query. If THAT already differs from the bare catch-all (a distinct
+     title/form/file/JSON, a login page, real content), the PATH is a real resource -> REAL.
+   - Otherwise compare `path?query` to `random-path?same-query` from step 2. If they MATCH, the difference is
+     entirely query-driven and the path is just the front controller -> GHOST. It is REAL only if `path?query`
+     differs from `random?same-query` (the path itself changes the behavior).
+   The site ROOT "/" is always REAL.
+Be strict: a path whose BARE form looks like the catch-all AND whose query behavior matches a random path's is a
+GHOST - drop it no matter what error or content the query produces. Decide only from fetched responses.
 
 End with ONE fenced ```json block and nothing after it:
-{"real": ["<url that truly exists>"], "ghosts": ["<url that is just the catch-all fallback>"]}"""
+{"real": ["<url that is a DISTINCT resource>"], "ghosts": ["<front-controller / catch-all route>"]}"""
 
 
 def say(tag, msg):
@@ -113,17 +157,18 @@ class Suggester:
             f"You are {self.name}, {self.profile} - a MANAGER on IRVIN's board. You run ONE lane and commission "
             f"verified work from the specialist executors in it; you never do the work yourself. Your lane: "
             f"{self.focus}.\n"
-            "Read the engagement state and your specialists' prior results, then decide what to commission next: "
-            "open new ground, ESCALATE a confirmed lead to the right specialist, REDIRECT around a dead end, or "
-            "stand down. Every commission is a CONCRETE, DECIDABLE brief - a question a specialist can settle and "
-            "PROVE (an endpoint to test, a lead to confirm, an artifact to retrieve), never 'go look around'. "
-            "Build on what already happened and never re-commission work already answered. YOUR COMMISSIONS SO "
-            "FAR (below) show exactly what came back from each one - if a commission ran and produced nothing (0 "
-            "findings, 0 new surface), do NOT re-propose a near-identical brief on the same target without new "
-            "evidence to justify it; move to different ground instead. Specialists return "
-            "ONLY verified results, so ask for proof, not guesses. If there is no evidence-backed brief in your "
-            "lane right now, SKIP - an idle manager beats busywork. Stay in your lane; other managers cover the "
-            "rest.\n"
+            "TWO RULES before you advise:\n"
+            "1. STRICT - check ALL COMMISSIONS (below) before suggesting anything. Each entry is "
+            "(executor, endpoint-family): findings, new surface. If the (executor, endpoint-family) you are "
+            "about to propose is ALREADY IN THAT LIST - from any lane, any round - do NOT re-suggest it. "
+            "The head will auto-decline a dead repeat; the thinner will gate a live one. An idle manager "
+            "beats re-running work already done.\n"
+            "2. COOPERATIVE - the commission log is shared across all lanes. Use it: if another lane confirmed "
+            "a finding on a family your lane would naturally follow up on, that is an OPEN LEAD for you - pick "
+            "it up. If another lane already saturated a family, move to uncovered ground instead.\n"
+            "Every commission is a CONCRETE, DECIDABLE brief - a question a specialist can PROVE, not 'go look "
+            "around'. Escalate confirmed leads; redirect around dead ends; SKIP when your lane has no "
+            "evidence-backed work left - never commission busywork.\n"
             f"You may only commission these specialists: {', '.join(self.proposes) or '(none)'}.\n"
             'Reply with ONLY JSON: {"skip":false,"rationale":"<one line: what you are commissioning and why now, '
             'or why you stand down>","suggestions":[{"action":"<specialist>","target":"<url/host or empty>",'
@@ -131,20 +176,15 @@ class Suggester:
             "priority 1=highest .. 5=lowest. Keep it to your 1-3 strongest commissions.")
 
     def _user(self, ctx, peers) -> str:
-        parts = [f"ENGAGEMENT STATE:\n{ctx.landscape_digest()}",
-                 f"WHAT YOUR SPECIALISTS HAVE REPORTED (build on it):\n{ctx.recent_trail()}",
-                 f"YOUR COMMISSIONS SO FAR (what you asked for -> what came back):\n{ctx.advice_outcomes(self.name)}"]
+        parts = [
+            f"ENGAGEMENT STATE:\n{ctx.landscape_digest()}",
+            f"WHAT SPECIALISTS ACTUALLY DID (executor results only, most recent first):\n{ctx.executor_trail()}",
+            f"YOUR COMMISSIONS SO FAR (your suggestions -> what came back):\n{ctx.advice_outcomes(self.name)}",
+            f"ALL COMMISSIONS LOG (every lane, every round - check BEFORE advising):\n{ctx.all_commissions_render()}",
+        ]
         if peers:
-            parts.append("FELLOW MANAGERS HAVE ALREADY COMMISSIONED THIS ROUND (don't duplicate):\n" +
+            parts.append("FELLOW MANAGERS COMMISSIONED THIS ROUND ALREADY (don't duplicate):\n" +
                          "\n".join(f"  {p.id} [{p.agent}] {p.summary} — {p.rationale}" for p in peers))
-        dead = ctx.dead_commissions_render()
-        if dead:
-            parts.append("ALREADY ATTEMPTED - these ran and returned NOTHING; do NOT re-commission them without "
-                         "new evidence (the head will auto-decline a repeat):\n" + dead)
-        low = ctx.low_yield_render()
-        if low:
-            parts.append("LOW-YIELD LANES - these have run repeatedly with ZERO findings so far (even though "
-                         "some still turn up new surface); weigh their cost before commissioning more of them:\n" + low)
         parts += self._extra_parts(ctx)
         parts.append("Decide what to commission now. JSON only.")
         return "\n\n".join(parts)
@@ -177,6 +217,7 @@ class Executor:
     cost = "med"        # low|med|high - typical expense per commission (requests/time); the planner/concluder
                          # weigh this against a lane's actual yield instead of treating every call as free
     max_steps = 12
+    examples = ""       # concrete example calls, shown in the prompt so the model gets the invocations right
     # exactness over cost: re-test EVERY unconfirmed candidate, with a generous budget so multi-step proofs
     # (e.g. a full sqlmap dump, a cross-identity BOLA diff) can complete rather than time out.
     verify_steps = 10
@@ -208,59 +249,22 @@ class Executor:
         return log_argv, real_argv
 
     # -- vision: forward any image a tool produced to the model as a real picture, not base64 text ----------
-    _MAX_IMAGES = 4                # per single tool call - a describe+screenshot pass yields one; cap runaways
+    _MAX_IMAGES = 8                # per single tool call - a chain can hold several `screen`s; cap runaways
     _MAX_IMAGE_BYTES = 6_000_000   # skip an absurdly large capture rather than blow the request up
 
     def _take_images(self, out: str) -> tuple:
-        """A tool may emit a screenshot as a short `image_path` (browser-actions 'screenshot' does). Pull each
-        one OUT of the JSON envelope, read the PNG from disk (the runner dispatches tools in-process, so the
-        file is right here), and return (clean_text, images) - images being base64 blocks the provider sends
-        as ACTUAL vision. The path is replaced with a short marker in the text so the model isn't told to
-        re-fetch a file it can't reach, and a giant blob never rides in the text channel. General to any tool
-        that reports image_path; today only the browser does. Best-effort: any parse/read failure just yields
-        no images and the untouched text."""
-        try:
-            env = json.loads(out)
-        except Exception:  # noqa: BLE001
-            return out, []
-        if not isinstance(env, dict) or not isinstance(env.get("data"), list):
-            return out, []
-        images: list = []
-
-        def _harvest(node):
-            if len(images) >= self._MAX_IMAGES:
-                return
-            if isinstance(node, dict):
-                path = node.get("image_path")
-                if isinstance(path, str) and path:
-                    raw = None
-                    try:
-                        with open(path, "rb") as fh:
-                            raw = fh.read()
-                        os.unlink(path)                    # the capture is ephemeral - consume and drop it
-                    except OSError:
-                        raw = None
-                    if raw and len(raw) <= self._MAX_IMAGE_BYTES:
-                        images.append({"media_type": "image/png",
-                                       "data": base64.b64encode(raw).decode("ascii")})
-                        node["image_path"] = f"<screenshot captured ({len(raw)} bytes) - shown to you as an image>"
-                    else:
-                        node["image_path"] = "<screenshot unavailable>"
-                for v in node.values():
-                    _harvest(v)
-            elif isinstance(node, list):
-                for v in node:
-                    _harvest(v)
-
-        _harvest(env["data"])
-        if not images:
-            return out, []
-        return json.dumps(env, ensure_ascii=False), images
+        """Pull any screenshot a tool reported (as a short `image_path`) OUT of the JSON envelope and hand it
+        to the model as REAL vision. Delegates to the shared, ORDERED harvester so this matches logio and the
+        model's contract: exactly one image per `screen`, in order, numbered - never an extra, out-of-order
+        trailing state-shot that makes the agent read the wrong frame. See envelope.harvest_images."""
+        return harvest_images(out, self._MAX_IMAGES, self._MAX_IMAGE_BYTES)
 
     def run(self, ctx, step, runner, provider) -> dict:
         step = self._enrich_step(ctx, step)
         system = (f"{_EXEC_BASE}\n\n## Your role: {self.name}\n{self.objective}\n\n"
                   f"## Tools you may call\n{', '.join(sorted(self.tools))}")
+        if self.examples:
+            system += f"\n\n## Example calls (adapt to the real target/params - illustrative, not literal)\n{self.examples}"
         tools_spec = toolschema.native_tools(sorted(self.tools))
         brief = step.get("brief") or step.get("why") or self.description
         parts = [f"YOUR TASK (from the planner): {brief}"]
@@ -311,6 +315,15 @@ class Executor:
         if dead_eps:
             self._say(f"dropped {len(dead_eps)} ghost path(s) (catch-all/soft-404): {', '.join(dead_eps[:5])}"
                       + (" ..." if len(dead_eps) > 5 else ""))
+        # deterministic panel routing: a discovered admin/management panel becomes a `panel` lead (deduped
+        # against any the model already raised), so EXPOSURE is auto-commissioned on it and it can't be orphaned
+        have = {(str(ld.get("cls", "")).lower(), ld.get("url") or ld.get("target", ""))
+                for ld in (art.get("leads") or []) if isinstance(ld, dict)}
+        for pl in _panel_leads(kept_eps):
+            if (pl["cls"], pl["url"]) not in have:
+                art.setdefault("leads", []).append(pl)
+                have.add((pl["cls"], pl["url"]))
+                self._say(f"raised panel lead (-> exposure) for reachable panel: {pl['url']}")
         handoff["verification"] = {"candidates": len(candidates), "verified": len(verified),
                                    "dropped": len(dropped), "dropped_titles": dropped,
                                    "endpoints_kept": len(kept_eps), "endpoints_dropped": len(dead_eps),

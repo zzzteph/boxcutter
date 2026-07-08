@@ -13,7 +13,7 @@ from __future__ import annotations
 from urllib.parse import urlparse
 
 from ..core.args import add_common_args, add_header_arg
-from ..core.cdp import CDPError, Chrome
+from ..core.cdp import CDPError, Chrome, get_session
 from ..core.envelope import debug_logger, output_result
 from ..core.validators import is_valid_url
 
@@ -26,11 +26,46 @@ _SKIP_WORDS = ("logout", "sign out", "log out", "delete", "remove", "deactivate"
 
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="URL to render")
+    parser.add_argument("--session", dest="session", default=None, metavar="ID",
+                        help="Attach to a persistent browser session by id (e.g. one already LOGGED IN by "
+                             "logio/prawlio) instead of spawning a fresh browser - the crawl then runs "
+                             "AUTHENTICATED. On attach the start URL is not re-navigated (it crawls from where "
+                             "the session already is).")
     add_header_arg(parser)
     parser.add_argument("--timeout", type=int, default=45, help="Per-page timeout (seconds)")
     parser.add_argument("--max-actions", dest="max_actions", type=int, default=25,
                         help="Max elements to click while exploring")
     add_common_args(parser)
+
+
+def _crawl(page, target, max_actions, dbg, navigate=True):
+    """Explore the rendered app and return the captured items. `navigate=False` crawls from wherever the page
+    already is (an attached, already-authenticated session) instead of re-loading the start URL."""
+    site_hosts = {urlparse(target).hostname or ""}
+    if navigate:
+        page.navigate(target, wait="networkidle")
+    site_hosts.add(urlparse(page.current_url()).hostname or "")
+    routes = _same_site_links(page, site_hosts)
+
+    filled = _auto_fill(page, max_actions, dbg)
+    if filled:
+        site_hosts.add(urlparse(page.current_url()).hostname or "")
+        routes.update(_same_site_links(page, site_hosts))
+
+    clicked = _auto_click(page, max_actions, dbg)
+    site_hosts.add(urlparse(page.current_url()).hostname or "")
+    routes.update(_same_site_links(page, site_hosts))
+
+    captured = page.xhr()
+    items = [{"url": u, "method": m, "type": "xhr"} for (m, u) in captured]
+    items += [{"url": u, "method": "GET", "type": "route"} for u in sorted(routes)]
+    cookie_names = ", ".join(sorted({c.split("=", 1)[0] for c in page.cookies().split("; ") if c})) or "(none)"
+    dbg(f"browser-crawl: {len(captured)} api calls, {len(routes)} routes "
+        f"({filled} field(s) filled, {clicked} element(s) clicked)")
+    # diagnostic for the "did it actually render, or get blocked/redirected?" question - names only, never
+    # cookie values, since this line is printed on every --debug run.
+    dbg(f"browser-crawl: landed on {page.current_url()!r} titled {page.title()!r}; cookies set: {cookie_names}")
+    return items
 
 
 def run(args) -> int:
@@ -45,26 +80,17 @@ def run(args) -> int:
         if ":" in raw:
             k, v = raw.split(":", 1)
             headers[k.strip()] = v.strip()
-    site_hosts = {urlparse(target).hostname or ""}
 
+    sid = (getattr(args, "session", None) or "").strip()
     try:
-        with Chrome(headers=headers, timeout=args.timeout, debug=dbg) as page:
-            page.navigate(target, wait="networkidle")
-            site_hosts.add(urlparse(page.current_url()).hostname or "")
-            routes = _same_site_links(page, site_hosts)
-
-            filled = _auto_fill(page, args.max_actions, dbg)
-            if filled:
-                site_hosts.add(urlparse(page.current_url()).hostname or "")
-                routes.update(_same_site_links(page, site_hosts))
-
-            clicked = _auto_click(page, args.max_actions, dbg)
-            site_hosts.add(urlparse(page.current_url()).hostname or "")
-            routes.update(_same_site_links(page, site_hosts))
-
-            captured = page.xhr()
-            landed_url, landed_title = page.current_url(), page.title()
-            cookie_names = ", ".join(sorted({c.split("=", 1)[0] for c in page.cookies().split("; ") if c})) or "(none)"
+        if sid:
+            # attach to an existing (already logged-in) browser; on attach, DON'T re-navigate - crawl from where
+            # the session already is. A freshly-opened session (fresh=True) still gets the start URL.
+            page, fresh = get_session(sid, headers=headers, timeout=args.timeout, debug=dbg)
+            items = _crawl(page, target, args.max_actions, dbg, navigate=fresh)
+        else:
+            with Chrome(headers=headers, timeout=args.timeout, debug=dbg) as page:
+                items = _crawl(page, target, args.max_actions, dbg, navigate=True)
     except CDPError as exc:
         output_result([], args.output, f"browser-crawl unavailable: {exc}")
         return 1
@@ -72,13 +98,6 @@ def run(args) -> int:
         output_result([], args.output, f"browser-crawl failed: {exc}")
         return 1
 
-    items = [{"url": u, "method": m, "type": "xhr"} for (m, u) in captured]
-    items += [{"url": u, "method": "GET", "type": "route"} for u in sorted(routes)]
-    dbg(f"browser-crawl: {len(captured)} api calls, {len(routes)} routes "
-        f"({filled} field(s) filled, {clicked} element(s) clicked)")
-    # diagnostic for the "did it actually render, or get blocked/redirected?" question - names only, never
-    # cookie values, since this line is printed on every --debug run.
-    dbg(f"browser-crawl: landed on {landed_url!r} titled {landed_title!r}; cookies set: {cookie_names}")
     output_result(items, args.output)
     return 0
 

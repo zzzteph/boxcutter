@@ -21,7 +21,9 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import math
 import os
+import random
 import shutil
 import socket
 import subprocess
@@ -89,19 +91,36 @@ _KEYS = {"enter": (13, "Enter"), "tab": (9, "Tab"), "escape": (27, "Escape"),
          "esc": (27, "Escape"), "backspace": (8, "Backspace"), "delete": (46, "Delete")}
 
 
+def _bezier(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
+    """One coordinate of a cubic Bezier at parameter t - used to trace a curved (human-looking) mouse path
+    rather than a dead-straight line between two points."""
+    u = 1 - t
+    return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3
+
+
 # Response bodies are captured only for API-ish content types (skip images/fonts/css/html shells) and capped,
 # so the flow log stays a readable record of the app's API traffic rather than a dump of every asset.
 _API_MIME = ("json", "xml", "graphql", "x-www-form-urlencoded", "text/plain", "javascript")
 _BODY_CAP = 4000
 
+# Pure static-asset resource types, skipped from the default proxy-like "requests" surface view (a page pulls
+# dozens of them); requests:all brings them back.
+_STATIC_TYPES = {"image", "stylesheet", "font", "media", "manifest", "texttrack",
+                 "cspviolationreport", "ping", "prefetch", "signedexchange"}
+
 
 class Chrome:
     """A headless chromium page driven over CDP. Context manager; one tab."""
 
-    def __init__(self, headers: dict | None = None, timeout: int = 45, debug=lambda _m: None):
+    def __init__(self, headers: dict | None = None, timeout: int = 45, debug=lambda _m: None,
+                 viewport: tuple | None = None):
         self.headers = headers or {}
         self.timeout = timeout
         self._dbg = debug
+        # a fixed viewport at deviceScaleFactor=1 (for the visual driver): 1 screenshot px == 1 CSS px == the
+        # x,y we hand to Input.dispatchMouseEvent, so a coordinate the model reads off the grid clicks true.
+        self.viewport = viewport
+        self._cursor = None                            # logical mouse position, for continuous human motion
         self._proc = None
         self._ws = None
         self._wsmod = None
@@ -116,6 +135,10 @@ class Chrome:
         # agent SEE what the app actually sent and got back (method/url/status/bodies), not just a URL list.
         self._flows: dict[str, dict] = {}
         self._flow_order: list[str] = []
+        # lightweight log of EVERY request (all resource types) - the proxy-like view: what the page talked to,
+        # incl. requests scripts make on their own, third-party backends, redirects. No bodies (see _flows).
+        self._reqs: dict[str, dict] = {}
+        self._req_order: list[str] = []
 
     # -- lifecycle -----------------------------------------------------------
     def __enter__(self) -> "Chrome":
@@ -133,6 +156,9 @@ class Chrome:
                "--no-first-run", "--no-default-browser-check", "--disable-extensions",
                "--remote-allow-origins=*", f"--remote-debugging-port={port}",
                f"--user-data-dir={self._profile}", "about:blank"]
+        if self.viewport:
+            cmd.insert(-1, f"--window-size={self.viewport[0]},{self.viewport[1]}")
+            cmd.insert(-1, "--force-device-scale-factor=1")
         self._dbg("cdp: launching chromium")
         self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         ws_url = self._discover(port)
@@ -146,6 +172,12 @@ class Chrome:
             self._cmd("Network.setUserAgentOverride", {"userAgent": ua})
         if self.headers:
             self._cmd("Network.setExtraHTTPHeaders", {"headers": self.headers})
+        if self.viewport:
+            w, h = self.viewport
+            with contextlib.suppress(CDPError):
+                self._cmd("Emulation.setDeviceMetricsOverride",
+                          {"width": w, "height": h, "deviceScaleFactor": 1, "mobile": False})
+            self._cursor = (w // 2, h // 2)            # start the pointer at viewport centre
         return self
 
     def _real_user_agent(self) -> str:
@@ -201,16 +233,24 @@ class Chrome:
             if rid:
                 self._inflight.add(rid)
             self._last_activity = time.monotonic()
+            url = (req.get("url") or "").split("#")[0]
+            if url and rid and rid not in self._reqs and url.startswith(("http://", "https://", "ws")):
+                self._reqs[rid] = {"method": req.get("method", "GET"), "url": url,
+                                   "type": rtype or "other", "status": None, "size": 0}
+                self._req_order.append(rid)
             if rtype in ("xhr", "fetch"):
-                url = (req.get("url") or "").split("#")[0]
                 key = (req.get("method", "GET"), url)
                 if key[1] and key not in self._seen:
                     self._seen.add(key)
                     self._requests.append(key)
                 if rid and url and rid not in self._flows:
+                    hdrs = req.get("headers") or {}
+                    # the Authorization header the SPA sends to its API (a bearer JWT) IS the session artifact for
+                    # a token-based app - capture it so auth can lift and reuse it, not just cookies.
+                    auth = next((str(v) for k, v in hdrs.items() if k.lower() == "authorization"), "")
                     self._flows[rid] = {
                         "method": req.get("method", "GET"), "url": url, "type": rtype,
-                        "req_body": (req.get("postData") or "")[:_BODY_CAP],
+                        "req_body": (req.get("postData") or "")[:_BODY_CAP], "req_auth": auth[:1400],
                         "status": None, "mime": "", "resp_body": None,
                         "_finished": False, "_body_done": False,
                     }
@@ -221,11 +261,15 @@ class Chrome:
             self._last_activity = time.monotonic()
             if rid in self._flows:
                 self._flows[rid]["_finished"] = True
+            if rid in self._reqs and method == "Network.loadingFinished":
+                self._reqs[rid]["size"] = int(params.get("encodedDataLength") or 0)
         elif method == "Network.responseReceived":
             resp = params.get("response") or {}
             if (params.get("type") or "") == "Document" and self._nav_status is None:
                 self._nav_status = resp.get("status")
             rid = params.get("requestId")
+            if rid in self._reqs:
+                self._reqs[rid]["status"] = resp.get("status")
             if rid in self._flows:
                 self._flows[rid]["status"] = resp.get("status")
                 self._flows[rid]["mime"] = (resp.get("mimeType") or "").lower()
@@ -405,12 +449,49 @@ class Chrome:
         for rid in self._flow_order[since:]:
             f = self._flows[rid]
             rec = {"type": "flow", "method": f["method"], "url": f["url"], "status": f["status"]}
+            if f.get("req_auth"):
+                rec["req_auth"] = f["req_auth"]        # the Authorization/bearer the app sent (session artifact)
             if f["req_body"]:
                 rec["req_body"] = f["req_body"]
             if f["resp_body"] is not None:
                 rec["resp_body"] = f["resp_body"]
             out.append(rec)
         return out
+
+    def requests(self, include_all: bool = False) -> list[dict]:
+        """The lightweight log of EVERY request the page has made this session (method/url/status/type/size) -
+        the proxy-like view. Static assets (images/fonts/css/...) are skipped unless include_all."""
+        out = []
+        for rid in self._req_order:
+            r = self._reqs.get(rid)
+            if not r or (not include_all and r["type"] in _STATIC_TYPES):
+                continue
+            out.append({"method": r["method"], "url": r["url"], "status": r["status"],
+                        "type": r["type"], "size": r["size"]})
+        return out
+
+    def request_summary(self, spec: str = "") -> dict:
+        """A proxy-like view of everything the page talked to, for an agent to explore. Default ('' or
+        'surface') returns a host->count map of the meaningful requests (static assets skipped) so the whole
+        backend + third-party surface is visible at a glance; 'all' includes assets in the map; 'api' lists the
+        xhr/fetch calls; any other value is treated as a hostname substring and lists that host's requests."""
+        spec = (spec or "").strip()
+        low = spec.lower()
+        if low in ("", "surface", "all"):
+            reqs = self.requests(include_all=(low == "all"))
+            by_host: dict = {}
+            for r in reqs:
+                h = urlparse(r["url"]).hostname or "?"
+                by_host[h] = by_host.get(h, 0) + 1
+            return {"total": len(reqs),
+                    "by_host": dict(sorted(by_host.items(), key=lambda kv: (-kv[1], kv[0]))),
+                    "hint": "requests:<host> to list one host; requests:api for xhr/fetch; requests:all incl assets"}
+        reqs = self.requests(include_all=True)
+        if low == "api":
+            reqs = [r for r in reqs if r.get("type") in ("xhr", "fetch")]
+        else:
+            reqs = [r for r in reqs if low in (urlparse(r["url"]).hostname or "").lower()]
+        return {"matched": len(reqs), "requests": reqs}
 
     def links(self, same_host: str | None = None) -> list[str]:
         hrefs = self.eval("Array.from(document.querySelectorAll('a[href]')).map(a=>a.href)") or []
@@ -436,6 +517,46 @@ class Chrome:
     def current_url(self) -> str:
         return self.eval("location.href") or ""
 
+    def element_at(self, x: int, y: int) -> dict | None:
+        """A short descriptor of the element at viewport point (x,y) via document.elementFromPoint - so a
+        coordinate click can report WHAT it actually hit (button 'Accept all', input#email, ...), turning a
+        blind coordinate into a verifiable one. None if nothing is there."""
+        try:
+            return self.eval(
+                "(()=>{const e=document.elementFromPoint(%d,%d);if(!e)return null;"
+                "const t=(e.innerText||e.value||e.getAttribute('aria-label')||e.getAttribute('placeholder')"
+                "||'').replace(/\\s+/g,' ').trim().slice(0,50);"
+                "return {tag:e.tagName.toLowerCase(),id:e.id||'',type:e.type||'',"
+                "role:e.getAttribute('role')||'',text:t};})()" % (int(x), int(y)))
+        except CDPError:
+            return None
+
+    def find_text(self, text: str) -> dict | None:
+        """Find the first VISIBLE interactive element whose text/label matches `text` (case-insensitive
+        substring), preferring the SMALLEST match (the actual control, not a big container). Returns its center
+        coordinate + a descriptor, or None. Lets an agent aim at 'Log in' by NAME instead of guessing pixels -
+        and it's the reliable way to tell 'Log in' apart from 'Sign up'/'Create account'."""
+        q = (text or "").strip().lower()
+        if not q:
+            return None
+        try:
+            return self.eval(
+                "(()=>{const q=%s;"
+                "const els=[...document.querySelectorAll('button,a,[role=button],[role=link],input,textarea,"
+                "select,label,[tabindex]')];let best=null,ba=1e18;"
+                "for(const e of els){if(e.offsetParent===null)continue;"
+                # match on visible text, value, aria-label, placeholder, name, or (for inputs) the type - so
+                # `find:email`/`find:password` locate the login FIELDS by name, not just buttons by their text.
+                "const t=((e.innerText||e.value||e.getAttribute('aria-label')||e.placeholder||e.name||"
+                "(e.tagName==='INPUT'?e.type:'')||'').replace(/\\s+/g,' ').trim());"
+                "if(!t||!t.toLowerCase().includes(q))continue;"
+                "const r=e.getBoundingClientRect();if(r.width<=0||r.height<=0)continue;"
+                "const a=r.width*r.height;if(a<ba){ba=a;best={x:Math.round(r.left+r.width/2),"
+                "y:Math.round(r.top+r.height/2),tag:e.tagName.toLowerCase(),type:e.type||'',text:t.slice(0,50)};}}"
+                "return best;})()" % json.dumps(q))
+        except CDPError:
+            return None
+
     def screenshot(self) -> bytes:
         """Capture the current page as PNG bytes (Page.captureScreenshot). Lets an agent SEE what is
         rendered right now - the real login form, an unexpected consent/MFA/error screen, a CSS-in-JS theme
@@ -444,6 +565,148 @@ class Chrome:
         r = self._cmd("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False})
         data = r.get("data") or ""
         return base64.b64decode(data) if data else b""
+
+    # -- human-like coordinate input (the visual driver) ---------------------
+    # The agent decides WHERE (an x,y read off the coordinate grid); these decide HOW - a real, trusted mouse
+    # that MOVES to the target along a curved, eased path (never a teleport), because a straight jump / a click
+    # with no motion is itself a bot tell. Every event is isTrusted (it comes through Input.*, not JS).
+    def _vw(self) -> tuple:
+        return self.viewport or (1280, 800)
+
+    def human_move(self, x: float, y: float, buttons: int = 0) -> None:
+        w, h = self._vw()
+        x = max(0, min(int(x), w - 1))
+        y = max(0, min(int(y), h - 1))
+        if self._cursor is None:
+            self._cursor = (w // 2, h // 2)
+        x0, y0 = self._cursor
+        dist = math.hypot(x - x0, y - y0)
+        steps = max(8, min(28, int(dist / 14) + 6))
+        off = min(90.0, dist * 0.22)                   # lateral bow of the curve
+        cx1 = x0 + (x - x0) * 0.33 + random.uniform(-off, off)
+        cy1 = y0 + (y - y0) * 0.33 + random.uniform(-off, off)
+        cx2 = x0 + (x - x0) * 0.66 + random.uniform(-off, off)
+        cy2 = y0 + (y - y0) * 0.66 + random.uniform(-off, off)
+        pause_at = random.randint(2, steps) if (dist > 120 and random.random() < 0.4) else -1
+        for i in range(1, steps + 1):
+            t = i / steps
+            te = t * t * (3 - 2 * t)                    # ease in-out (accelerate then decelerate)
+            px = _bezier(x0, cx1, cx2, x, te) + random.uniform(-1.0, 1.0)
+            py = _bezier(y0, cy1, cy2, y, te) + random.uniform(-1.0, 1.0)
+            self._cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": px, "y": py, "buttons": buttons})
+            self.wait(random.randint(120, 260) if i == pause_at else random.randint(6, 16))
+        if dist > 40 and random.random() < 0.45:        # occasional overshoot then correction, like a real hand
+            self._cmd("Input.dispatchMouseEvent", {"type": "mouseMoved",
+                      "x": x + random.randint(-7, 7), "y": y + random.randint(-7, 7), "buttons": buttons})
+            self.wait(random.randint(40, 110))
+        self._cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "buttons": buttons})
+        self._cursor = (x, y)
+
+    def wander(self, seconds: float = 3.0) -> None:
+        """Human-like IDLE mouse activity - drift the cursor around the viewport along curved paths with
+        pauses, NO click. Builds a believable behavioural history for a score/behaviour-based bot check
+        (reCAPTCHA v3, Turnstile's behaviour signal). It does NOT defeat environment/headless fingerprinting."""
+        w, h = self._vw()
+        end = time.monotonic() + max(0.5, min(float(seconds), 20.0))
+        while time.monotonic() < end:
+            self.human_move(random.randint(int(w * 0.12), int(w * 0.88)),
+                            random.randint(int(h * 0.12), int(h * 0.88)))
+            self.wait(random.randint(150, 550))         # dwell between drifts
+
+    def human_click(self, x: float, y: float, button: str = "left", clicks: int = 1) -> None:
+        self.human_move(x, y)
+        cx, cy = self._cursor
+        self.wait(random.randint(30, 90))              # dwell before pressing
+        self._cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": cx, "y": cy,
+                                               "button": button, "buttons": 1, "clickCount": clicks})
+        self.wait(random.randint(40, 110))
+        self._cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": cx, "y": cy,
+                                               "button": button, "buttons": 0, "clickCount": clicks})
+
+    def human_drag(self, x1: float, y1: float, x2: float, y2: float, button: str = "left") -> None:
+        """Press at (x1,y1), MOVE to (x2,y2) with the button held (curved, human motion), then release - a real
+        click-and-drag (slider captchas, drag-and-drop). The move dispatches with buttons=1 so the page sees a
+        genuine drag, not a teleport."""
+        self.human_move(x1, y1)
+        px, py = self._cursor
+        self.wait(random.randint(40, 90))
+        self._cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": px, "y": py,
+                                               "button": button, "buttons": 1, "clickCount": 1})
+        self.wait(random.randint(60, 130))
+        self.human_move(x2, y2, buttons=1)             # drag while holding the button down
+        dx, dy = self._cursor
+        self.wait(random.randint(50, 110))
+        self._cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": dx, "y": dy,
+                                               "button": button, "buttons": 0, "clickCount": 1})
+
+    def human_type(self, text: str) -> None:
+        """Type a string with real, trusted per-key events and jittered inter-key delays (instant value-set is
+        a bot tell). Whatever element the last click focused receives it."""
+        for ch in text:
+            self._cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": ch, "text": ch})
+            self._cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": ch})
+            self.wait(random.randint(40, 130))
+
+    def focused_value(self) -> str:
+        """The `.value` of the currently focused input/textarea (document.activeElement), or '' if nothing is
+        focused or it isn't a value-bearing field. Lets a caller VERIFY a typed value actually landed in a
+        field; the caller MUST mask it (report length/landed, never echo a password into output)."""
+        try:
+            return self.eval_fn(
+                "() => { const e = document.activeElement; "
+                "return e && ('value' in e) ? String(e.value || '') : ''; }") or ""
+        except CDPError:
+            return ""
+
+    def storage_dump(self) -> dict:
+        """All of localStorage and sessionStorage as {'local': {...}, 'session': {...}} - the full client-side
+        auth state, so an authenticated session can be CAPTURED for reuse (many SPAs keep their bearer/JWT and
+        user context here, not just in cookies). Best-effort: {} on failure/denied access."""
+        js = ("() => { const dump = s => { const o = {}; try { for (let i = 0; i < s.length; i++) { "
+              "const k = s.key(i); o[k] = s.getItem(k); } } catch (e) {} return o; }; "
+              "return { local: dump(window.localStorage), session: dump(window.sessionStorage) }; }")
+        try:
+            val = self.eval_fn(js)
+            return val if isinstance(val, dict) else {}
+        except CDPError:
+            return {}
+
+    def clear_field(self) -> None:
+        """Empty the focused input: select-all (Ctrl+A) then Delete, via trusted key events - so a pre-filled
+        field is cleared before you type into it (put/type otherwise appends)."""
+        for phase in ("keyDown", "keyUp"):             # Ctrl+A
+            self._cmd("Input.dispatchKeyEvent", {"type": phase, "key": "a", "code": "KeyA",
+                                                 "windowsVirtualKeyCode": 65, "modifiers": 2})
+        self.wait(random.randint(20, 50))
+        for phase in ("keyDown", "keyUp"):             # Delete
+            self._cmd("Input.dispatchKeyEvent", {"type": phase, "key": "Delete", "code": "Delete",
+                                                 "windowsVirtualKeyCode": 46})
+
+    def wheel(self, dy: int, x: float | None = None, y: float | None = None) -> None:
+        w, h = self._vw()
+        cx, cy = self._cursor or (w // 2, h // 2)
+        self._cmd("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": x if x is not None else cx,
+                                               "y": y if y is not None else cy, "deltaX": 0, "deltaY": dy})
+
+    def add_grid(self, minor: int = 50, major: int = 100) -> None:
+        """Overlay a semi-transparent coordinate grid (labeled every `major` px, in the margins) so the model
+        can read an element's x,y straight off the screenshot. Removed again by remove_grid()."""
+        self.eval(
+            "(()=>{const id='__bc_grid__';const o=document.getElementById(id);if(o)o.remove();"
+            "const W=innerWidth,H=innerHeight,c=document.createElement('canvas');"
+            "c.id=id;c.width=W;c.height=H;c.style.cssText='position:fixed;left:0;top:0;width:'+W+'px;height:'+H"
+            "+'px;z-index:2147483647;pointer-events:none';const g=c.getContext('2d');g.font='10px monospace';"
+            f"for(let x=0;x<=W;x+={minor}){{g.strokeStyle=x%{major}===0?'rgba(255,0,0,.35)':'rgba(255,0,0,.12)';"
+            "g.beginPath();g.moveTo(x,0);g.lineTo(x,H);g.stroke();"
+            f"if(x%{major}===0){{g.fillStyle='rgba(255,0,0,.85)';g.fillText(x,x+1,10);}}}}"
+            f"for(let y=0;y<=H;y+={minor}){{g.strokeStyle=y%{major}===0?'rgba(255,0,0,.35)':'rgba(255,0,0,.12)';"
+            "g.beginPath();g.moveTo(0,y);g.lineTo(W,y);g.stroke();"
+            f"if(y%{major}===0){{g.fillStyle='rgba(255,0,0,.85)';g.fillText(y,1,y+10);}}}}"
+            "document.body.appendChild(c);})()")
+
+    def remove_grid(self) -> None:
+        with contextlib.suppress(CDPError):
+            self.eval("(()=>{const o=document.getElementById('__bc_grid__');if(o)o.remove();})()")
 
     # Marking each handled element with data-bc-done (rather than a positional snapshot taken once) means
     # clickable()/click_nth() always operate on the LIVE, remaining set - so newly revealed content (e.g.
@@ -550,17 +813,18 @@ _SESSIONS: dict[str, Chrome] = {}
 
 
 def get_session(sid: str, headers: dict | None = None, timeout: int = 45,
-                debug=lambda _m: None) -> tuple[Chrome, bool]:
+                debug=lambda _m: None, viewport: tuple | None = None) -> tuple[Chrome, bool]:
     """The live Chrome for session id `sid`, opening one on first use (or if the previous one died). Returns
     (page, fresh) - fresh=True when it was just opened, so the caller knows to navigate to the start URL rather
-    than continue from wherever the persistent session already is."""
+    than continue from wherever the persistent session already is. `viewport` pins a fixed size + DPR=1 (used
+    by the visual driver so screenshot pixels map 1:1 to click coordinates)."""
     page = _SESSIONS.get(sid)
     if page is not None and page._alive():
         return page, False
     if page is not None:
         with contextlib.suppress(Exception):
             page.__exit__(None, None, None)
-    page = Chrome(headers=headers, timeout=timeout, debug=debug)
+    page = Chrome(headers=headers, timeout=timeout, debug=debug, viewport=viewport)
     page.__enter__()
     _SESSIONS[sid] = page
     return page, True

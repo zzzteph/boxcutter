@@ -154,9 +154,10 @@ def _action_label(rec) -> str:
 
 
 def actions_dot(ctx) -> str:
-    """What the engine DID: per round, the steps run and decisions made (plan -> thin -> execute -> escalate ->
-    adjust) chained in order, with the findings each step produced. A visual walkthrough of the run - narrower
-    than --graph's full council trace. Emit with `boxcutter irvin --actions`."""
+    """What the engine DID: per round, the decision steps run (plan -> thin -> execute -> escalate -> adjust)
+    AND the concrete tool COMMANDS carried out that round (from the ledger - `subfinder`, `dirb`, `sqlmap`, ...),
+    with the findings each step produced. A visual walkthrough of the whole run. Emit with
+    `boxcutter irvin --actions`."""
     def is_action(r):
         return (r.phase == "plan" and r.kind in ("plan", "adjustment")) or r.phase == "execute"
 
@@ -165,12 +166,14 @@ def actions_dot(ctx) -> str:
     a("digraph irvin_actions {")
     a('  rankdir=TB; fontname="Helvetica"; labelloc=t;')
     a(f'  label="IRVIN actions - {_esc(ctx.target, 60)}  ({ctx.round} round(s), '
-      f'{len(ctx.landscape["findings"])} finding(s))";')
+      f'{len(ctx.ledger)} tool call(s), {len(ctx.landscape["findings"])} finding(s))";')
     a('  node [fontname="Helvetica", shape=box, style="rounded,filled"];')
     a('  edge [fontname="Helvetica", color="#666"];')
 
     prev = None
-    for rd in sorted({r.round for r in ctx.trail if r.round and is_action(r)}):
+    rounds = sorted({r.round for r in ctx.trail if r.round and is_action(r)}
+                    | {e["round"] for e in ctx.ledger if e.get("round")})
+    for rd in rounds:
         a(f'  subgraph cluster_a{rd} {{ label="round {rd}"; style="rounded,dashed"; color="#999";')
         for rec in [r for r in ctx.trail if r.round == rd and is_action(r)]:
             role = rec.agent if rec.agent in _ACTION_STYLE else rec.role
@@ -179,6 +182,16 @@ def actions_dot(ctx) -> str:
             if prev:
                 a(f'    {_nid(prev)} -> {_nid(rec.id)};')     # sequential timeline across the whole run
             prev = rec.id
+        # the concrete tool COMMANDS carried out this round (from the ledger), chained in order they ran
+        cmds = [e for e in ctx.ledger if e.get("round") == rd]
+        cprev = None
+        for j, e in enumerate(cmds):
+            cid = f"cmd_{rd}_{j}"
+            a(f'    {cid} [label="{_lbl(_esc(e.get("tool", ""), 22), _esc(e.get("target", ""), 34))}", '
+              f'shape=box, style=filled, fillcolor="#f6f6f6", color="#aaa", fontsize=9];')
+            if cprev:
+                a(f'    {cprev} -> {cid} [style=dotted, color="#bbb", arrowsize=0.6];')
+            cprev = cid
         a("  }")
 
     for f in ctx.landscape["findings"]:

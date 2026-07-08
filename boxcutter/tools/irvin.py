@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 from ..irvin import briefing, pipeline
 from ..irvin.context import Context
-from ..irvin.provider import PROVIDERS
+from ..irvin.provider import PROVIDERS, add_ai_provider_args
 from ..irvin.runner import Runner
 
 NAME = "irvin"
@@ -29,12 +29,7 @@ HELP = "Pipeline bug-hunter: suggester council -> concluder -> planner -> execut
 
 def add_arguments(parser) -> None:
     parser.add_argument("target", nargs="?", help="URL, host, or domain to hunt")
-    parser.add_argument("--provider", choices=list(PROVIDERS), default="anthropic",
-                        help="LLM provider (default: anthropic; 'litellm' fronts any provider via your gateway)")
-    parser.add_argument("--model", default=None, help="Model id (defaults per provider)")
-    parser.add_argument("--api-key", dest="api_key", default=None,
-                        help="LLM API key (default: the provider's env var, e.g. ANTHROPIC_API_KEY)")
-    parser.add_argument("--base-url", dest="base_url", default=None, help="LLM API base URL (e.g. a LiteLLM gateway)")
+    add_ai_provider_args(parser)          # --provider/--model/--api-key/--base-url (shared by every ai agent)
     parser.add_argument("--header", action="append", default=[], metavar="NAME: VALUE",
                         help="Auth header for identity A (repeatable)")
     parser.add_argument("--header-b", dest="header_b", action="append", default=[], metavar="NAME: VALUE",
@@ -78,6 +73,12 @@ def add_arguments(parser) -> None:
     parser.add_argument("--trail", dest="trail", nargs="?", const="-", default=None, metavar="PATH",
                         help="Emit the full machine-parsable decision trail (JSON). Bare --trail prints it to "
                              "the console; --trail PATH writes it to that file")
+    parser.add_argument("--report", dest="report", default=None, metavar="PATH",
+                        help="Also SAVE the final Markdown report to PATH (it is always printed at the end too)")
+    parser.add_argument("--out-dir", dest="out_dir", default=None, metavar="DIR",
+                        help="Save ALL run artifacts into DIR at the end: report.md, trail.json, trace.dot, "
+                             "actions.dot (plus rendered .png if graphviz 'dot' is installed). Without it, the "
+                             "report prints to stdout; add --trail/--graph/--actions to print those too.")
     parser.add_argument("--graph", dest="graph", nargs="?", const="-", default=None, metavar="PATH",
                         help="At the end, emit a Graphviz DOT of what actually happened (the run trace, from "
                              "the context). Bare --graph prints it; --graph PATH writes it. Render with dot")
@@ -92,6 +93,44 @@ def _as_headers(values):
     for h in values:
         out += ["--header", h]
     return out
+
+
+def _report_text(ctx) -> str:
+    """The final Markdown report the reporter produced (stored on the trail by the pipeline)."""
+    return next((r.data.get("text", "") for r in reversed(ctx.trail) if r.kind == "report"), "")
+
+
+def _write_artifacts(ctx, out_dir: str) -> list:
+    """Dump every run artifact into out_dir: the Markdown report, the JSON decision trail, and both Graphviz
+    graphs (run trace + actions). If graphviz `dot` is installed, also render the graphs to PNG. Returns the
+    filenames written."""
+    import shutil
+    import subprocess
+    from ..irvin.graphviz import actions_dot, trace_dot
+
+    os.makedirs(out_dir, exist_ok=True)
+    md = _report_text(ctx)
+    artifacts = {"report.md": (md + "\n") if md else "(no report generated)\n",
+                 "trail.json": ctx.to_json(),
+                 "trace.dot": trace_dot(ctx),
+                 "actions.dot": actions_dot(ctx)}
+    written = []
+    for name, content in artifacts.items():
+        with open(os.path.join(out_dir, name), "w", encoding="utf-8") as fh:
+            fh.write(content)
+        written.append(name)
+    if shutil.which("dot"):          # render the DOT graphs to PNG when graphviz is available
+        for dot_name in ("trace.dot", "actions.dot"):
+            png = dot_name[:-4] + ".png"
+            try:
+                subprocess.run(["dot", "-Tpng", os.path.join(out_dir, dot_name), "-o",
+                                os.path.join(out_dir, png)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                if os.path.exists(os.path.join(out_dir, png)):
+                    written.append(png)
+            except Exception:  # noqa: BLE001 - rendering is a nicety; never fail the run over it
+                pass
+    return written
 
 
 def run(args) -> int:
@@ -191,6 +230,16 @@ def run(args) -> int:
     finally:
         from ..core.cdp import close_all_sessions
         close_all_sessions()          # tear down any persistent browser session the explorer left open
+
+    if args.out_dir:                 # one folder with everything: report + trail + both graphs (+ rendered png)
+        written = _write_artifacts(ctx, args.out_dir)
+        sys.stderr.write(f"\nirvin :: run artifacts saved to {args.out_dir}/  ({', '.join(written)})\n")
+
+    if args.report:
+        # the reporter's Markdown (already printed by the pipeline) is stored on the trail - save a copy
+        with open(args.report, "w", encoding="utf-8") as fh:
+            fh.write(_report_text(ctx) + "\n")
+        sys.stderr.write(f"\nirvin :: Markdown report written to {args.report}\n")
 
     if args.trail == "-":
         print("\n===== IRVIN DECISION TRAIL (JSON) =====")

@@ -19,6 +19,9 @@ Actions (repeatable, ordered) via --action "verb:args":
   screenshot (no args) - capture the CURRENT page as a PNG; the agent SEES the rendered page (the real login
   form, an unexpected consent/MFA/error screen) as an image, not just its DOM. Pair with describe when a
   form's structure is unclear: describe gives the exact selectors, screenshot shows what's actually there.
+  requests[:api|all|HOST] - proxy-like view of EVERY request the page has made (not just the XHR/fetch this
+  call triggered): bare/`surface` = host->count map of the whole backend+third-party surface; `api` = the
+  xhr/fetch calls; `all` = include static assets; a HOST substring = list that host's requests.
 SEL shorthands: id=foo -> #foo · name=foo -> [name="foo"] · text=Foo -> text match · css=... or raw CSS.
 """
 
@@ -77,6 +80,10 @@ def _do(page, action):
         page.navigate(rest.strip(), wait="networkidle")
     elif verb == "describe":
         return page.describe_form()
+    elif verb in ("requests", "req"):
+        return page.request_summary(rest.strip())        # proxy-like view of every request the page made
+    elif verb in ("captcha", "wander", "humanize"):
+        page.wander(float(rest) if rest.strip() else 3.0)   # idle human mouse drift to warm up a behaviour check
     elif verb == "screenshot":
         png = page.screenshot()
         if not png:

@@ -17,8 +17,8 @@ from __future__ import annotations
 import json
 import sys
 
-from .agents import (ADJUSTER, CONCLUDER, ESCALATE, EXECUTORS, PLANNER, REPORTER, REVIEWER, SUGGESTERS,
-                     THINNER, DynamicSuggester, executor_manual)
+from .agents import (ADJUSTER, CONCLUDER, CONSOLIDATOR, ESCALATE, EXECUTORS, PLANNER, REPORTER, REVIEWER,
+                     SUGGESTERS, SUMMARIZER, THINNER, VERIFIER, DynamicSuggester, executor_manual)
 
 _W = 64
 
@@ -28,24 +28,32 @@ def _phase(title):
 
 
 def _escalations(ctx, handoff, producer, scheduled) -> list:
-    """detect -> exploit: a confirmed finding of an escalatable class spawns its specialist on the same target,
-    THIS round. Skips self-escalation, anything already scheduled, and anything already committed. Returns new
-    steps to splice in after the current one."""
+    """detect -> exploit: a confirmed finding OR a cross-lane LEAD of an escalatable class spawns its specialist
+    on the same target, THIS round. A lead is how an executor hands an off-lane observation (e.g. access-control
+    noticing a SQL error while probing) straight to the desk that owns it, WITHOUT filing it as its own finding.
+    Skips self-escalation, anything already scheduled, and anything already committed. Returns new steps to
+    splice in after the current one."""
+    art = handoff.get("artifacts") or {}
+    sources = ([(f, "confirmed") for f in (handoff.get("findings") or [])[:8]]
+               + [(ld, "lead") for ld in (art.get("leads") or [])[:8]])
     new = []
-    for f in (handoff.get("findings") or [])[:8]:
-        ex = ESCALATE.get(str(f.get("cls", "")).lower())
-        url = f.get("url")
+    for item, kind in sources:
+        cls = str(item.get("cls", "")).lower()
+        ex = ESCALATE.get(cls)
+        url = item.get("url") or item.get("target")
         if not ex or not url or ex == producer:
             continue
         key = (ex, ctx._norm_target(ex, url))
         if key in scheduled or ctx.was_committed(ex, url):
             continue
         scheduled.add(key)
-        cls = str(f.get("cls", "")).lower()
-        new.append({"executor": ex, "args": {"url": url}, "target": url, "ref": None,
-                    "brief": f"Exploit the {cls} that {producer} just confirmed at {url}.",
-                    "context": f"{producer} confirmed {cls} at {url}: {str(f.get('evidence', ''))[:120]}",
-                    "avoid": "", "why": f"in-round escalation from {producer}'s confirmed {cls}"})
+        ev = str(item.get("evidence", "") or item.get("why", ""))[:120]
+        brief = (f"Exploit the {cls} that {producer} just confirmed at {url}." if kind == "confirmed"
+                 else f"Confirm and exploit the {cls} that {producer} FLAGGED (didn't test) at {url}"
+                      + (f" (param {item.get('param')})." if item.get("param") else "."))
+        new.append({"executor": ex, "args": {"url": url}, "target": url, "ref": None, "brief": brief,
+                    "context": f"{producer} {kind} {cls} at {url}: {ev}",
+                    "avoid": "", "why": f"in-round escalation from {producer}'s {kind} {cls}"})
     return new
 
 
@@ -56,7 +64,7 @@ def _round(n):
 def _fingerprint(ctx) -> int:
     s = ctx.landscape["surface"]
     return (len(s["endpoints"]) + len(s["params"]) + len(s["graphql"]) +
-            len(ctx.landscape["findings"]) + len(ctx.landscape["secrets"]))
+            len(ctx.landscape["findings"]) + len(ctx.landscape["secrets"]) + len(ctx.leads))
 
 
 def _bootstrap_auth(ctx, runner, provider) -> None:
@@ -87,8 +95,10 @@ def run_agent(name, provider, ctx, runner, brief="", target="") -> bool:
     print its one-shot advice. Returns False (and lists the agents) if the name matches neither.
 
     Credentials, if given, are still bootstrapped first so an agent that needs a session (explore, access
-    control, anything authenticated) actually has one - the point is to test the agent as it really runs."""
-    if ctx._creds:
+    control, anything authenticated) actually has one - the point is to test the agent as it really runs.
+    EXCEPT for agents whose whole job IS logging in (auth, visor): pre-bootstrapping would establish the
+    session for them, defeating the test - they must log in themselves."""
+    if ctx._creds and name not in ("auth", "visor"):
         _bootstrap_auth(ctx, runner, provider)
 
     if name in EXECUTORS:
@@ -244,6 +254,8 @@ def run(provider, ctx, runner, max_rounds=8) -> None:
         tres = THINNER.thin(ctx, provider, steps)
         for d in tres["dropped"]:
             sys.stderr.write(f"  [thinner] SKIP {d['executor']} {d['target'] or '(base)'}  - {d['by']}: {d['reason']}\n")
+        for d in tres.get("deepened", []):
+            sys.stderr.write(f"  [thinner] DEEPEN {d}  - confirmed finding earns one post-exploitation pass\n")
         if tres["dropped"]:
             ctx.add_record("plan", "thinner", "thinner", "adjustment",
                            summary=f"{len(tres['dropped'])} already-done action(s) thinned",
@@ -306,6 +318,12 @@ def run(provider, ctx, runner, max_rounds=8) -> None:
                 for idx, s in enumerate(remaining):
                     d = decisions.get(idx) or {}
                     action = d.get("action", "keep")
+                    if action == "skip" and s.get("deepening"):
+                        # a sanctioned post-ex deepening pass is a NEW goal (exploit/extract), not a redundant
+                        # re-confirm - the adjuster can't skip it either (the runs==1 gate already bounds it)
+                        changes.append(f"KEEP [{idx}] {s['executor']} - post-ex deepening pass, not skippable")
+                        kept_rest.append(s)
+                        continue
                     if action == "skip":
                         changes.append(f"SKIP [{idx}] {s['executor']} {s.get('args', {})} - {d.get('reason', '')}")
                         continue
@@ -330,7 +348,48 @@ def run(provider, ctx, runner, max_rounds=8) -> None:
             sys.stderr.write("\n  -> council silent and no new ground gained - converged. Stopping.\n")
             break
 
-    # 6 -- REPORT ----------------------------------------------------------------------------------------
+        # SUMMARIZE: turn what the executors just did into a briefing (round results + coverage still owed) the
+        # council reads next round - the executors_summary -> council -> executors edge. Only runs when the loop
+        # continues (a converged round has no next council to brief).
+        _phase("SUMMARIZE  (executor summary -> council briefing)")
+        summary = SUMMARIZER.summarize(ctx, provider)
+        ctx.round_summary = summary
+        ctx.add_record("summarize", "summarizer", "summarizer", "adjustment",
+                       summary="round briefing for the council", rationale=summary[:200],
+                       data={"briefing": summary})
+        sys.stderr.write(f"  [summarizer]\n" + "\n".join("    " + ln for ln in summary.splitlines()) + "\n")
+
+    # 6 -- VERIFY: independent existence re-check of every finding - drop any whose page provably 404s, so a
+    #      non-existent page can never reach the report -----------------------------------------------------
+    _phase("VERIFY")
+    vres = VERIFIER.verify(ctx, runner)
+    for d in vres["dropped"]:
+        sys.stderr.write(f"  [verifier] DROP {d['id']} ({d['title']}) - {d['reason']}\n")
+    for fl in vres["flagged"]:
+        sys.stderr.write(f"  [verifier] FLAG {fl['id']} - {fl['note']}\n")
+    if vres["dropped"]:
+        ctx.add_record("report", "verifier", "verifier", "adjustment",
+                       summary=f"{len(vres['dropped'])} finding(s) dropped: page does not exist",
+                       rationale="; ".join(f"{d['id']} {d['reason']}" for d in vres["dropped"][:6]),
+                       data={"dropped": vres["dropped"], "flagged": vres["flagged"]})
+    sys.stderr.write(f"  [verifier] {vres['kept']} finding(s) exist and stand\n")
+
+    # 7 -- CONSOLIDATE: collapse provably-identical findings (same sink reached via several endpoints, or
+    #      re-confirmed across rounds) into ONE before the report counts them ------------------------------
+    _phase("CONSOLIDATE")
+    cons = CONSOLIDATOR.consolidate(ctx, provider)
+    if cons["merges"]:
+        ctx.add_record("report", "consolidator", "consolidator", "adjustment",
+                       summary=f"{len(cons['merges'])} finding group(s) merged as one bug",
+                       rationale=cons.get("rationale", ""),
+                       data={"merges": cons["merges"]})
+        for m in cons["merges"]:
+            sys.stderr.write(f"  [consolidator] {' + '.join(m['ids'])} -> {m['kept']} ({m['title']})  "
+                             f"affects {len(m['affected'])} location(s) - {m['reason']}\n")
+    else:
+        sys.stderr.write(f"  [consolidator] no merge - {cons.get('rationale', 'nothing provably identical')}\n")
+
+    # 8 -- REPORT ----------------------------------------------------------------------------------------
     _phase("REPORT")
     report = REPORTER.report(ctx, provider)
     ctx.add_record("report", "reporter", "reporter", "report", summary="final report", data={"text": report})

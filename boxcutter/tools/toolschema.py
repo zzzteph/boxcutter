@@ -32,17 +32,23 @@ _INTERNAL_DESTS = {"output", "jsonl", "debug", "table"}
 # Excluding the property from every other tool's schema makes that policy structural, not a prompt request.
 _OPT_ARGS_ALLOWED = {"sqlmap"}
 
+# Flags real in a tool's argparse but POLICY-restricted for agents - the same idea as _OPT_ARGS_ALLOWED. An
+# agent must NOT hand-pick fuzz payloads: fuzz's default mode already runs a comprehensive built-in payload
+# DATABASE covering every class, and a hand-picked subset is strictly weaker. A specific one-off custom payload
+# belongs in an http-request, not a fuzz --payload. Hiding these from the agent schema makes it structural,
+# not a prompt request the model can ignore (which it did).
+_AGENT_HIDDEN = {"fuzz": {"payload", "payload_file"}}
+
 # Hand-authored tradecraft that is about HOW to use a field well, not WHICH fields exist - kept deliberately
 # small. Anything expressible as "this flag exists / takes a value / has these choices" is generated below,
 # so it can never drift from what the tool actually accepts.
 _NOTES = {
-    "fuzz": "Put {FUZZ} in ONE field of a realistic body/URL - never send bare '{FUZZ}' as the whole body. "
-            "OMIT payload/payload_file for breadth: the default mode already runs the full built-in battery "
-            "(sqli/xss/ssti/lfi/xxe/nosql/rce/error-disclosure), each baseline-diffed against the unfuzzed "
-            "response and reliability-reconfirmed by re-firing - stronger and broader than a hand-picked list. "
-            "Only set payload/payload_file for a specific technique or context (e.g. an XSS breakout shaped "
-            "for one exact injection point) the built-in battery doesn't cover; don't reinvent a weaker subset "
-            "of what the default mode already tests.",
+    "fuzz": "Put {FUZZ} in ONE field of a realistic body/URL - never send bare '{FUZZ}' as the whole body. You "
+            "have NO payload option here on purpose: fuzz carries a comprehensive built-in payload DATABASE that "
+            "already covers every class (sqli/xss/ssti/lfi/xxe/nosql/rce/error-disclosure), each baseline-diffed "
+            "against the unfuzzed response and reliability-reconfirmed by re-firing - always stronger and "
+            "broader than a hand-picked list. Just point {FUZZ} at the input and run it. To try ONE specific "
+            "custom payload at an exact injection point, send it with http-request instead.",
     "sqlmap": "Reproduce the exact injectable request (method/body/cookie/auth) first; justify heavier "
               "--level/--risk in opt_args only when a clean run fails.",
     "nuclei": "Target a category via tags (exposure,misconfig,cve,...) rather than an untagged full scan.",
@@ -51,6 +57,11 @@ _NOTES = {
             "/usr/share/dirb/wordlists/common.txt). There is NO seclists or other path - do not invent one "
             "(e.g. /usr/share/seclists/...). OMIT wordlist to use the default; a path that doesn't exist is "
             "ignored and the default is used anyway.",
+    "visual-driver": "You act by COORDINATES read off the grid on the returned screenshot (x,y in viewport "
+                     "pixels; labeled every 100px). Every coordinate you pass came from the LAST screenshot, "
+                     "so only chain actions that stay on the SAME screen - after a click that navigates or "
+                     "reflows, stop and read the new screenshot before aiming again. Type __USER_x__/__PASS_x__ "
+                     "tokens for credentials (substituted privately); never type a real password.",
 }
 
 _TYPE = {int: "integer", float: "number"}
@@ -87,6 +98,8 @@ def build(name: str) -> dict:
             continue
         if a.dest == "opt_args" and name not in _OPT_ARGS_ALLOWED:
             continue
+        if a.dest in _AGENT_HIDDEN.get(name, ()):        # policy-restricted for agents (see _AGENT_HIDDEN)
+            continue
         prop = _prop(a)
         if prop is None:
             continue
@@ -113,12 +126,25 @@ def to_argv(name: str, args: dict) -> list[str]:
     """Translate one native tool call's structured args back into the argv list the dispatch layer (the
     shared Runner -> boxcutter's own CLI) already knows how to execute - no change needed there."""
     spec = build(name)
+    props = spec["schema"]["properties"]
     args = args or {}
     positionals, flags = [], []
     for dest, flag in spec["flag_of"].items():
         if dest not in args:
             continue
         val = args[dest]
+        # some models serialize an array-typed arg as a JSON STRING (e.g. action='["click:1,2","wait"]')
+        # instead of a real list - coerce it back so a repeatable flag like --action still expands correctly.
+        if props.get(dest, {}).get("type") == "array" and isinstance(val, str):
+            s = val.strip()
+            if s.startswith("[") and s.endswith("]"):
+                try:
+                    import json as _json
+                    parsed = _json.loads(s)
+                    if isinstance(parsed, list):
+                        val = parsed
+                except Exception:  # noqa: BLE001 - not valid JSON; leave as-is
+                    pass
         if flag is None:
             if val not in (None, ""):
                 positionals.append(str(val))

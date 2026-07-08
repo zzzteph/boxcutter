@@ -12,6 +12,7 @@ import contextlib
 import fnmatch
 import io
 import json
+import time
 from urllib.parse import urlparse, parse_qsl
 
 OUT_CAP = 12000
@@ -36,7 +37,7 @@ ALLOWED = {
     "dirsearch", "dirb", "path-fuzz", "nuclei", "git-extract", "scan-secrets", "screenshot",
     "fuzz", "sqlmap", "swagger-parser", "swagger-endpoints", "swagger-specs",
     "graphql-detect", "graphql-audit", "http-request",
-    "browser-crawl", "browser-login", "browser-actions",
+    "browser-crawl", "browser-login", "browser-actions", "visual-driver",
     "--list", "--help",
 }
 _ALWAYS = {"--list", "--help"}
@@ -165,23 +166,27 @@ class Runner:
 
         # A persistent-session browser call is STATEFUL: the same argv at two different times drives a browser
         # that has moved on (logged in, navigated, mutated the page), so identical calls must NOT be de-duped
-        # to a cached result the way a pure read (an http GET, a recon scan) can be.
-        stateful = tool == "browser-actions" and "--session" in argv
+        # to a cached result the way a pure read (an http GET, a recon scan) can be. Any tool carrying
+        # --session (browser-actions, visual-driver) is stateful.
+        stateful = "--session" in argv
         key = tuple(argv)
         if not stateful and key in self._cache:
             if ctx is not None:
-                ctx.record(argv, self._cache[key])
+                ctx.record(argv, self._cache[key], cached=True)   # cache hit: instant, NOT a real run time
             return self._cache[key]
         self._calls += 1
         if self._calls > self.max_calls:
             return _err(f"run budget reached ({self.max_calls} tool calls)")
         # dispatch WITH the global headers attached, but key the cache / record the trail on the clean argv so
-        # a secret global header (a Tester-Token) never lands in the cache key or the decision trail.
+        # a secret global header (a Tester-Token) never lands in the cache key or the decision trail. Time the
+        # real dispatch so a heavy tool that returns suspiciously fast (a no-op / bad-arg failure) is visible.
+        t0 = time.monotonic()
         out = self._dispatch(self._with_headers(argv))
+        ms = int((time.monotonic() - t0) * 1000)
         if not stateful:
             self._cache[key] = out
         if ctx is not None:
-            ctx.record(argv, out)
+            ctx.record(argv, out, ms=ms)
         return out
 
     def _dispatch(self, argv):

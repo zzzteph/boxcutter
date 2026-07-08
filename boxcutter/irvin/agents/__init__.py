@@ -6,11 +6,12 @@ in pipeline.py reads these registries and never needs to change.
 
 from __future__ import annotations
 
-from .control import Adjuster, Concluder, Planner, Reporter, Reviewer, Thinner
+from .control import (Adjuster, Concluder, Consolidator, Planner, Reporter, Reviewer, Summarizer, Thinner,
+                      Verifier)
 from .executors import (AccessControl, Auth, Dirbust, Explorer, Exposure, GitDumper, PathTraversal, Recon,
                         Secrets, Spa, Sqli, WebVulnTriage, Xss)
 from .suggesters import (AccessProfile, AuthProfile, DynamicSuggester, ExplorationProfile, ExposureProfile,
-                         InjectionProfile, MinorityReport, ReconProfile)
+                         InjectionProfile, MinorityReport, PostExploitationProfile, ReconProfile)
 
 # the MANAGERS (agent type 1) - each commissions verified work from the specialists in its lane, or stands
 # down. The board, plus the mandated dissent (MinorityReport) which always commissions a divergent angle after
@@ -22,19 +23,33 @@ SUGGESTERS = [
     InjectionProfile(),
     ExposureProfile(),
     AuthProfile(),
+    PostExploitationProfile(),   # chains CONFIRMED findings toward the broader objective (creds->login->admin/data)
     MinorityReport(),     # the dissent - always last, always speaks
 ]
 
 # working agents (agent type 2) - one PROFESSIONAL specialist per security issue; each answers a manager's
-# commission with verified results. name -> class
+# commission with verified results. name -> class. (The old `visor` test agent is retired from the council:
+# its purely-visual login is now the standalone `boxcutter ai visor`, and `auth` is powered by the stronger
+# logio login engine - see executors.Auth.)
 EXECUTORS = {e.name: e for e in (Recon, Spa, Explorer, Dirbust, AccessControl, WebVulnTriage, Sqli, Xss,
                                  PathTraversal, GitDumper, Secrets, Exposure, Auth)}
+
+# minority-report dissents on ANY specialist, so derive its proposes from the registry - it can never drift
+# out of sync with the executor set the way a hand-maintained list does.
+for _sug in SUGGESTERS:
+    if getattr(_sug, "dissent", False):
+        _sug.proposes = tuple(EXECUTORS)
 
 # detect -> exploit escalation: when an executor (e.g. web-vuln-triage) confirms a finding of one of these
 # CLASSES, the pipeline spawns the matching exploitation specialist on that target IN THE SAME ROUND, so a
 # triaged class doesn't wait a full round to be exploited. Only mappings whose target executor exists are kept.
 ESCALATE = {cls: ex for cls, ex in
-            {"sqli": "sqli", "xss": "xss", "lfi": "path-traversal", "traversal": "path-traversal"}.items()
+            {"sqli": "sqli", "xss": "xss", "lfi": "path-traversal", "traversal": "path-traversal",
+             # a discovered privileged panel (a `panel` lead, e.g. from base._panel_leads) auto-commissions
+             # EXPOSURE to report the reachable admin interface - so /admin can't be orphaned in the endpoint
+             # list waiting for a manager to volunteer. (Reporting the exposed panel is exposure's lane, not
+             # access-control's.)
+             "panel": "exposure"}.items()
             if ex in EXECUTORS}
 
 # the control roles (one each). REVIEWER is a separate oversight org - it monitors the decision and can
@@ -45,6 +60,9 @@ REVIEWER = Reviewer()
 PLANNER = Planner()
 THINNER = Thinner()
 ADJUSTER = Adjuster()
+SUMMARIZER = Summarizer()       # end-of-round briefing (incl. coverage) the council reads before the next round
+VERIFIER = Verifier()           # independent existence re-check - drops findings whose page provably 404s
+CONSOLIDATOR = Consolidator()   # collapses provably-identical findings into one, right before the report
 REPORTER = Reporter()
 
 
@@ -64,6 +82,11 @@ def validate_registry() -> None:
         problems += [f"[{ex.name}] {p}" for p in toolschema.validate(ex.tools)]
         problems += [f"[{ex.name}] tool '{t}' is not in the runner's ALLOWED set"
                      for t in ex.tools if t not in ALLOWED]
+    # every action a suggester COMMISSIONS must be a real executor - a typo'd/stale `proposes` entry would have
+    # the planner commission a non-existent specialist. This is the check that would have caught `visor` rotting.
+    for sug in SUGGESTERS:
+        problems += [f"[{sug.name}] proposes '{act}' which is not a registered executor"
+                     for act in getattr(sug, "proposes", ()) if act not in EXECUTORS]
     if problems:
         raise RuntimeError("irvin executor registry is inconsistent:\n" + "\n".join("  - " + p for p in problems))
 
