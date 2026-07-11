@@ -35,6 +35,9 @@ def add_arguments(parser) -> None:
     parser.add_argument("js_url", help="Full URL of the JavaScript file to scan")
     parser.add_argument("--base-url", dest="base_url", default="",
                         help="Base URL to prepend to discovered paths")
+    parser.add_argument("-H", "--header", dest="header", action="append", default=[],
+                        metavar="NAME: VALUE", help="Request header (repeatable) - e.g. an auth cookie so a "
+                                                    "JS bundle behind a login wall is actually fetched")
     add_common_args(parser)
 
 
@@ -48,8 +51,14 @@ def run(args) -> int:
         if parts.scheme and parts.netloc:
             base_url = f"{parts.scheme}://{parts.netloc}"
 
+    headers: dict[str, str] = {}
+    for raw in args.header or []:
+        name, sep, value = raw.partition(":")
+        if sep:
+            headers[name.strip()] = value.strip()
+
     try:
-        response = http.get(js_url, timeout=30, verify=True)
+        response = http.get(js_url, timeout=30, verify=True, headers=headers or None)
     except Exception as exc:
         output_result([], args.output, str(exc))
         return 1

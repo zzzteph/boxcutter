@@ -120,17 +120,27 @@ class Runner:
 
     def _with_headers(self, argv):
         """Append the global headers to a call, but only for tools that accept a header flag and only for a
-        header the call doesn't already carry - so a Tester-Token/org header rides on every request without
-        the model having to set it (and without duplicating one it did set)."""
+        header the call doesn't already carry - so a Tester-Token/org header (or identity A's session) rides
+        on every request without the model having to set it, and without duplicating one it did set.
+
+        The 'already carries' check is by header NAME, not exact string: when an executor deliberately attaches
+        a DIFFERENT value for the same header (e.g. access-control putting identity B's own Cookie on a call to
+        diff against A), the call's explicit value must win - injecting the global A Cookie alongside it would
+        send two Cookie headers and corrupt the cross-actor comparison."""
         if not self.global_headers:
             return argv
         flag = _header_flag(argv[0])
         if not flag:
             return argv
+        present = set()
+        for i, a in enumerate(argv[:-1]):
+            if a == flag and isinstance(argv[i + 1], str) and ":" in argv[i + 1]:
+                present.add(argv[i + 1].split(":", 1)[0].strip().lower())
         extra = []
         for h in self.global_headers:
-            if h not in argv:
-                extra += [flag, h]
+            if h in argv or h.split(":", 1)[0].strip().lower() in present:
+                continue
+            extra += [flag, h]
         return argv + extra if extra else argv
 
     def __call__(self, argv, ctx=None, allowed=None):

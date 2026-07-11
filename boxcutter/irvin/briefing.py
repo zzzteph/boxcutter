@@ -15,7 +15,49 @@ back to using the raw briefing as-is, with no rules applied.
 
 from __future__ import annotations
 
+import re
+
 from .context import extract_json
+
+# Deterministic extraction of auth/session headers from free text.  The LLM is used for the semantic
+# parts (scope, focus, creds) but NOT for the exact header values - a single wrong character in a
+# JWT or a session cookie makes it invalid, and LLMs routinely truncate or hallucinate long tokens.
+# This regex runs on the raw --context string and captures the value verbatim, character-for-character.
+#
+# Matches: "Cookie: name=value; name2=value2" or "Authorization: Bearer eyJ..." on any line.
+# Header name: standard HTTP name form (Alpha then Alpha/digit/hyphen).
+# Value: everything on the same line after "Name:", stripped of a trailing standalone semicolon
+# (the common "Cookie: token=...; " form where the trailing ; is punctuation, not part of the value).
+_AUTH_HEADER_RE = re.compile(
+    r"(?:^|(?<=\s))"                          # start of string or after whitespace
+    r"([A-Za-z][A-Za-z0-9-]*):\s*"           # Header-Name:
+    r"([^\n\r]+)",                             # value: rest of the line
+    re.MULTILINE
+)
+# Header names that are meaningful auth/session signals worth extracting.
+_AUTH_NAMES = {
+    "cookie", "authorization", "x-api-key", "x-auth-token", "x-access-token",
+    "x-session-token", "x-forwarded-user", "x-real-ip",
+}
+
+
+def _scan_headers(text: str) -> list:
+    """Regex scan for auth/session headers in the raw --context string.
+    Returns ["Name: value", ...] with exact token values, not LLM-reproduced ones."""
+    found = []
+    seen_names = set()
+    for m in _AUTH_HEADER_RE.finditer(text):
+        name = m.group(1).strip()
+        val = m.group(2).strip()
+        # strip a trailing semicolon that is a cookie-list separator (not part of the value itself)
+        if val.endswith(";"):
+            val = val[:-1].rstrip()
+        name_lc = name.lower()
+        # include known auth names OR any X- custom header (common bypass/passthrough pattern)
+        if (name_lc in _AUTH_NAMES or name_lc.startswith("x-")) and val and name_lc not in seen_names:
+            seen_names.add(name_lc)
+            found.append(f"{name}: {val}")
+    return found
 
 _SYS = (
     "You extract structured RUN RULES for a web/API penetration test from an operator's free-text briefing. "
@@ -57,7 +99,14 @@ def parse(provider, context: str, base_host: str) -> dict:
         return [s.strip() for s in obj.get(key, []) if isinstance(s, str) and s.strip()]
 
     scope = [h.lower() for h in _strs("scope")]
-    headers = [h for h in _strs("headers") if ":" in h]       # a real header is "Name: value"
+    llm_headers = [h for h in _strs("headers") if ":" in h]   # a real header is "Name: value"
+    # Deterministic regex scan takes precedence: the LLM cannot reliably reproduce long JWTs or
+    # session cookies verbatim.  We merge: regex hits win for any header name they cover; LLM fills
+    # in anything else the operator mentioned that wasn't a known auth pattern.
+    regex_headers = _scan_headers(context)
+    regex_names = {h.split(":", 1)[0].strip().lower() for h in regex_headers}
+    merged_headers = regex_headers + [h for h in llm_headers
+                                      if h.split(":", 1)[0].strip().lower() not in regex_names]
     creds = []
     for c in obj.get("creds", []) or []:
         if isinstance(c, dict) and str(c.get("user") or "").strip() and str(c.get("password") or ""):
@@ -66,5 +115,5 @@ def parse(provider, context: str, base_host: str) -> dict:
                           "password": str(c["password"]),
                           "login_url": str(c.get("login_url") or "").strip()})
     focus = obj.get("focus") if isinstance(obj.get("focus"), str) else ""
-    return {"scope": scope, "headers": headers, "creds": creds,
+    return {"scope": scope, "headers": merged_headers, "creds": creds,
             "out_of_scope": _strs("out_of_scope"), "focus": focus.strip()}

@@ -31,9 +31,11 @@ def add_arguments(parser) -> None:
     parser.add_argument("target", nargs="?", help="URL, host, or domain to hunt")
     add_ai_provider_args(parser)          # --provider/--model/--api-key/--base-url (shared by every ai agent)
     parser.add_argument("--header", action="append", default=[], metavar="NAME: VALUE",
-                        help="Auth header for identity A (repeatable)")
+                        help="Auth header for identity A - sent on EVERY request (e.g. 'Cookie: session=...'). "
+                             "Repeatable.")
     parser.add_argument("--header-b", dest="header_b", action="append", default=[], metavar="NAME: VALUE",
-                        help="Auth header for a 2nd identity B, for BOLA (repeatable)")
+                        help="Auth header for a 2nd identity B, for BOLA cross-actor tests (repeatable). NOT "
+                             "sent globally - it's the comparison actor, attached only when B is under test.")
     parser.add_argument("--creds", dest="creds", default=None, metavar="USER:PASS",
                         help="Log in as identity A before round 1 - agent-driven, so it can handle a "
                              "multi-step/identifier-first login flow, not just a simple form. --login-url is an "
@@ -173,10 +175,18 @@ def run(args) -> int:
     brief_cfg = briefing.parse(provider, args.context, base_host)
     if brief_cfg.get("focus"):
         ctx.brief = brief_cfg["focus"]        # cleaned focus (secrets removed) becomes what's broadcast
-    global_headers = brief_cfg.get("headers", [])
+    # An operator who passes `--header "Cookie: <session>"` means "act as this logged-in user" - i.e. send it
+    # on EVERY request, not only when an access-control call happens to opt into identity A. So identity A's
+    # headers ALSO seed the global, auto-injected channel (same contract as `boxcutter ai visor` and as a
+    # Cookie named in --context). --header-b stays identity-only: B is the COMPARISON actor for BOLA, never
+    # the default session. --context-extracted headers stack on top (a header name --header already set wins).
+    cli_headers = list(args.header)
+    ctx_names = {h.split(":", 1)[0].strip().lower() for h in cli_headers}
+    global_headers = cli_headers + [h for h in brief_cfg.get("headers", [])
+                                    if h.split(":", 1)[0].strip().lower() not in ctx_names]
     if global_headers:
-        sys.stderr.write(f"irvin :: {len(global_headers)} global header(s) from --context applied to every "
-                         "request (values hidden)\n")
+        sys.stderr.write(f"irvin :: {len(global_headers)} header(s) sent on EVERY request "
+                         "(from --header / --context; values hidden)\n")
 
     # a login URL the operator explicitly gave us is obviously meant to be reachable, even when it's on a
     # separate host (a common SSO/auth subdomain) - both for this bootstrap login and for the agent-driven
