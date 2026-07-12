@@ -11,6 +11,8 @@ from . import (
     visor,
     logio,
     prawlio,
+    crawlio,
+    fuzzio,
     browser_actions,
     browser_crawl,
     browser_login,
@@ -27,6 +29,7 @@ from . import (
     js_endpoints,
     katana_crawl,
     nuclei,
+    path_bust,
     path_fuzz,
     scan_secrets,
     screenshot,
@@ -70,6 +73,7 @@ TOOLS = [
     zap_scan_openapi,
     # Fuzzing
     path_fuzz,
+    path_bust,
     fuzz,
     # Secrets / source
     scan_secrets,
@@ -97,6 +101,10 @@ AI = [
     logio,
     # Authenticated crawl: logio logs in, then a visual agent crawls the app for its post-login requests.
     prawlio,
+    # Single-agent crawler: comprehensive, VERIFIED endpoint list (strict about false/ghost paths), path-scoped.
+    crawlio,
+    # Single-agent injection tester: fuzz the endpoints and report only CODE-reproduced findings.
+    fuzzio,
 ]
 
 # Every command resolvable by NAME (tools + ai) - toolschema and the workflow runner look themselves up here.
