@@ -25,6 +25,7 @@ _MARKUP = re.compile(r"<[^>]+>")
 _REDIRECT = {301, 302, 303, 307, 308}
 STRUCT_SIM = 0.90     # tag-skeleton Jaccard >= this = same structural template (a catch-all)
 TEXT_SIM = 0.90       # normalised-text Jaccard  >= this = same page content
+HOMOGENEOUS_CATCHALL = 10   # this many identical hits in ONE directory = a catch-all cluster, not real paths
 
 
 def shingles(tokens: list, k: int = 3, cap: int = 800) -> frozenset:
@@ -89,6 +90,11 @@ def similar(a: dict, b: dict) -> bool:
         return True
     if len(a["text"]) >= 3 and jaccard(a["text"], b["text"]) >= TEXT_SIM:
         return True
+    # Tiny, structure-less bodies (no tags, no title) give the fuzzy branches nothing to grip - an 11-byte
+    # catch-all stub would otherwise look "distinct" from every other tiny body. Fall back to EXACT match:
+    # same normalised length AND identical normalised text (digit-normalisation already folds numeric nonces).
+    if len(a["tags"]) < 3 and len(b["tags"]) < 3 and not a["title"] and not b["title"]:
+        return a["len"] == b["len"] and a["text"] == b["text"]
     return False
 
 
@@ -138,9 +144,15 @@ def scan(make_url, method: str, words: list, sess, deadline: float, codes: set, 
     that are structurally DISTINCT from the baseline. Returns (findings, dir_words) - directories (real, not
     ghosts) to recurse into, even when their redirect status isn't in `codes`."""
     baselines = calibrate(make_url, method, sess, dbg)
-    findings, dirs = [], []
+    findings, fsig = [], []              # fsig[i] = the response signature of findings[i] (parallel list)
+    dir_cands = []                       # (word, sigkey) directories to maybe recurse into
+    sig_count, catchall = {}, set()      # per-signature hit count; signatures proven to be a catch-all cluster
     total = len(words)
     start = last = time.time()
+
+    def _sk(st, sig):                    # a hashable identity of the RESPONSE (text is already a frozenset)
+        return (st, sig["len"], sig["text"])
+
     for i, word in enumerate(words, 1):
         now = time.time()
         if now >= deadline:
@@ -160,6 +172,18 @@ def scan(make_url, method: str, words: list, sess, deadline: float, codes: set, 
         if is_ghost(sig, baselines):
             continue
         if st in codes:
+            sk = _sk(st, sig)
+            if sk in catchall:                     # a code-dependent catch-all calibration missed - suppress
+                continue
+            sig_count[sk] = sig_count.get(sk, 0) + 1
+            if sig_count[sk] >= HOMOGENEOUS_CATCHALL:
+                catchall.add(sk)                   # too many IDENTICAL hits here => it's the catch-all, not paths
+                n = sum(1 for s in fsig if s == sk)
+                findings = [f for f, s in zip(findings, fsig) if s != sk]
+                fsig = [s for s in fsig if s != sk]
+                dbg(f"  catch-all cluster: {HOMOGENEOUS_CATCHALL}+ identical {st}/{sig['len']}b responses here "
+                    f"- dropped {n} and suppressing further (code-dependent catch-all)")
+                continue
             loc = f" -> {sig['loc']}" if sig["loc"] else ""
             pt = page_title(r["body"])
             size = r["body_bytes"]
@@ -168,10 +192,14 @@ def scan(make_url, method: str, words: list, sess, deadline: float, codes: set, 
                              "status": st, "size": size, "page_title": pt, "loc": sig["loc"],
                              "info": f"HTTP {st}{loc}, {size}b" + (f', title "{pt}"' if pt else "")
                                      + f", structure-distinct from soft-404 (word: {word})"})
+            fsig.append(sk)
             if is_dir(word, sig):
-                dirs.append(word)
+                dir_cands.append((word, sk))
         elif st in _REDIRECT and is_dir(word, sig):
-            dirs.append(word)     # a directory reachable only via a redirect - recurse even if 3xx isn't reported
+            dir_cands.append((word, _sk(st, sig)))   # a directory reachable only via a redirect
+
+    # Don't recurse into directories that turned out to be part of a catch-all cluster (would spawn more of it).
+    dirs = [w for (w, sk) in dir_cands if sk not in catchall]
     return findings, dirs
 
 
