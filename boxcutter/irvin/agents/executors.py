@@ -444,7 +444,7 @@ class Auth(BrowserExecutor):
         target = ctx.creds_login_url(label) or ctx.base_url
         headers = list(getattr(runner, "global_headers", []) or [])
         try:
-            from ...tools.logio import login as logio_login
+            from ...ai.logio import login as logio_login
             say(f"irvin:{self.name}", f"logio: staged login for identity {label} at {target}")
             res = logio_login(provider, target, subs, grid=25, trace=None, headers=headers, max_steps=14)
         except Exception as exc:  # noqa: BLE001
@@ -569,7 +569,7 @@ class Explorer(BrowserExecutor):
         subs = {"__USER__": user, "__PASS__": pw, "__CREDS__": creds}
         headers = list(getattr(runner, "global_headers", []) or [])
         try:
-            from ...tools.prawlio import crawl as prawlio_crawl
+            from ...ai.prawlio import crawl as prawlio_crawl
             say(f"irvin:{self.name}", f"prawlio: authenticated visual crawl as identity {label} on {ctx.base_url}")
             res = prawlio_crawl(provider, ctx.base_url, subs, grid=25, trace=None, headers=headers)
         except Exception as exc:  # noqa: BLE001

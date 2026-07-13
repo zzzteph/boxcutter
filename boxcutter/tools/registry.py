@@ -6,13 +6,15 @@ can resolve a tool by its NAME without importing each other.
 
 from __future__ import annotations
 
-from . import (
+# Agentic (LLM-driven) commands live in their own package to keep them separate from the deterministic tools.
+from ..ai import (
+    crawlio,
     irvin,
-    visor,
     logio,
     prawlio,
-    crawlio,
-    fuzzio,
+    visor,
+)
+from . import (
     browser_actions,
     browser_crawl,
     browser_login,
@@ -103,8 +105,6 @@ AI = [
     prawlio,
     # Single-agent crawler: comprehensive, VERIFIED endpoint list (strict about false/ghost paths), path-scoped.
     crawlio,
-    # Single-agent injection tester: fuzz the endpoints and report only CODE-reproduced findings.
-    fuzzio,
 ]
 
 # Every command resolvable by NAME (tools + ai) - toolschema and the workflow runner look themselves up here.

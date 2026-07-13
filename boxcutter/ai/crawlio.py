@@ -65,18 +65,24 @@ _SYSTEM = (
     "app or a dead/404/parked page. If it's dead, say so and stop early - there is nothing to crawl.\n"
     "  2. KATANA + CHEAP SOURCES: if the app is alive, `katana-crawl <base>` for the linked surface (TRUSTED), "
     "and check robots.txt / sitemap.xml / .well-known with `http-request` for listed paths.\n"
-    "  3. SPEC + SPA + JS: `swagger-specs <host>` then `swagger-endpoints <spec>` if a spec exists (TRUSTED); "
-    "`browser-crawl <base>` if it's a JS/SPA (TRUSTED - real XHR); `js-endpoints <jsfile>` on JS katana finds "
-    "(references - verify the ones that matter).\n"
-    "  4. BRUTE (SELF-VERIFIED): `path-bust <base>` for UNLINKED paths. It applies the content/structure "
-    "catch-all gate INTERNALLY, so its hits are already REAL paths, not raw guesses. Fast curated list by "
-    "default; add --full for the ~12k breadth list when a target earns a deep sweep.\n"
-    "  5. TRIAGE THE DELTA: the paths `path-bust` surfaces that KATANA did NOT are the unlinked, often "
-    "INTERESTING stuff. Analyze that delta and `screenshot` any that look interesting (admin, test, debug, dev, "
-    "staging, internal, panel, backup, api). If any hit is an API SPEC (swagger/openapi/api-docs), MAP it with "
-    "`swagger-endpoints` before moving on - the spec expands one path into the whole API.\n"
-    "  6. ENUMERATE DEEPER: if an interesting directory is confirmed, run `path-bust <base>/<dir>` into it (or "
-    "`path-bust <base> --depth N`) and recurse while it keeps yielding.\n\n"
+    "  3. BROWSER + SPEC + JS: ALWAYS `browser-crawl <base>` - render the app and COLLECT the real endpoints it "
+    "calls (XHR/fetch, with methods + bodies). This is a PRIMARY endpoint source (not optional, not SPA-only) and "
+    "catches the live API surface katana never sees. Then `swagger-specs <host>` -> `swagger-endpoints <spec>` if "
+    "a spec exists (TRUSTED - declared API); `js-endpoints <jsfile>` on JS katana finds (references - verify the "
+    "ones that matter).\n"
+    "  4. BRUTE - BREADTH FIRST: `path-bust <base> --full` - ONE wide sweep with the ~12k breadth list to MAP "
+    "where things live. It is SELF-VERIFIED (runs its own catch-all gate), so its hits are real paths, not "
+    "guesses. Treat it as your map of the app's directory structure; a partial sweep is fine.\n"
+    "  5. TRIAGE THE DELTA + SHORTLIST JUICY FOLDERS: the paths the sweep surfaces that KATANA did NOT are the "
+    "unlinked, often INTERESTING stuff. Build a SHORT list of folders worth digging - ONLY ones that plausibly "
+    "hold sensitive content (admin, api, internal, private, backup, config, .git/.svn, staging/dev/test, "
+    "uploads, logs, db, actuator, debug, secrets, or anything auth-gated 401/403). Explicitly SKIP low-value "
+    "static-asset dirs (images, img, css, js, fonts, media, assets, static, vendor, icons). `screenshot` the "
+    "ones that look interesting. If any hit is an API SPEC (swagger/openapi/api-docs), MAP it with "
+    "`swagger-endpoints` - the spec expands one path into the whole API.\n"
+    "  6. DEEPEN THE SHORTLIST: for each folder on your step-5 shortlist (NOT every folder), run "
+    "`path-bust <base>/<folder>` with the fast CURATED list (default - NO --full), and recurse only while it "
+    "keeps yielding NEW real paths. Breadth once at the top; precision only into the folders that matter.\n\n"
 
     "TOOLS - what each is for, how to call it, and how far to trust its output. Every tool here OBSERVES real "
     "behaviour or SELF-VERIFIES, so none emits raw ghosts:\n"
@@ -92,10 +98,11 @@ _SYSTEM = (
     "  - swagger-endpoints <spec-url> - list the endpoints declared IN a found spec (TRUSTED - declared API). "
     "Ex: `swagger-endpoints https://site/openapi.json`.\n"
     "  - path-bust <base> [--full] [--depth N] [--codes 200,401,403] - brute-force UNLINKED paths under <base>; "
-    "it runs the content/structure catch-all gate ITSELF so hits are real (SELF-VERIFIED - trust the hits, still "
-    "triage for interest). Ex: `path-bust https://site` (fast), `path-bust https://site --full` (deep ~12k), "
-    "`path-bust https://site/admin --depth 1` (dig into a dir), `path-bust https://site --codes 200,401,403` "
-    "(also flag protected dirs). If a hit is an API SPEC (swagger*, openapi*, api-docs, v2/v3/api-docs, a "
+    "it runs the content/structure catch-all gate ITSELF so hits are real (SELF-VERIFIED). USE IT CLEVERLY, in "
+    "TWO passes: (1) `path-bust <base> --full` ONCE for a wide breadth map of the directory structure, then "
+    "(2) `path-bust <base>/<folder>` with the fast curated default to dig PRECISELY into each INTERESTING folder "
+    "the sweep revealed - never re-sweep the same place, never --full a subfolder. `--codes 200,401,403` also "
+    "flags protected dirs. If a hit is an API SPEC (swagger*, openapi*, api-docs, v2/v3/api-docs, a "
     ".json/.yaml/.wadl spec), do NOT stop at that one path - feed it to `swagger-endpoints` to map the WHOLE "
     "declared API.\n"
     "  - http-request <url> [-D body] [-H 'K: V'] - ONE manual request for spot-checks / seeded paths. "
@@ -167,8 +174,9 @@ def _in_scope(url: str, base_host: str, scope_path: str) -> bool:
 
 
 def _cap(raw: str, max_items: int = 60, max_chars: int = 9000) -> str:
-    """Bound a tool result before it re-enters the model's history: trim the data list + note it, so a katana/
-    path-bust that returns hundreds of URLs doesn't blow up the context window (the deaths of 'full memory')."""
+    """Bound a tool result before it re-enters the model's history: keep as many WHOLE data items as fit the
+    char budget (so a katana/path-bust that returns hundreds of URLs can't blow up the context window) - and
+    NEVER emit truncated/invalid JSON."""
     if len(raw) <= max_chars:
         return raw
     try:
@@ -176,12 +184,61 @@ def _cap(raw: str, max_items: int = 60, max_chars: int = 9000) -> str:
     except Exception:  # noqa: BLE001
         return raw[:max_chars] + f"\n...[truncated {len(raw) - max_chars} chars]"
     data = env.get("data")
-    if isinstance(data, list) and len(data) > max_items:
-        env["data"] = data[:max_items]
-        env["_truncated"] = f"showing {max_items} of {len(data)} items"
-        s = json.dumps(env)
-        return s if len(s) <= max_chars else s[:max_chars]
+    if isinstance(data, list) and data:
+        n = min(len(data), max_items)
+        while n > 0:                                   # shrink the list until the whole envelope fits
+            trial = dict(env)
+            trial["data"] = data[:n]
+            if n < len(data):
+                trial["_truncated"] = f"showing {n} of {len(data)} items"
+            s = json.dumps(trial)
+            if len(s) <= max_chars:
+                return s
+            n -= max(1, n // 8)
     return raw[:max_chars] + "\n...[truncated]"
+
+
+def _bound_timeout(argv: list, slot: int) -> list:
+    """path-bust runs as one BLOCKING call, so cap its --timeout to crawlio's REMAINING budget (slot seconds) -
+    a --full sweep otherwise runs to path-bust's own 1200s default and overruns the crawl. Honours a smaller
+    --timeout the agent set, but never lets it exceed the slot."""
+    out, i, seen = [], 0, False
+    while i < len(argv):
+        if argv[i] == "--timeout" and i + 1 < len(argv):
+            try:
+                val = min(int(argv[i + 1]), slot)
+            except (TypeError, ValueError):
+                val = slot
+            out += ["--timeout", str(val)]
+            seen = True
+            i += 2
+            continue
+        out.append(argv[i])
+        i += 1
+    if not seen:
+        out += ["--timeout", str(slot)]
+    return out
+
+
+def _compact_pathbust(raw: str) -> str:
+    """Slim path-bust findings to the fields the agent needs to SELECT folders/endpoints (url, status, size,
+    title), dropping the verbose info/loc/aliases, so far more of a --full breadth sweep survives _cap."""
+    try:
+        env = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return raw
+    data = env.get("data")
+    if not isinstance(data, list):
+        return raw
+    slim = []
+    for d in data:
+        if isinstance(d, dict) and d.get("url"):
+            item = {"url": d["url"], "status": d.get("status"), "size": d.get("size")}
+            if d.get("page_title"):
+                item["title"] = d["page_title"]
+            slim.append(item)
+    env["data"] = slim
+    return json.dumps(env)
 
 
 def _absorb(raw: str, tool: str, base_host: str, scope_path: str, candidates: set) -> None:
@@ -265,7 +322,9 @@ def add_arguments(parser) -> None:
                         help="Free-text briefing: scope, out-of-scope areas, and any auth header/token to send")
     add_ai_provider_args(parser)          # --provider/--model/--api-key/--base-url
     parser.add_argument("--max-steps", dest="max_steps", type=int, default=40, help="Hard cap on agent steps")
-    parser.add_argument("--budget", type=int, default=900, help="Wall-clock budget in seconds (then finalize)")
+    parser.add_argument("--budget", type=int, default=1800,
+                        help="Wall-clock budget in seconds (then finalize). Larger by default because the flow "
+                             "runs a breadth path-bust --full sweep before the precise digs")
     add_header_arg(parser)
     add_common_args(parser)
 
@@ -313,8 +372,9 @@ def run(args) -> int:
     scope_note = (f"SCOPE: crawl ONLY under {base_url} - paths starting with {scope_path} (never parent/sibling "
                   "paths).\n" if scope_path else f"SCOPE: the whole host {base_host}.\n")
     user = (f"TARGET: {base_url}\n" + scope_note + (f"BRIEFING: {focus}\n" if focus else "") +
-            "Follow the FLOW: screenshot, katana, spec/SPA/JS, then path-bust for unlinked paths, triage the "
-            "delta, deepen. Emit the json list when the STOP gate is met.")
+            "Follow the FLOW: screenshot, katana, ALWAYS browser-crawl (collect real XHR/fetch endpoints), "
+            "spec/JS, then a breadth `path-bust --full` sweep, pick the interesting folders, and dig into each "
+            "precisely with the curated list. Emit the json list when the STOP gate is met.")
     messages = [{"role": "user", "content": user}]
     candidates: set = set()
     cache, count = {}, {}
@@ -365,11 +425,19 @@ def run(args) -> int:
                 elif key in cache:
                     raw = cache[key]
                 else:
-                    debug_print("crawlio> boxcutter " + " ".join(str(a) for a in argv))
-                    raw = _call(argv, headers)
+                    run_argv = argv
+                    if c["name"] == "path-bust":       # blocking call -> keep it inside the remaining budget
+                        slot = max(30, int(deadline - time.time()) - 20)
+                        run_argv = _bound_timeout(argv, slot)
+                    debug_print("crawlio> boxcutter " + " ".join(str(a) for a in run_argv))
+                    raw = _call(run_argv, headers)
+                    if c["name"] == "path-bust":
+                        raw = _compact_pathbust(raw)   # slim findings so a --full sweep survives the context cap
                     cache[key] = raw
                     _absorb(raw, c["name"], base_host, scope_path, candidates)
-            clean, images = harvest_images(_cap(raw), max_images=4)
+            is_pb = c["name"] == "path-bust"
+            clean, images = harvest_images(
+                _cap(raw, max_items=150 if is_pb else 60, max_chars=12000 if is_pb else 9000), max_images=4)
             results.append({"id": c["id"], "output": clean, "images": images})
         messages += provider.tool_results(results)
 

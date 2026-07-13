@@ -14,7 +14,7 @@ except sqlmap - see `_OPT_ARGS_ALLOWED`), and short tradecraft notes about how t
 `_NOTES`). Both are kept intentionally tiny; everything else is generated.
 
 Imports of the tool registry are LAZY (done inside each function) to avoid an import cycle: tools.registry
--> tools.irvin -> irvin.pipeline -> irvin.agents -> irvin.agents.base -> here.
+-> ai.irvin -> irvin.pipeline -> irvin.agents -> irvin.agents.base -> here.
 """
 
 from __future__ import annotations

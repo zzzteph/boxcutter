@@ -71,8 +71,8 @@ def validate_registry() -> None:
     shared runner's allowlist. This is the check `boxcutter irvin --check` used to require a human to remember
     to run by hand; every tool's agent-facing schema is now GENERATED from its real argparse (see
     tools/toolschema.py), so the one thing left that can actually go wrong - a typo'd tool name - is cheap
-    enough to catch automatically. Called from tools/irvin.py's run(), not at import time here: this module
-    loads partway through boxcutter.tools.registry building itself (registry -> tools.irvin -> irvin.pipeline
+    enough to catch automatically. Called from ai/irvin.py's run(), not at import time here: this module
+    loads partway through boxcutter.tools.registry building itself (registry -> ai.irvin -> irvin.pipeline
     -> here), so BY_NAME isn't fully populated yet at import time - only once the CLI actually runs is the
     whole package tree guaranteed to have finished loading."""
     from ..runner import ALLOWED
