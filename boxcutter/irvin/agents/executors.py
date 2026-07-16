@@ -15,7 +15,7 @@ import uuid
 from ..verify import _strongest_identity
 from .base import Executor, say
 
-# Shared by EVERY browser-driving agent (spa, explore, auth, visor): HOW to build a click / enter-data flow by
+# Shared by EVERY browser-driving agent (spa, explore, auth): HOW to build a click / enter-data flow by
 # COORDINATES when CSS selectors can't drive the page. Appended to each such objective so they all work an SPA
 # the same way - see the page, read coordinates off the grid, confirm, act, re-read.
 _CLICK_FLOW = (
@@ -620,80 +620,6 @@ class Explorer(BrowserExecutor):
         return new
 
 
-class Visor(BrowserExecutor):
-    """A PURELY VISUAL login agent - it drives only `visual-driver` and its single goal is to log in with the
-    supplied credentials by looking at a coordinate-gridded screenshot and clicking/typing at coordinates with
-    human-like mouse motion. Standalone (run it with `boxcutter irvin <target> --agent visor`); it is NOT on
-    the IRVIN council and is not commissioned by any suggester - it exists to test the visual driver."""
-    name = "visor"
-    description = ("Purely visual login: drives ONLY visual-driver, reads a coordinate-grid screenshot, and "
-                   "clicks/types at coordinates with human-like motion to log in with the supplied credentials.")
-    tools = {"visual-driver"}
-    cost = "high"        # a real browser + human-paced motion + a screenshot round-trip per step
-    max_steps = 20
-    objective = (
-        "You are a VISUAL LOGIN operator. Your ONE goal: LOG IN to the target using the supplied credentials, "
-        "driving ONLY the `visual-driver` tool - you have no other tools and you never touch DOM selectors. "
-        "Each call returns a SCREENSHOT with a red COORDINATE GRID overlaid (x labeled across the top, y down "
-        "the left, every 100px). You read an element's position straight off the grid and act by COORDINATE.\n"
-        "The session is PERSISTENT and stateful - it stays where you left it across calls (it does NOT "
-        "re-navigate; use a `goto` action to move). Work in a tight loop: LOOK at the returned screenshot -> "
-        "decide the next action(s) -> execute -> LOOK again. Actions (chain them in ONE call only when they "
-        "act on the SAME screen, since every coordinate you pass came from the LAST screenshot): "
-        "click:X,Y, dblclick:X,Y, move:X,Y, type:TEXT, key:Enter, scroll:down|up, wait:MS, goto:URL. The mouse "
-        "MOVES like a human automatically - you only choose where.\n"
-        "TO LOG IN: reach the login form (navigate/scroll if needed and re-screenshot), click the USERNAME "
-        "field, type the username token, click the PASSWORD field, type the password token, then click the "
-        "submit button. RELEVANT CONTEXT names the exact tokens to type (e.g. __USER_A__ / __PASS_A__) - type "
-        "them VERBATIM; they are substituted with the real secret privately at dispatch, so never invent or "
-        "guess a real credential. If a field doesn't focus (your next screenshot shows the text didn't land), "
-        "re-aim and retry. Handle an identifier-first flow (username, submit, THEN password on the next "
-        "screen) by re-screenshotting between steps.\n"
-        "CONFIRM against the BACKEND, not the frontend. This is an SPA: the marketing/landing shell loads "
-        "without auth, so a screenshot that 'looks logged in' or a bag of pre-login/analytics cookies is NOT "
-        "proof. Real success = an authenticated API call succeeds: use the `requests` view / flows to find a "
-        "call (a /me, /account, /profile, /orders, /customer... endpoint, often on a different api.* host) that "
-        "returns 200 with YOUR user data. The session artifact is usually the JWT the app sends as "
-        "`Authorization: Bearer <jwt>` - you'll see it as `req_auth` on that authed flow; put THAT header in "
-        "artifacts.tokens (or `Cookie: <session cookies>` for a cookie app). ONLY on a proven authed API call "
-        "report success. On failure (a social login you can't complete, MFA/captcha, a field that never "
-        "focuses, or no authed API call ever succeeds) say so plainly in artifacts.notes with what the last "
-        "screenshot showed, and store NOTHING. A clear, honest outcome is the deliverable - this agent exists "
-        "to prove the visual login truly authenticates." + _CLICK_FLOW)
-
-    def __init__(self):
-        super().__init__()                             # sets self._sid
-        self._grid = None                              # optional grid-spacing override (set by the visor CLI)
-        self._trace = None                             # optional trace dir for per-action screenshots (visor CLI)
-
-    def _enrich_step(self, ctx, step: dict) -> dict:
-        tgt = ctx.commission_target(step) or ctx.base_url
-        if not str(tgt).startswith(("http://", "https://")):
-            tgt = ctx.base_url
-        labels = sorted({c["label"] for c in ctx._creds.values()})
-        if labels:
-            toks = "; ".join(f"identity {l}: username={ctx.secret_tokens(l)[0]} password={ctx.secret_tokens(l)[1]}"
-                             for l in labels)
-            creds_note = (f"Type these tokens to log in (they are substituted with the real secret privately - "
-                          f"never type a real credential): {toks}. ")
-        else:
-            creds_note = ("No credentials were supplied (--creds or in --context), so there is nothing to log "
-                          "in with - report that in artifacts.notes and stop. ")
-        return {**step, "args": {"target": tgt},
-                "context": ((step.get("context") or "") + " "
-                            + f"Start URL: {tgt}. {creds_note}Drive it purely by grid coordinates.").strip()}
-
-    def _rewrite_call(self, ctx, name: str, args: dict) -> dict:
-        new = super()._rewrite_call(ctx, name, args)       # visual-driver: session pin + secret-token substitution
-        if name == "visual-driver":
-            if self._grid is not None:
-                new["grid"] = self._grid
-            if self._trace:
-                new["trace"] = self._trace
-                new["trace_each"] = True                    # the agent's human trace: a shot after every action
-        return new
-
-
 # -- example calls per executor ------------------------------------------------------------------------------
 # Concrete, illustrative invocations shown in each executor's prompt (via Executor.examples) so the model gets
 # the call right at a glance. Kept together here for one-look maintenance; args match each tool's real
@@ -768,8 +694,3 @@ Explorer.examples = (
     "browser-actions https://example.com --action requests:api.example.com   # list one backend host's calls\n"
     "visual-driver https://example.com --action screen --action 'click:400,300'   # a control with no stable selector")
 
-Visor.examples = (
-    "visual-driver https://example.com --action wait --action screen               # see the gridded page\n"
-    "visual-driver https://example.com --action 'click_text:Log in' --action wait:3 --action screen   # Log in, NOT Sign up\n"
-    "visual-driver https://example.com --action 'click:600,375' --action 'put:__USER_A__' --action 'click:600,460' "
-    "--action 'put:__PASS_A__' --action 'click_text:Log in' --action wait --action screen")

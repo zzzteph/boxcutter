@@ -160,7 +160,7 @@ PROVIDERS = {"anthropic": Anthropic, "openai": OpenAI, "litellm": LiteLLM}
 
 
 def add_ai_provider_args(parser) -> None:
-    """The shared LLM flags every `ai` agent (logio, prawlio, visor, irvin) takes - defined ONCE here so the
+    """The shared LLM flags every `ai` agent (logio, prawlio, irvin) takes - defined ONCE here so the
     agents don't each redeclare them. NOTE: these live on each agent's OWN parser, not on the `ai` group: a
     true argparse group-level flag is clobbered by the subparser's default, and the bare-name sugar
     (`boxcutter logio ...`) puts flags AFTER the agent name - so a shared adder, not a group argument, is the
@@ -170,5 +170,28 @@ def add_ai_provider_args(parser) -> None:
     parser.add_argument("--model", default=None, help="Model id (default: the provider's default)")
     parser.add_argument("--api-key", dest="api_key", default=None,
                         help="LLM API key (or set the provider's env var, e.g. ANTHROPIC_API_KEY)")
-    parser.add_argument("--base-url", dest="base_url", default=None, metavar="URL",
-                        help="LLM gateway base URL (e.g. a LiteLLM/OpenAI gateway)")
+    # The LLM endpoint (a LiteLLM/OpenAI gateway or a direct API base). Named --llm-proxy-url, not --base-url,
+    # so it can't be confused with the TARGET's base URL; the internal attribute stays `base_url` (the SDK term).
+    parser.add_argument("--llm-proxy-url", dest="base_url", default=None, metavar="URL",
+                        help="LLM endpoint / gateway URL (e.g. a LiteLLM or OpenAI-compatible proxy)")
+
+
+def add_agent_args(parser, *, max_steps: int, budget: int, context: bool = True) -> None:
+    """The UNIFIED argument surface every standalone `ai` agent shares, so the CLI is consistent across agents:
+    a free-text --context briefing, the LLM provider flags (add_ai_provider_args), the loop caps
+    (--max-steps / --budget), an optional --report file, request --header(s), and the common output flags
+    (--output/--jsonl/--debug/--table). Per-agent numeric DEFAULTS are passed in; the flag DEFINITIONS stay
+    identical everywhere. Call it AFTER the agent's positional target and its own agent-specific flags."""
+    from ..core.args import add_common_args, add_header_arg
+    if context:
+        parser.add_argument("--context", default="", metavar="TEXT",
+                            help="Free-text briefing: scope and any auth header/cookie/creds to send (parsed by the LLM)")
+    add_ai_provider_args(parser)
+    parser.add_argument("--max-steps", dest="max_steps", type=int, default=max_steps,
+                        help="Hard cap on agent steps (the agent usually stops earlier when it is done)")
+    parser.add_argument("--budget", type=int, default=budget,
+                        help="Wall-clock budget in seconds; past it the agent is asked to finalize now")
+    parser.add_argument("--report", default=None, metavar="FILE",
+                        help="Also write the human-readable markdown report to FILE")
+    add_header_arg(parser)
+    add_common_args(parser)

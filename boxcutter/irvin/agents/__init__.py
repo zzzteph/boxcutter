@@ -28,9 +28,8 @@ SUGGESTERS = [
 ]
 
 # working agents (agent type 2) - one PROFESSIONAL specialist per security issue; each answers a manager's
-# commission with verified results. name -> class. (The old `visor` test agent is retired from the council:
-# its purely-visual login is now the standalone `boxcutter ai visor`, and `auth` is powered by the stronger
-# logio login engine - see executors.Auth.)
+# commission with verified results. name -> class. (`auth` is powered by the logio login engine - see
+# executors.Auth.)
 EXECUTORS = {e.name: e for e in (Recon, Spa, Explorer, Dirbust, AccessControl, WebVulnTriage, Sqli, Xss,
                                  PathTraversal, GitDumper, Secrets, Exposure, Auth)}
 
@@ -83,7 +82,7 @@ def validate_registry() -> None:
         problems += [f"[{ex.name}] tool '{t}' is not in the runner's ALLOWED set"
                      for t in ex.tools if t not in ALLOWED]
     # every action a suggester COMMISSIONS must be a real executor - a typo'd/stale `proposes` entry would have
-    # the planner commission a non-existent specialist. This is the check that would have caught `visor` rotting.
+    # the planner commission a non-existent specialist. This is the check that catches a stale `proposes` entry.
     for sug in SUGGESTERS:
         problems += [f"[{sug.name}] proposes '{act}' which is not a registered executor"
                      for act in getattr(sug, "proposes", ()) if act not in EXECUTORS]

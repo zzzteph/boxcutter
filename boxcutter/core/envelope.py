@@ -302,6 +302,19 @@ def debug_print(message: str) -> None:
     sys.stderr.flush()
 
 
+def write_report(path: str | None, text: str) -> None:
+    """Write a human-readable markdown report to ``path`` - the shared ``--report`` flag every ai agent takes.
+    No-op when ``path`` is falsy; best-effort (a write failure goes to stderr, never raised)."""
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.rstrip("\n") + "\n")
+        debug_print(f"report written to {path}")
+    except OSError as exc:
+        sys.stderr.write(f"could not write report to {path}: {exc}\n")
+
+
 def debug_logger(enabled: bool) -> Callable[[str], None]:
     """Return a logging closure that only emits when ``enabled`` is true.
 

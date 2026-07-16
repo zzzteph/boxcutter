@@ -188,7 +188,7 @@ def _grid_shot(page, grid: int) -> str:
     png = _shoot(page, grid)
     if not png:
         return ""
-    path = fsutil.temp_file("bc_visor_")
+    path = fsutil.temp_file("bc_vd_")
     with open(path, "wb") as fh:
         fh.write(png)
     return path
@@ -233,7 +233,7 @@ def _drive(page, target, actions, grid, fresh, trace_dir=None, each=False, dump_
             png = _shoot(page, grid)
             rec = {"action": action, "ok": True}
             if png:
-                p = fsutil.temp_file("bc_visor_")    # the model reads this one and sees it as a vision block
+                p = fsutil.temp_file("bc_vd_")    # the model reads this one and sees it as a vision block
                 with open(p, "wb") as fh:
                     fh.write(png)
                 rec["image_path"] = p

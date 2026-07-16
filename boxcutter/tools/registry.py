@@ -8,11 +8,13 @@ from __future__ import annotations
 
 # Agentic (LLM-driven) commands live in their own package to keep them separate from the deterministic tools.
 from ..ai import (
+    bob,
     crawlio,
     irvin,
+    juicy,
     logio,
     prawlio,
-    visor,
+    travis,
 )
 from . import (
     browser_actions,
@@ -97,14 +99,18 @@ TOOLS = [
 AI = [
     # The full autonomous pipeline (suggester council -> concluder -> planner -> executors -> reporter).
     irvin,
-    # Standalone visual login agent (drives only visual-driver; no pipeline).
-    visor,
     # Standalone agentic login tool (auth-only agent; completely separate from IRVIN).
     logio,
     # Authenticated crawl: logio logs in, then a visual agent crawls the app for its post-login requests.
     prawlio,
     # Single-agent crawler: comprehensive, VERIFIED endpoint list (strict about false/ghost paths), path-scoped.
     crawlio,
+    # Single-agent JS analyst: download a JS file, extract every hidden URL, and find DOM XSS with examples.
+    juicy,
+    # Short surface scanner: cheap single-pass recon + scanners + light logic checks; exposure-focused report.
+    bob,
+    # Recon triage scout: probes ONE host lightly and rates how interesting it is for a deeper scan (for bob).
+    travis,
 ]
 
 # Every command resolvable by NAME (tools + ai) - toolschema and the workflow runner look themselves up here.

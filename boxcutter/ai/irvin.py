@@ -177,7 +177,7 @@ def run(args) -> int:
         ctx.brief = brief_cfg["focus"]        # cleaned focus (secrets removed) becomes what's broadcast
     # An operator who passes `--header "Cookie: <session>"` means "act as this logged-in user" - i.e. send it
     # on EVERY request, not only when an access-control call happens to opt into identity A. So identity A's
-    # headers ALSO seed the global, auto-injected channel (same contract as `boxcutter ai visor` and as a
+    # headers ALSO seed the global, auto-injected channel (the same contract as a
     # Cookie named in --context). --header-b stays identity-only: B is the COMPARISON actor for BOLA, never
     # the default session. --context-extracted headers stack on top (a header name --header already set wins).
     cli_headers = list(args.header)

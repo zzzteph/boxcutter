@@ -96,9 +96,9 @@ def run_agent(name, provider, ctx, runner, brief="", target="") -> bool:
 
     Credentials, if given, are still bootstrapped first so an agent that needs a session (explore, access
     control, anything authenticated) actually has one - the point is to test the agent as it really runs.
-    EXCEPT for agents whose whole job IS logging in (auth, visor): pre-bootstrapping would establish the
+    EXCEPT for agents whose whole job IS logging in (auth): pre-bootstrapping would establish the
     session for them, defeating the test - they must log in themselves."""
-    if ctx._creds and name not in ("auth", "visor"):
+    if ctx._creds and name not in ("auth",):
         _bootstrap_auth(ctx, runner, provider)
 
     if name in EXECUTORS:

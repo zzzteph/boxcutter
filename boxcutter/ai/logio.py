@@ -30,10 +30,10 @@ import sys
 import time
 from urllib.parse import urlparse
 
-from ..core.args import add_common_args, add_header_arg
-from ..core.envelope import debug_print, harvest_images, output_result
+from ..core import agentlog
+from ..core.envelope import debug_logger, debug_print, harvest_images, output_result, write_report
 from ..irvin import briefing                 # reused (read-only) to parse creds/headers out of --context
-from ..irvin.provider import PROVIDERS, add_ai_provider_args   # generic LLM client + shared ai-flag adder
+from ..irvin.provider import PROVIDERS, add_agent_args   # generic LLM client + shared ai-flag adder
 from ..tools import toolschema
 
 NAME = "logio"
@@ -95,6 +95,8 @@ _SYSTEM = (
 
     "CREDENTIALS: type the tokens __USER__ (username) and __PASS__ (password) - substituted with the real "
     "values privately at dispatch. NEVER type a real credential or invent one.\n"
+
+    + agentlog.NARRATE +
 
     ">>> STAGED, GATED EXECUTION. You log in as a SEQUENCE OF GATED STAGES, in this fixed order:\n"
     "  1. FIND THE LOGIN FORM   2. ENTER THE DETAILS   3. CLICK THE NECESSARY FIELDS   4. BYPASS THE CAPTCHA   "
@@ -206,10 +208,6 @@ def _script_text(script: list) -> str:
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="Target URL (the app root or its login page)")
     parser.add_argument("--creds", default=None, metavar="USER:PASS", help="Credentials to log in with")
-    parser.add_argument("--context", default="", metavar="TEXT",
-                        help="Free-text briefing; credentials mentioned here (e.g. \"creds are user:pass\") and "
-                             "any header/token to send are parsed out and used - like IRVIN's --context")
-    add_ai_provider_args(parser)          # --provider/--model/--api-key/--base-url (shared by every ai agent)
     parser.add_argument("--grid", type=int, default=25, metavar="PX",
                         help="Coordinate-grid spacing in px - finer = more precise aim (0 = off)")
     parser.add_argument("--trace", default="trace", metavar="DIR",
@@ -224,10 +222,7 @@ def add_arguments(parser) -> None:
                         help="On success, write the captured REUSABLE session (cookies + localStorage + "
                              "sessionStorage + token + login flow) to FILE as JSON (default: "
                              "<trace>/logio-<timestamp>/session.json)")
-    parser.add_argument("--max-steps", dest="max_steps", type=int, default=14,
-                        help="Max agent steps (model turns) PER STAGE before the stage is judged failed")
-    add_header_arg(parser)          # sent on every request (e.g. a Tester-Token to disable a bot check)
-    add_common_args(parser)
+    add_agent_args(parser, max_steps=14, budget=600)
 
 
 def _visual_tool_spec() -> dict:
@@ -249,13 +244,15 @@ def _visual_tool_spec() -> dict:
             "schema": schema}
 
 
-def _dispatch(argv: list, headers: list) -> str:
+def _dispatch(argv: list, headers: list, debug: bool = False) -> str:
     """Run one boxcutter sub-command in-process and return its JSON envelope text. Header-capable tools get the
-    global --header(s) appended (e.g. a Tester-Token)."""
+    global --header(s) appended (e.g. a Tester-Token); under --debug the sub-tool also gets --debug so its own
+    diagnostics (visual-driver's ok/failed/flow counts) stream to stderr."""
     from ..cli import main as cli_main
     flag = toolschema.build(argv[0])["flag_of"].get("header") if argv else None
     if flag and headers:
         argv = argv + [x for h in headers for x in (flag, h)]
+    argv = agentlog.forward_debug(argv, debug)
     out_buf, err_buf = io.StringIO(), io.StringIO()
     import contextlib
     try:
@@ -380,13 +377,14 @@ def _q(a: str) -> str:
 
 
 def login(provider, base_url: str, subs: dict, grid=50, trace=None, trace_each=False,
-          headers=None, max_steps: int = 14) -> dict:
+          headers=None, max_steps: int = 14, debug: bool = False) -> dict:
     """The reusable LOGIN CORE - the gated stage loop, factored out of run() so BOTH the logio CLI and IRVIN's
     `auth` executor drive the SAME proven staged / probe-before-type / landed-verified login. `subs` maps the
     __USER__/__PASS__ tokens to the real values (substituted only at dispatch). Returns a dict with
     authenticated / failed_stage / flow / session_header / cookies / token / local_storage / session_storage /
     stages / evidence / notes. Does NOT close browser sessions or write files - the caller owns lifecycle."""
     headers = list(headers or [])
+    dbg = debug_logger(debug)                   # verbose tier: full reasoning + per-call outcome, only under --debug
     tools_spec = [_visual_tool_spec()]          # restricted: only the six actions, no session/grid/trace
     messages = [{"role": "user", "content":
                  f"Log in to {base_url} with the supplied credentials, ONE GATED STAGE AT A TIME. I will hand "
@@ -413,7 +411,11 @@ def login(provider, base_url: str, subs: dict, grid=50, trace=None, trace_each=F
             text, calls = provider.parse(resp)
             messages += provider.assistant_msg(resp)
             if text.strip():
-                debug_print(f"logio[{stage['key']}]> " + text.strip()[:300])
+                flat = " ".join(text.split())
+                if debug:
+                    dbg(f"logio[{stage['key']}]: " + flat)          # the WHY, in full, under --debug
+                else:
+                    debug_print(f"logio[{stage['key']}]> " + flat[:300])
             v = _stage_verdict(text)
             if v is not None:
                 verdict = v
@@ -434,8 +436,9 @@ def login(provider, base_url: str, subs: dict, grid=50, trace=None, trace_each=F
                     c["name"], c["args"], subs, grid, trace, trace_each,
                     dump_storage=(stage["key"] == "submit")))
                 debug_print("logio> boxcutter " + " ".join(str(a) for a in log_argv))
-                out = _dispatch(real_argv, headers)
+                out = _dispatch(real_argv, headers, debug)
                 out, images = _take_images(out)
+                dbg(f"    <- {c['name']}: {agentlog.summarize(out)}")
                 if c["name"] == "visual-driver":
                     last_chain = _actions_of(log_argv)
                     last_puts = _put_landings(out)
@@ -512,6 +515,7 @@ def run(args) -> int:
     trace = os.path.join(os.path.abspath(args.trace), "logio-" + time.strftime("%Y%m%d-%H%M%S")) \
         if args.trace else None
     trace_each = bool(getattr(args, "trace_each", False))
+    dbg = debug_logger(args.debug)              # verbose tier: full reasoning + per-call outcome, only under --debug
     tools_spec = [_visual_tool_spec()]          # restricted: only the six actions, no session/grid/trace
     messages = [{"role": "user", "content":
                  f"Log in to {base_url} with the supplied credentials, ONE GATED STAGE AT A TIME. I will hand "
@@ -532,8 +536,12 @@ def run(args) -> int:
     last_state: dict | None = None     # cookie/token/url from the most recent visual-driver reply
     stage_log: list = []               # per-stage {stage, ok, evidence, notes}
     failed_stage: str | None = None
+    deadline = time.time() + max(30, args.budget)
     try:
         for i, stage in enumerate(_STAGES, 1):
+            if time.time() > deadline:
+                debug_print("logio :: wall-clock budget reached - finalizing with the stages done so far")
+                break
             messages.append({"role": "user", "content": _STAGE_MSG.format(
                 n=i, total=len(_STAGES), name=stage["name"], goal=stage["goal"], gate=stage["gate"],
                 script=_script_text(script))})
@@ -548,7 +556,11 @@ def run(args) -> int:
                 text, calls = provider.parse(resp)
                 messages += provider.assistant_msg(resp)
                 if text.strip():
-                    debug_print(f"logio[{stage['key']}]> " + text.strip()[:300])
+                    flat = " ".join(text.split())
+                    if args.debug:
+                        dbg(f"logio[{stage['key']}]: " + flat)      # the WHY, in full, under --debug
+                    else:
+                        debug_print(f"logio[{stage['key']}]> " + flat[:300])
                 v = _stage_verdict(text)
                 if v is not None:
                     verdict = v
@@ -572,8 +584,9 @@ def run(args) -> int:
                         c["name"], c["args"], subs, grid, trace, trace_each,
                         dump_storage=(stage["key"] == "submit")))
                     debug_print("logio> boxcutter " + " ".join(str(a) for a in log_argv))
-                    out = _dispatch(real_argv, headers)
+                    out = _dispatch(real_argv, headers, args.debug)
                     out, images = _take_images(out)
+                    dbg(f"    <- {c['name']}: {agentlog.summarize(out)}")
                     if c["name"] == "visual-driver":
                         last_chain = _actions_of(log_argv)     # each call is a whole fresh replay
                         last_puts = _put_landings(out)         # did this replay's puts actually fill the fields
@@ -653,6 +666,14 @@ def run(args) -> int:
                "token": token, "local_storage": local_storage, "session_storage": session_storage,
                "session_file": session_file, "trace_dir": trace, "evidence": evidence,
                "notes": "; ".join(f"{s['stage']}: {s['notes']}" for s in stage_log if s["notes"])}
+    report = "\n".join(
+        [f"## Logio - login: {base_url}", "",
+         f"**Result:** {'authenticated' if authenticated else 'not authenticated'}"
+         + (f" (stopped at stage '{failed_stage}')" if failed_stage else ""), "",
+         "**Stages:** " + " -> ".join(f"{s['stage']}:{'ok' if s['ok'] else 'FAIL'}" for s in stage_log)]
+        + ([f"**Session captured** -> {session_file}"] if authenticated and session_file else [])
+        + [f"- {s['stage']}: {s['notes']}" for s in stage_log if s['notes']])
+    write_report(getattr(args, "report", None), report)
     print(json.dumps({"success": True, "kind": "items", "data": [summary], "error": None},
                      ensure_ascii=False, indent=2))
     return 0

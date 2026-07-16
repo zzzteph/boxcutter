@@ -33,7 +33,7 @@ from ..core import http
 from ..core.args import add_common_args
 from ..core.envelope import debug_logger, output_result
 from ..core.validators import is_valid_url
-from ..data.payloads import all_payloads
+from ..data.payloads import ERR_DISCLOSURE, NOSQL_ERR, SQL_ERROR, all_payloads
 
 NAME = "fuzz"
 KIND = "findings"
@@ -306,6 +306,41 @@ def _param_targets(url: str, body) -> list[str]:
     return [k for k, _ in parse_qsl(urlparse(url).query, keep_blank_values=True)]
 
 
+# Error/exception fingerprints that mean a candidate BASELINE is NOT a clean control (the app choked on the
+# control value itself). Same signatures the fuzzer reports on, so "clean" = shows none of them. A mid-pattern
+# ``(?i)`` is an error in modern Python, so strip the inline flag off each and apply re.I on compile.
+_ERRORY = re.compile("|".join(f"(?:{p[4:] if p.startswith('(?i)') else p})"
+                              for p in (SQL_ERROR, ERR_DISCLOSURE, NOSQL_ERR)), re.I)
+
+
+def _baseline_candidates(url: str, param: str) -> list[str]:
+    """Control values to try for a parameter's baseline, best first. The param's OWN original value is the
+    truest 'normal' request; then neutral fallbacks that stay VALID in the common contexts - a number (valid
+    both as an unquoted numeric AND inside a quoted string), then a benign word."""
+    if param in ("__URL_FUZZ__", "__BODY_FUZZ__"):
+        return ["8261749", "boxbaseline"]
+    orig = dict(parse_qsl(urlparse(url).query, keep_blank_values=True)).get(param)
+    return ([orig] if orig not in (None, "") else []) + ["8261749", "boxbaseline"]
+
+
+def _clean_baseline(method, target, body, param, sess):
+    """The per-parameter baseline, VERIFIED clean - we don't ASSUME the original value is safe, we send it and
+    check the response isn't itself an error/exception. Why it matters: the differential detector (`_new_match`)
+    only reports an error the baseline did NOT have, so the control MUST be error-free. A synthetic string
+    control (or a caller-supplied value that already breaks the query) makes the baseline carry the very SQL
+    error we hunt, masking a real error-based SQLi. So: try the original value, then neutral fallbacks, and take
+    the FIRST whose response shows no error signature. Falls back to the first candidate if the app errors on
+    everything (then detection is genuinely harder - nothing a control can do about it)."""
+    first = None
+    for cv in _baseline_candidates(target, param):
+        b = _substitute(method, target, body, param, cv, sess)
+        if first is None:
+            first = b
+        if b["error"] is None and b["status"] is not None and not _ERRORY.search(b["body"] or ""):
+            return b
+    return first
+
+
 def _match(pattern: str, body: str):
     try:
         return re.search(pattern, body, re.I)
@@ -470,8 +505,8 @@ def _run_inject_mode(method, target, body, sess, deadline: float, dbg) -> list[d
     for param in params:
         if out_of_time or time.time() >= deadline:
             break
-        baseline = _substitute(method, target, body, param, "control-x9z3-marker", sess)
-        if baseline["error"] is not None or baseline["status"] is None:
+        baseline = _clean_baseline(method, target, body, param, sess)
+        if baseline is None or baseline["error"] is not None or baseline["status"] is None:
             continue
         baseline_time = baseline["time_ms"] / 1000.0
         baseline_body = baseline["body"]

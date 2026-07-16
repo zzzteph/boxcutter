@@ -17,6 +17,7 @@ import re
 import sys
 from urllib.parse import urlsplit
 
+from ...core import agentlog
 from ...core.envelope import harvest_images
 from ...tools import toolschema
 from ..context import extract_json
@@ -261,7 +262,7 @@ class Executor:
 
     def run(self, ctx, step, runner, provider) -> dict:
         step = self._enrich_step(ctx, step)
-        system = (f"{_EXEC_BASE}\n\n## Your role: {self.name}\n{self.objective}\n\n"
+        system = (f"{_EXEC_BASE}\n\n{agentlog.NARRATE}\n## Your role: {self.name}\n{self.objective}\n\n"
                   f"## Tools you may call\n{', '.join(sorted(self.tools))}")
         if self.examples:
             system += f"\n\n## Example calls (adapt to the real target/params - illustrative, not literal)\n{self.examples}"
@@ -297,6 +298,7 @@ class Executor:
                 say(f"irvin:{self.name}", "> boxcutter " + " ".join(str(a) for a in log_argv))  # stream actions
                 out = runner(real_argv, ctx=ctx, allowed=self.tools)
                 self._absorb(ctx, log_argv, out)
+                self._say("  <- " + agentlog.summarize(out))   # what the call actually returned, not just the command
                 out, images = self._take_images(out)       # screenshots -> real vision blocks, not base64 text
                 if images:
                     self._say(f"captured {len(images)} screenshot(s) for the model to see")

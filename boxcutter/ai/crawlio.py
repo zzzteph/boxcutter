@@ -34,21 +34,23 @@ import sys
 import time
 from urllib.parse import parse_qsl, urlparse
 
-from ..core.args import add_common_args, add_header_arg
-from ..core.envelope import debug_print, harvest_images, output_result
+from ..core import agentlog
+from ..core.envelope import debug_logger, debug_print, harvest_images, output_result, write_report
 from ..irvin import briefing
 from ..irvin.context import extract_json
-from ..irvin.provider import PROVIDERS, add_ai_provider_args
+from ..irvin.provider import PROVIDERS, add_agent_args
 from ..tools import toolschema
 
 NAME = "crawlio"
 KIND = "items"
 HELP = "Single-agent crawler: build a comprehensive, code-verified endpoint list (strict about false/ghost paths)."
 
-# TRUSTED tools OBSERVE real behaviour (links, specs, XHR, JS refs) or SELF-VERIFY (path-bust applies its own
-# content/structure catch-all gate). There is no raw-guessing brute tool anymore, so no UNTRUSTED set.
+# TRUSTED tools OBSERVE real behaviour (links, specs, XHR, JS refs, real request flows) or SELF-VERIFY
+# (path-bust applies its own content/structure catch-all gate). There is no raw-guessing brute tool anymore, so
+# no UNTRUSTED set. visual-driver is TRUSTED for the api FLOWS it captures - they are real requests the page
+# actually made while a human-like session drove it.
 _TRUSTED = {"katana-crawl", "swagger-specs", "swagger-endpoints", "browser-crawl", "js-endpoints", "screenshot",
-            "path-bust"}
+            "path-bust", "visual-driver"}
 _TOOLS = sorted(_TRUSTED | {"http-request"})
 
 _ID_SEG = re.compile(r"\A(?:\d+|[0-9a-fA-F]{8,}|[0-9A-Za-z_-]{20,})\Z")
@@ -70,6 +72,12 @@ _SYSTEM = (
     "catches the live API surface katana never sees. Then `swagger-specs <host>` -> `swagger-endpoints <spec>` if "
     "a spec exists (TRUSTED - declared API); `js-endpoints <jsfile>` on JS katana finds (references - verify the "
     "ones that matter).\n"
+    "  3b. VISION WHEN THE APP IS A RICH SPA: browser-crawl clicks blindly by selector and often barely leaves "
+    "the landing shell. If the app only reveals its real API once a HUMAN uses it (type an address and get "
+    "results, open a restaurant/product, apply a filter, page a list) - or its controls resist selectors (a map, "
+    "a canvas, a CSS-in-JS widget, a bot check) - DRIVE it with `visual-driver` (see the VISION manual below): "
+    "SEE each screen and pursue the key user journeys to TRIGGER and CAPTURE the real API flows browser-crawl "
+    "missed. This is how you collect the deep surface.\n"
     "  4. BRUTE - BREADTH FIRST: `path-bust <base> --full` - ONE wide sweep with the ~12k breadth list to MAP "
     "where things live. It is SELF-VERIFIED (runs its own catch-all gate), so its hits are real paths, not "
     "guesses. Treat it as your map of the app's directory structure; a partial sweep is fine.\n"
@@ -92,6 +100,11 @@ _SYSTEM = (
     "Ex: `katana-crawl https://site`; `katana-crawl https://site --js` to surface JS bundles.\n"
     "  - browser-crawl <url> - render a JS/SPA and capture its routes + real XHR/fetch (TRUSTED - observed). Use "
     "when the page is a blank/SPA shell without JS. Ex: `browser-crawl https://site`.\n"
+    "  - visual-driver <url> --session <id> --action '<verb:args>' [--action ...] - DRIVE the app by SCREEN "
+    "COORDINATES like a human (VISION): each call returns a gridded screenshot AND the api flows your actions "
+    "triggered (TRUSTED - observed). Reuse the SAME --session id every call so page state carries over. Use it to "
+    "collect the deep API a rich SPA only exposes once used. Ex: `visual-driver https://site --session crawl "
+    "--action wait --action screen`. See the VISION manual.\n"
     "  - js-endpoints <js-url> - pull endpoint REFERENCES out of a JS bundle (LEADS - confirm the ones that "
     "matter with http-request). Ex: `js-endpoints https://site/static/app.js`.\n"
     "  - swagger-specs <host> - probe for an OpenAPI/Swagger spec. Ex: `swagger-specs https://site` -> spec URLs.\n"
@@ -109,6 +122,31 @@ _SYSTEM = (
     "Ex: `http-request https://site/robots.txt`; `http-request https://site/api/login -D '{\"u\":\"a\"}' "
     "-H 'Content-Type: application/json'`.\n\n"
 
+    "VISION MANUAL - DRIVING THE APP BY COORDINATES (visual-driver) to collect the DEEP api surface. Some apps "
+    "only call their real API once a human genuinely uses them, and the controls resist selector-clicking (a "
+    "canvas, a map, a CSS-in-JS widget, a bot check). Drive them by SCREEN COORDINATES: `visual-driver <base> "
+    "--session crawl --action ...` holds ONE PERSISTENT browser session - reuse the SAME --session id on EVERY "
+    "call so page state carries over - and each call returns a screenshot with a coordinate GRID (x across the "
+    "top, y down the left, labeled every 100px) PLUS the api flows your actions triggered.\n"
+    "THE RHYTHM - one interaction at a time: `wait` for the page to settle -> `screen` to SEE it -> READ the "
+    "target's x,y off the grid -> `probe:X,Y` to CONFIRM what's there (it reports e.g. `input`, `button "
+    "\"Search\"`) -> act -> `wait` -> `screen` again to see the RESULT, then decide the next coordinate. Act "
+    "with `click:X,Y`, `put:TEXT` to type into the focused field, `key:Enter`/`key:Tab`, `scroll:down`, or the "
+    "`click_text:LABEL` / `fill_text:LABEL=TEXT` shortcuts when the control is a plain DOM node. THE SCREENSHOT "
+    "IS YOUR SOURCE OF TRUTH - reading the exact x,y off the grid and clicking it works even where the DOM is "
+    "hidden (widget/shadow-DOM/iframe/canvas); guessing pixels WITHOUT looking is what fails. Only chain actions "
+    "that stay on the SAME screen; after anything that navigates or reflows, take a NEW `screen` before aiming "
+    "again - the page re-renders elements to new positions.\n"
+    "FIRST dismiss any cookie/consent/age overlay (`click_text:Accept all`, or probe+click its button) - it sits "
+    "on top and blocks every click underneath. THEN pursue the JOURNEYS that light up the API: enter a "
+    "location/search term and submit; open a result's detail view; apply a filter; page a list. Use the "
+    "`requests` action (or read the flows the call returns) after each journey and fold every NEW real endpoint "
+    "(method, url, body) into your list. You are COLLECTING endpoints, NOT logging in or changing state - never "
+    "submit a purchase / delete / logout. Stay on the target host. A few PURPOSEFUL journeys beat dozens of "
+    "aimless clicks - vision is expensive, so spend it where the API lives.\n"
+    "OUTPUT: visual-driver returns a `state` record plus `flows`; every flow's request url+method is a REAL "
+    "observed endpoint - treat them exactly like browser-crawl's XHR (deduped, catch-all-checked).\n\n"
+
     "CATCH-ALL AWARENESS. A 200 is NOT proof of a real path: many hosts route EVERY path through one "
     "front-controller (Caddy try_files, an SPA, an index.php that only reads the query), so a made-up path "
     "returns 200 and the SAME page. path-bust already fingerprints and gates this for its brute results. For any "
@@ -123,6 +161,11 @@ _SYSTEM = (
     "GATES - be FAST, never repeat work: never issue a tool call you already made (the runtime caches identical "
     "calls and REFUSES a third repeat); a path enters the list ONLY after it passes the catch-all check; deepen a "
     "dir ONLY if it's interesting and not already dug; when a full pass adds NO new REAL endpoint, STOP.\n\n"
+
+    "NARRATE - before each tool call, say in ONE short sentence WHY you're making it and what you expect it to "
+    "tell you (e.g. 'probing the well-known paths for an OpenAPI spec', 'the app is a blank SPA shell so I need "
+    "browser-crawl to see its real XHR calls', 'digging the /admin folder the sweep surfaced'). One line, then "
+    "call the tool - this keeps the run auditable so a reader can follow your reasoning, not just your commands.\n\n"
 
     "DELIVERABLE - when the STOP gate is met, END with ONE fenced ```json block and nothing after it. Every "
     "endpoint must be REAL, in-scope, and deduped; carry the method and, for POST/API, the request body/params so "
@@ -318,15 +361,7 @@ def _ghost_gate(items: list, base_url: str, headers: list, cap: int = 120) -> tu
 
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="Target URL or host (the app root)")
-    parser.add_argument("--context", default="", metavar="TEXT",
-                        help="Free-text briefing: scope, out-of-scope areas, and any auth header/token to send")
-    add_ai_provider_args(parser)          # --provider/--model/--api-key/--base-url
-    parser.add_argument("--max-steps", dest="max_steps", type=int, default=40, help="Hard cap on agent steps")
-    parser.add_argument("--budget", type=int, default=1800,
-                        help="Wall-clock budget in seconds (then finalize). Larger by default because the flow "
-                             "runs a breadth path-bust --full sweep before the precise digs")
-    add_header_arg(parser)
-    add_common_args(parser)
+    add_agent_args(parser, max_steps=40, budget=1800)
 
 
 def _target_url(argv: list) -> str:
@@ -381,6 +416,7 @@ def run(args) -> int:
     final_json = ""
     nudged = False
     deadline = time.time() + max(30, args.budget)
+    dbg = debug_logger(args.debug)          # verbose tier: the WHY + per-call outcomes, only under --debug
 
     for _ in range(max(1, args.max_steps)):
         if time.time() > deadline:
@@ -396,7 +432,13 @@ def run(args) -> int:
         if text.strip():
             if _has_final(text):
                 final_json = text                 # keep the LAST real json, even if the model talks after it
-            debug_print("crawlio> " + text.strip()[:220])
+            # the model's own words are the "why" behind the calls in this turn: a short line always, the FULL
+            # rationale (untruncated) under --debug so a long narration isn't clipped mid-reason.
+            flat = " ".join(text.split())
+            if args.debug:
+                dbg("crawlio: " + flat)
+            else:
+                debug_print("crawlio> " + flat[:220])
         if not calls:
             if final_json:
                 break
@@ -416,25 +458,39 @@ def run(args) -> int:
             tgt = _target_url(argv)
             if tgt and not _in_scope(tgt, base_host, scope_path):     # runtime scope guard on dispatch
                 raw = json.dumps({"success": False, "error": f"{tgt} is OUT OF SCOPE - stay under {base_url}"})
+                dbg(f"    x REFUSED (out of scope): {tgt} is not under {base_url}")
             else:
                 key = tuple(argv)
+                # a visual-driver call carrying --session is STATEFUL: the SAME argv at two different moments
+                # drives a browser that has MOVED ON (navigated, opened a modal, scrolled), so it must NOT be
+                # served from cache or gated as a "repeat" the way a pure read (an http GET, a katana crawl) can.
+                stateful = c["name"] == "visual-driver" or "--session" in argv
                 count[key] = count.get(key, 0) + 1
-                if count[key] > 2:
+                if not stateful and count[key] > 2:
                     raw = json.dumps({"success": False,
                                       "error": "already ran this exact call - reuse the earlier result, do not repeat"})
-                elif key in cache:
+                    dbg(f"    x REFUSED (repeat): {c['name']} already ran twice - reusing earlier result")
+                elif not stateful and key in cache:
                     raw = cache[key]
+                    dbg(f"    (cache hit) {c['name']}: reusing the earlier result for this exact call")
                 else:
                     run_argv = argv
                     if c["name"] == "path-bust":       # blocking call -> keep it inside the remaining budget
                         slot = max(30, int(deadline - time.time()) - 20)
                         run_argv = _bound_timeout(argv, slot)
+                    # forward --debug so the sub-tool streams its OWN diagnostics to stderr (browser-crawl's
+                    # 'N api calls, landed on <url>', visual-driver's 'N ok / M failed, K flow(s)' - the detail
+                    # that shows whether it rendered/drove the app or got blocked). Dispatched argv only; the
+                    # cache key stays the clean argv above.
+                    run_argv = agentlog.forward_debug(run_argv, args.debug)
                     debug_print("crawlio> boxcutter " + " ".join(str(a) for a in run_argv))
                     raw = _call(run_argv, headers)
                     if c["name"] == "path-bust":
                         raw = _compact_pathbust(raw)   # slim findings so a --full sweep survives the context cap
-                    cache[key] = raw
+                    if not stateful:
+                        cache[key] = raw
                     _absorb(raw, c["name"], base_host, scope_path, candidates)
+                    dbg(f"    <- {c['name']}: {agentlog.summarize(raw)}")
             is_pb = c["name"] == "path-bust"
             clean, images = harvest_images(
                 _cap(raw, max_items=150 if is_pb else 60, max_chars=12000 if is_pb else 9000), max_images=4)
@@ -470,5 +526,8 @@ def run(args) -> int:
                 f"agent dropped {len(agent_dropped)} ({len(candidates)} trusted candidates seen)")
     for g in ghosts[:10]:
         debug_print(f"  ghost: {g['url']} - {g['why']}")
+    report = "\n".join([f"## Crawlio - endpoints: {base_url}", "", f"{len(items)} verified endpoint(s):", ""]
+                       + [f"- {it.get('method', 'GET')} {it.get('url', '')}" for it in items])
+    write_report(getattr(args, "report", None), report)
     output_result(items, args.output)
     return 0
