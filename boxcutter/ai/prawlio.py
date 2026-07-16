@@ -22,7 +22,6 @@ import json
 import os
 import re
 import sys
-import time
 from urllib.parse import urlparse
 
 from ..core import agentlog
@@ -247,8 +246,7 @@ def _reauth(base_url: str, sid: str, headers: list, grid, trace, login_flow: lis
 
 
 def _explore(base_url: str, base_host: str, provider, sid: str, headers: list, grid, trace,
-             stop_after: int, hard_cap: int, login_flow: list, subs: dict, debug: bool = False,
-             deadline: float | None = None) -> list:
+             stop_after: int, hard_cap: int, login_flow: list, subs: dict, debug: bool = False) -> list:
     """Agentic visual crawl: an LLM drives the already-authenticated browser (click/move/put via visual-driver,
     exactly like the login agent) to exercise the app's functionality, and we harvest every API request its
     interactions fire. Runs until the agent runs OUT of new interface, or `stop_after` distinct UI
@@ -268,9 +266,6 @@ def _explore(base_url: str, base_host: str, provider, sid: str, headers: list, g
     reauths, max_reauth = 0, 3
     for step in range(max(1, hard_cap)):
         last_step = step >= hard_cap - 1
-        if deadline and time.time() > deadline:
-            debug_print(f"prawlio[crawl]> wall-clock budget reached at step {step} - finalizing the crawl")
-            break
         # if the crawl dropped to a login/identity page, the session expired or we got logged out - recall the
         # login flow to get back in, rather than nudging the agent to push through an auth wall it can't pass.
         if login_flow and reauths < max_reauth and _deauthed(last_url, base_host):
@@ -346,7 +341,7 @@ def add_arguments(parser) -> None:
     parser.add_argument("--crawl-steps", dest="crawl_steps", type=int, default=60,
                         help="Hard safety cap on visual-crawl agent steps (the stop-after / no-more-interface "
                              "conditions normally end it first)")
-    add_agent_args(parser, max_steps=14, budget=1800)
+    add_agent_args(parser, max_steps=14)
 
 
 def _call(argv: list, headers: list, debug: bool = False) -> tuple:
@@ -491,8 +486,7 @@ def run(args) -> int:
         debug_print(f"prawlio :: [3/3] visual crawl - clicking/typing through the UI until ~{args.stop_after} "
                     "functionalities or no interface left ...")
         items = _explore(base_url, base_host, provider, _SESSION, headers, grid, trace,
-                         args.stop_after, args.crawl_steps, login_flow, subs, args.debug,
-                         deadline=time.time() + max(30, args.budget))
+                         args.stop_after, args.crawl_steps, login_flow, subs, args.debug)
     finally:
         from ..core.cdp import close_all_sessions
         close_all_sessions()

@@ -222,7 +222,7 @@ def add_arguments(parser) -> None:
                         help="On success, write the captured REUSABLE session (cookies + localStorage + "
                              "sessionStorage + token + login flow) to FILE as JSON (default: "
                              "<trace>/logio-<timestamp>/session.json)")
-    add_agent_args(parser, max_steps=14, budget=600)
+    add_agent_args(parser, max_steps=14)
 
 
 def _visual_tool_spec() -> dict:
@@ -536,12 +536,8 @@ def run(args) -> int:
     last_state: dict | None = None     # cookie/token/url from the most recent visual-driver reply
     stage_log: list = []               # per-stage {stage, ok, evidence, notes}
     failed_stage: str | None = None
-    deadline = time.time() + max(30, args.budget)
     try:
         for i, stage in enumerate(_STAGES, 1):
-            if time.time() > deadline:
-                debug_print("logio :: wall-clock budget reached - finalizing with the stages done so far")
-                break
             messages.append({"role": "user", "content": _STAGE_MSG.format(
                 n=i, total=len(_STAGES), name=stage["name"], goal=stage["goal"], gate=stage["gate"],
                 script=_script_text(script))})

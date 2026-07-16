@@ -30,7 +30,6 @@ import random
 import re
 import string
 import sys
-import time
 from urllib.parse import urlparse, urlunparse
 
 from ..core import agentlog
@@ -391,7 +390,7 @@ def add_arguments(parser) -> None:
                              "the agent chose")
     parser.add_argument("--fuzz-timeout", dest="fuzz_timeout", type=int, default=45,
                         help="Per-endpoint budget (seconds) for each backstop fuzz call")
-    add_agent_args(parser, max_steps=30, budget=600)
+    add_agent_args(parser, max_steps=30)
 
 
 def run(args) -> int:
@@ -429,10 +428,8 @@ def run(args) -> int:
     count: dict = {}
     final_text = ""
     nudged = False
-    deadline = time.time() + max(30, args.budget)
 
     for step in range(max(1, args.max_steps)):
-        overtime = time.time() > deadline
         try:
             resp = provider.send(_SYSTEM, messages, tools_spec)
         except Exception as exc:  # noqa: BLE001
@@ -452,10 +449,6 @@ def run(args) -> int:
                                  "http-request on the base and go from there. Do not answer without acting."})
                 continue
             break
-        if overtime:                                 # out of budget: ask for the report instead of more tools
-            messages.append({"role": "user", "content": "Wall-clock budget reached. Stop scanning and write the "
-                             "FINAL report now (markdown + the json block), from what you already have."})
-            continue
         results = []
         for c in calls:
             if c["name"] not in _TOOLS:

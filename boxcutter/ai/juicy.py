@@ -54,7 +54,6 @@ import json
 import os
 import re
 import sys
-import time
 from urllib.parse import urljoin, urlparse
 
 from ..core import agentlog
@@ -1004,7 +1003,7 @@ def add_arguments(parser) -> None:
                              "re-traced from scratch (refute-by-default) against the real code, so a "
                              "`confirmed` verdict can be trusted without redoing the work; refuted "
                              "false-positives are dropped")
-    add_agent_args(parser, max_steps=24, budget=900)
+    add_agent_args(parser, max_steps=24)
 
 
 def _resolve_targets(target: str, headers: list, args, cache: dict, dbg) -> tuple:
@@ -1096,13 +1095,9 @@ def run(args) -> int:
     tools_spec = toolschema.native_tools(_TOOLS)
     urls, xss, libraries, secrets = {}, {}, {}, {}
     count: dict = {}
-    deadline = time.time() + max(30, args.budget)
 
     # 2) ANALYSE each file: app bundles get the full windowed LLM run; vendor bundles are fingerprint-only.
     for label, source, is_vendor in files:
-        if time.time() > deadline:
-            debug_print("juicy :: wall-clock budget reached - stopping before the remaining JS file(s)")
-            break
         if is_vendor:
             _fingerprint_file(label, source, app_base, urls, libraries, secrets)
         else:
