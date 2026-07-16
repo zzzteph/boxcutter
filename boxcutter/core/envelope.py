@@ -12,7 +12,9 @@ stdout always stays parseable JSON.
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import re
 import sys
 from typing import Any, Callable, Iterable
@@ -300,6 +302,19 @@ def debug_print(message: str) -> None:
     sys.stderr.flush()
 
 
+def write_report(path: str | None, text: str) -> None:
+    """Write a human-readable markdown report to ``path`` - the shared ``--report`` flag every ai agent takes.
+    No-op when ``path`` is falsy; best-effort (a write failure goes to stderr, never raised)."""
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.rstrip("\n") + "\n")
+        debug_print(f"report written to {path}")
+    except OSError as exc:
+        sys.stderr.write(f"could not write report to {path}: {exc}\n")
+
+
 def debug_logger(enabled: bool) -> Callable[[str], None]:
     """Return a logging closure that only emits when ``enabled`` is true.
 
@@ -329,6 +344,96 @@ def read_envelope(path: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return decoded if isinstance(decoded, dict) else {}
+
+
+def harvest_images(out: str, max_images: int = 8, max_bytes: int = 6_000_000) -> tuple[str, list]:
+    """Pull screenshots a tool emitted (as short ``image_path`` values) OUT of its JSON envelope text and
+    return ``(clean_text, images)`` - ``images`` being base64 PNG blocks the provider forwards as REAL vision.
+
+    ORDER IS THE CONTRACT. An agent is told it gets exactly ONE image per ``screen`` action, in order, so the
+    images we return MUST match that, and nothing extra - otherwise the model maps a screenshot to the wrong
+    action and judges (e.g.) "the login form opened" from a STALE picture. Therefore:
+
+    * every explicit ``screen`` capture - an ``image_path`` reached THROUGH a ``results`` list - is forwarded in
+      document order, and its text placeholder is NUMBERED (#1, #2, ...) so the text and the images line up;
+    * a record's OWN top-level ``image_path`` (the tool's trailing whole-call state screenshot) is NOT shown
+      when explicit screens exist: it is redundant with the last ``screen`` and, delivered out of order, is
+      exactly what makes an agent read the wrong frame. It is forwarded only as a FALLBACK when the call
+      produced no ``screen`` at all, so the model is never left blind.
+
+    Consumed temp PNGs are unlinked (tools run in-process, the files are local). Best-effort: any parse/read
+    failure yields no images and the untouched text.
+    """
+    try:
+        env = json.loads(out)
+    except Exception:  # noqa: BLE001
+        return out, []
+    if not isinstance(env, dict) or not isinstance(env.get("data"), list):
+        return out, []
+
+    def _read(path: str) -> bytes | None:
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            os.unlink(path)                          # the capture is ephemeral - consume it
+        except OSError:
+            return None
+        return raw if raw and len(raw) <= max_bytes else None
+
+    def _block(raw: bytes) -> dict:
+        return {"media_type": "image/png", "data": base64.b64encode(raw).decode("ascii")}
+
+    images: list = []
+    finals: list = []          # (node, path) trailing per-call state screenshots - fallback only
+
+    def _walk(node: Any, in_results: bool) -> None:
+        if isinstance(node, dict):
+            path = node.get("image_path")
+            if isinstance(path, str) and path and not path.startswith("<"):
+                if in_results:                       # an explicit `screen` -> forward it, in order, numbered
+                    if len(images) < max_images:
+                        raw = _read(path)
+                        if raw:
+                            images.append(_block(raw))
+                            node["image_path"] = f"<screenshot #{len(images)} - the image below, in order>"
+                        else:
+                            node["image_path"] = "<screenshot unavailable>"
+                    else:
+                        try:
+                            os.unlink(path)
+                        except OSError:
+                            pass
+                        node["image_path"] = "<screenshot omitted - too many in one call; take fewer `screen`s>"
+                else:
+                    finals.append((node, path))      # trailing state shot - decided after the walk
+            for key, val in node.items():
+                if key != "image_path":
+                    _walk(val, in_results or key == "results")
+        elif isinstance(node, list):
+            for val in node:
+                _walk(val, in_results)
+
+    _walk(env["data"], False)
+
+    if images:                                       # explicit screens shown -> drop the redundant trailing shot
+        for node, path in finals:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            node["image_path"] = "<final-state screenshot saved to trace; take a `screen` to view the live page>"
+    else:                                            # no `screen` this call -> show the state shot so it isn't blind
+        for node, path in finals:
+            if len(images) >= max_images:
+                break
+            raw = _read(path)
+            if raw:
+                images.append(_block(raw))
+                node["image_path"] = f"<screenshot #{len(images)} - the image below>"
+            else:
+                node["image_path"] = "<screenshot unavailable>"
+
+    return (json.dumps(env, ensure_ascii=False), images) if images else (out, [])
 
 
 def dedupe(items: Iterable[str]) -> list[str]:

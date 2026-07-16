@@ -19,6 +19,10 @@ _LINE = re.compile(r"^\[(.*?)\]\s+\[(.*?)\]\s+\[(.*?)\]\s+(.*)$")
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="Target domain or URL")
     parser.add_argument(
+        "--tags", default="",
+        help="Comma-separated nuclei template tags to run, e.g. 'exposure,misconfig,cve'",
+    )
+    parser.add_argument(
         "--opt-args", dest="opt_args", default="",
         help="Optional nuclei flags, e.g. '-t cves -s high'",
     )
@@ -35,6 +39,8 @@ def run(args) -> int:
     dbg(f"Creating tmp file: {tmp}")
 
     cmd = ["nuclei", "--silent", "-ni", "-o", tmp, "-u", target]
+    if args.tags.strip():
+        cmd += ["-tags", args.tags.strip()]
     for header in args.header:
         cmd += ["-H", header]
     cmd += process.split_opt_args(opt_args)

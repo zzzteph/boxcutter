@@ -1,2 +1,6 @@
-# boxcutter's only dependency.
+# boxcutter's core dependency.
 requests>=2.28
+
+# full-image only: the browser tools (browser-crawl/login/actions) drive chromium over CDP. Pure-Python,
+# installs on musl. The slim image omits it - the browser tools degrade gracefully when it's absent.
+websocket-client>=1.6

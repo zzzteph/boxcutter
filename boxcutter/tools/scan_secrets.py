@@ -81,6 +81,9 @@ _COMPILED = [(name, re.compile(pat, re.M)) for name, pat in PATTERNS]
 
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="Target URL")
+    parser.add_argument("-H", "--header", dest="header", action="append", default=[],
+                        metavar="NAME: VALUE", help="Request header (repeatable) - e.g. an auth cookie so an "
+                                                    "asset behind a login wall is scanned, not the login page")
     add_common_args(parser)
 
 
@@ -113,9 +116,15 @@ def run(args) -> int:
         output_result([], args.output, "Invalid URL.")
         return 1
 
+    headers: dict[str, str] = {}
+    for raw in args.header or []:
+        name, sep, value = raw.partition(":")
+        if sep:
+            headers[name.strip()] = value.strip()
+
     try:
         response = http.with_retries(
-            lambda: http.get(target, timeout=30, verify=True), retries=3, sleep_ms=200
+            lambda: http.get(target, timeout=30, verify=True, headers=headers or None), retries=3, sleep_ms=200
         )
     except Exception as exc:
         output_result([], args.output, str(exc))

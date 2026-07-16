@@ -6,7 +6,21 @@ can resolve a tool by its NAME without importing each other.
 
 from __future__ import annotations
 
+# Agentic (LLM-driven) commands live in their own package to keep them separate from the deterministic tools.
+from ..ai import (
+    bob,
+    crawlio,
+    irvin,
+    juicy,
+    logio,
+    prawlio,
+    travis,
+)
 from . import (
+    browser_actions,
+    browser_crawl,
+    browser_login,
+    visual_driver,
     dirb,
     dirsearch,
     dnsx,
@@ -19,6 +33,7 @@ from . import (
     js_endpoints,
     katana_crawl,
     nuclei,
+    path_bust,
     path_fuzz,
     scan_secrets,
     screenshot,
@@ -48,6 +63,10 @@ TOOLS = [
     katana_crawl,
     zap_crawl,
     js_endpoints,
+    browser_crawl,
+    browser_login,
+    browser_actions,
+    visual_driver,
     # Vuln scanners
     nuclei,
     sqlmap,
@@ -58,6 +77,7 @@ TOOLS = [
     zap_scan_openapi,
     # Fuzzing
     path_fuzz,
+    path_bust,
     fuzz,
     # Secrets / source
     scan_secrets,
@@ -73,4 +93,25 @@ TOOLS = [
     http_request,
 ]
 
-BY_NAME = {module.NAME: module for module in TOOLS}
+# Agentic (LLM-driven) commands - grouped under `boxcutter ai <name>`. They need a provider/API key and make
+# many LLM calls, so they are their own category. Each is ALSO callable bare (`boxcutter logio`) when no tool
+# shares the name; on a name clash a TOOL wins the bare form and `boxcutter ai <name>` forces the agent.
+AI = [
+    # The full autonomous pipeline (suggester council -> concluder -> planner -> executors -> reporter).
+    irvin,
+    # Standalone agentic login tool (auth-only agent; completely separate from IRVIN).
+    logio,
+    # Authenticated crawl: logio logs in, then a visual agent crawls the app for its post-login requests.
+    prawlio,
+    # Single-agent crawler: comprehensive, VERIFIED endpoint list (strict about false/ghost paths), path-scoped.
+    crawlio,
+    # Single-agent JS analyst: download a JS file, extract every hidden URL, and find DOM XSS with examples.
+    juicy,
+    # Short surface scanner: cheap single-pass recon + scanners + light logic checks; exposure-focused report.
+    bob,
+    # Recon triage scout: probes ONE host lightly and rates how interesting it is for a deeper scan (for bob).
+    travis,
+]
+
+# Every command resolvable by NAME (tools + ai) - toolschema and the workflow runner look themselves up here.
+BY_NAME = {module.NAME: module for module in TOOLS + AI}

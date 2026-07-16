@@ -1,7 +1,6 @@
 """Injection payloads for the ``fuzz`` tool.
 
-Ported from jet-pentest's ``assets/payloads.json`` detection model, extended with
-boxcutter's broader SSTI / SQLi-timing / XXE coverage. Every entry is a dict::
+Broad coverage across SSTI / SQLi-timing / XXE and the other injection classes. Every entry is a dict::
 
     {"class": <lower-case class>, "payload": <template>, "pattern": <regex|None>}
 
@@ -23,7 +22,7 @@ from __future__ import annotations
 
 import re
 
-# -- shared response fingerprints (DRY: jet's JSON repeated these inline) -----
+# -- shared response fingerprints  -----
 
 # Error-based SQLi fingerprint across MySQL/Postgres/MSSQL/Oracle/SQLite/DB2/...
 SQL_ERROR = (

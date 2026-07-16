@@ -59,8 +59,9 @@ def add_opt_args(parser: argparse.ArgumentParser) -> None:
 
 
 def add_header_arg(parser: argparse.ArgumentParser) -> None:
-    """Add the repeatable ``--header "Name: Value"`` request-header option."""
+    """Add the repeatable ``-H`` / ``--header "Name: Value"`` request-header option."""
     parser.add_argument(
+        "-H",
         "--header",
         action="append",
         default=[],

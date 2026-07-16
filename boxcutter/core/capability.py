@@ -28,6 +28,9 @@ REQUIREMENTS: dict[str, str] = {
     "zap-scan-url": "zap.sh",
     "zap-scan-full": "zap.sh",
     "zap-scan-openapi": "zap.sh",
+    "browser-crawl": "chromium-browser",
+    "browser-login": "chromium-browser",
+    "browser-actions": "chromium-browser",
 }
 
 
@@ -39,6 +42,9 @@ def requirement_for(name: str) -> str | None:
 def available(requirement: str | None) -> bool:
     if not requirement:
         return True
+    if requirement.startswith("py:"):          # a Python module (e.g. py:playwright)
+        import importlib.util
+        return importlib.util.find_spec(requirement[3:]) is not None
     if os.path.isabs(requirement):
         return os.path.exists(requirement)
     return shutil.which(requirement) is not None
