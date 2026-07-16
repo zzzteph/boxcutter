@@ -176,12 +176,12 @@ def add_ai_provider_args(parser) -> None:
                         help="LLM endpoint / gateway URL (e.g. a LiteLLM or OpenAI-compatible proxy)")
 
 
-def add_agent_args(parser, *, max_steps: int, budget: int, context: bool = True) -> None:
+def add_agent_args(parser, *, max_steps: int, context: bool = True) -> None:
     """The UNIFIED argument surface every standalone `ai` agent shares, so the CLI is consistent across agents:
-    a free-text --context briefing, the LLM provider flags (add_ai_provider_args), the loop caps
-    (--max-steps / --budget), an optional --report file, request --header(s), and the common output flags
-    (--output/--jsonl/--debug/--table). Per-agent numeric DEFAULTS are passed in; the flag DEFINITIONS stay
-    identical everywhere. Call it AFTER the agent's positional target and its own agent-specific flags."""
+    a free-text --context briefing, the LLM provider flags (add_ai_provider_args), the step cap (--max-steps),
+    an optional --report file, request --header(s), and the common output flags (--output/--jsonl/--debug/
+    --table). The per-agent --max-steps DEFAULT is passed in; the flag DEFINITIONS stay identical everywhere.
+    Call it AFTER the agent's positional target and its own agent-specific flags."""
     from ..core.args import add_common_args, add_header_arg
     if context:
         parser.add_argument("--context", default="", metavar="TEXT",
@@ -189,8 +189,6 @@ def add_agent_args(parser, *, max_steps: int, budget: int, context: bool = True)
     add_ai_provider_args(parser)
     parser.add_argument("--max-steps", dest="max_steps", type=int, default=max_steps,
                         help="Hard cap on agent steps (the agent usually stops earlier when it is done)")
-    parser.add_argument("--budget", type=int, default=budget,
-                        help="Wall-clock budget in seconds; past it the agent is asked to finalize now")
     parser.add_argument("--report", default=None, metavar="FILE",
                         help="Also write the human-readable markdown report to FILE")
     add_header_arg(parser)

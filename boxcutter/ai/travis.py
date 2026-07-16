@@ -30,7 +30,6 @@ import io
 import json
 import os
 import sys
-import time
 from urllib.parse import urlparse
 
 from ..core import agentlog
@@ -91,12 +90,18 @@ _SYSTEM = (
     "METHOD (light - a few requests):\n"
     "1. READ the host - http-request the root to understand WHAT it is (status, title, tech, the shape of the "
     "page). Fall back to httpx for a quick liveness/tech check only if the fetch is inconclusive.\n"
-    "2. If it's promising or ambiguous, go deeper (still lightly): SCREENSHOT the root to see it; on an "
-    "API-looking host, swagger-specs / graphql-detect to CONFIRM an API surface; on an APP that looks like it "
-    "has functionality (a dashboard/portal/console/tool), use VISUAL-DRIVER to click through it and find out "
-    "what it exposes - is there an admin action, a debug page, a data table, a test feature that should not be "
-    "public? js-endpoints / dnsx / wayback only if you still can't classify it.\n"
-    "3. RANK the host from what you CONFIRMED, and write the verdict for a human.\n\n"
+    "2. On a LIVE host, spend a FEW MORE quick one-shot checks (fast - NOT a crawl) to see what it actually "
+    "exposes; a first impression off the home page is not enough:\n"
+    "   - swagger-specs AND graphql-detect - probe for an exposed OpenAPI/Swagger UI or a GraphQL endpoint "
+    "(an exposed spec is itself a prime 'should-not-be-public' find);\n"
+    "   - js-endpoints on the main <script src> bundle - what backend API does the app call;\n"
+    "   - SCREENSHOT a login/dashboard/app to SEE it.\n"
+    "   Reach for VISUAL-DRIVER (the slow interactive tool) ONLY when a promising host is still unclear after "
+    "the simple checks - e.g. to click past a login. dnsx for a dangling-CNAME takeover; wayback only if still "
+    "unclassifiable. Do NOT probe exposure paths (/.git, /.env, /actuator, /metrics, ...) or brute-force paths "
+    "- that is bob's SCAN, not travis's triage.\n"
+    "3. RANK from what you CONFIRMED (never a first glance or the name). Stay FAST: a handful of cheap calls, "
+    "then finalize.\n\n"
 
     "RATE FROM CONFIRMED CONTENT, NOT THE NAME. The hostname (api.*, admin.*, ...) only tells you where to LOOK "
     "- it is NEVER the rating. The rating comes from what the CONTENT actually showed: a page you saw, a spec/"
@@ -123,8 +128,10 @@ _SYSTEM = (
     "bare error/default page, or an unrendered SPA shell / microfrontend placeholder with nothing behind it.\n"
     "  - SKIP: not live - NXDOMAIN, connection refused, TLS handshake failure, connection reset, timeout.\n\n"
 
-    "BE LIGHT: a FEW requests, don't crawl, don't brute-force, don't repeat a call. When you understand the "
-    "host, STOP calling tools and write the verdict.\n\n"
+    "FAST BUT NOT LAZY: don't crawl, don't brute-force, don't fuzz, don't repeat a call - but DO fire the few "
+    "quick checks above on a live host before finalizing (a handful of extra one-shot calls is cheap and makes "
+    "the triage worth reading). Don't stop at 'it's a login portal' - do the simple checks first. A clearly "
+    "boring host (marketing/redirect/parked/404/dead) needs none of this - classify it and move on.\n\n"
 
     "FINISH: reply with NO tool call and ONE fenced ```json block (nothing else), EXACTLY these fields - TRAVIS "
     "renders the report from it, so you supply the CONTENT, not the layout:\n"
@@ -223,14 +230,14 @@ def _triage(provider, target_url: str, host: str, headers: list, tools_spec: lis
 
     cache: dict = {}
     count: dict = {}
+    used: set = set()                                # tool names actually run (drives the depth-nudge below)
     shots = 0                                        # screenshots taken so far (budget = args.max_screenshots)
     final_text = ""
     nudged = False
+    depth_nudged = False
     step = 0
-    deadline = time.time() + max(30, args.budget)
 
     for step in range(max(1, args.max_steps)):
-        overtime = time.time() > deadline
         try:
             resp = provider.send(_SYSTEM, messages, tools_spec)
         except Exception as exc:  # noqa: BLE001
@@ -243,6 +250,16 @@ def _triage(provider, target_url: str, host: str, headers: list, tools_spec: lis
             debug_print("travis> " + (" ".join(text.split()) if args.debug else " ".join(text.split())[:220]))
         if not calls:
             if final_text.strip() and any(m in final_text for m in ("```json", '"interest"', '"looks_like"')):
+                interest = str((extract_json(final_text) or {}).get("interest") or "").lower()
+                checks = {"swagger-specs", "graphql-detect", "js-endpoints"}
+                if interest in ("high", "medium") and not (used & checks) and not depth_nudged:
+                    depth_nudged = True             # a promising host judged off the home page - do the quick checks
+                    messages.append({"role": "user", "content":
+                        f"You rated this {interest.title()} but only looked at the landing page. Do the quick "
+                        "checks first: swagger-specs and graphql-detect (an exposed spec is itself a finding), "
+                        "and js-endpoints on its main <script src> to see the backend API. Then re-emit the "
+                        "verdict."})
+                    continue
                 break
             if not nudged:
                 nudged = True
@@ -250,16 +267,13 @@ def _triage(provider, target_url: str, host: str, headers: list, tools_spec: lis
                                  "then emit the verdict json. Do not answer without reading it."})
                 continue
             break
-        if overtime:
-            messages.append({"role": "user", "content": "Budget reached. Stop probing and emit the FINAL "
-                             "verdict json now, from what you already learned."})
-            continue
         results = []
         for c in calls:
             if c["name"] not in _TOOLS:
                 results.append({"id": c["id"], "output": json.dumps({"error": f"{c['name']} is not a travis tool"})})
                 continue
             argv = toolschema.to_argv(c["name"], c["args"])
+            used.add(c["name"])
             keyt = tuple(argv)
             count[keyt] = count.get(keyt, 0) + 1
             new_shot = c["name"] == "screenshot" and keyt not in cache      # a NEW capture (the costly one)
@@ -313,7 +327,7 @@ def add_arguments(parser) -> None:
     parser.add_argument("--max-screenshots", dest="max_screenshots", type=int, default=10,
                         help="Cap on how many screenshots travis may take (visual = the costly vision calls); "
                              "past the cap it falls back to http-request. 0 disables screenshots entirely")
-    add_agent_args(parser, max_steps=30, budget=600)
+    add_agent_args(parser, max_steps=30)
 
 
 def run(args) -> int:

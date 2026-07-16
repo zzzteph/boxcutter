@@ -13,7 +13,7 @@ Guarantees enforced in code (not just the prompt):
   - DEDUP: endpoints are collapsed to (method, path-family) in code - /user/1 and /user/2 are one.
   - TRUSTED-ONLY FALLBACK: if the agent never finalizes, we emit only URLs from tools that OBSERVE real
     behaviour or SELF-VERIFY (path-bust gates its own output) - never an unverified brute-force list.
-  - BOUNDED: a wall-clock budget + step cap + a per-run call cache (identical calls never re-run).
+  - BOUNDED: a step cap + a per-run call cache (identical calls never re-run).
 
   boxcutter crawlio https://example.com/app --provider litellm --model "openai/gpt-5.1" --api-key ... --base-url ...
   boxcutter crawlio https://example.com --context "auth: send Cookie: session=abc; /billing is out of scope"
@@ -31,7 +31,6 @@ import random
 import re
 import string
 import sys
-import time
 from urllib.parse import parse_qsl, urlparse
 
 from ..core import agentlog
@@ -242,9 +241,9 @@ def _cap(raw: str, max_items: int = 60, max_chars: int = 9000) -> str:
 
 
 def _bound_timeout(argv: list, slot: int) -> list:
-    """path-bust runs as one BLOCKING call, so cap its --timeout to crawlio's REMAINING budget (slot seconds) -
-    a --full sweep otherwise runs to path-bust's own 1200s default and overruns the crawl. Honours a smaller
-    --timeout the agent set, but never lets it exceed the slot."""
+    """path-bust runs as one BLOCKING call, so cap its --timeout to `slot` seconds - a --full sweep otherwise
+    runs to path-bust's own 1200s default and can overrun the crawl. Honours a smaller --timeout the agent set,
+    but never lets it exceed the slot."""
     out, i, seen = [], 0, False
     while i < len(argv):
         if argv[i] == "--timeout" and i + 1 < len(argv):
@@ -361,7 +360,7 @@ def _ghost_gate(items: list, base_url: str, headers: list, cap: int = 120) -> tu
 
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="Target URL or host (the app root)")
-    add_agent_args(parser, max_steps=40, budget=1800)
+    add_agent_args(parser, max_steps=40)
 
 
 def _target_url(argv: list) -> str:
@@ -415,13 +414,9 @@ def run(args) -> int:
     cache, count = {}, {}
     final_json = ""
     nudged = False
-    deadline = time.time() + max(30, args.budget)
     dbg = debug_logger(args.debug)          # verbose tier: the WHY + per-call outcomes, only under --debug
 
     for _ in range(max(1, args.max_steps)):
-        if time.time() > deadline:
-            debug_print("crawlio :: wall-clock budget reached - finalizing with what's mapped")
-            break
         try:
             resp = provider.send(_SYSTEM, messages, tools_spec)
         except Exception as exc:  # noqa: BLE001
@@ -475,9 +470,8 @@ def run(args) -> int:
                     dbg(f"    (cache hit) {c['name']}: reusing the earlier result for this exact call")
                 else:
                     run_argv = argv
-                    if c["name"] == "path-bust":       # blocking call -> keep it inside the remaining budget
-                        slot = max(30, int(deadline - time.time()) - 20)
-                        run_argv = _bound_timeout(argv, slot)
+                    if c["name"] == "path-bust":       # blocking call -> cap it with a fixed per-call timeout
+                        run_argv = _bound_timeout(argv, 300)
                     # forward --debug so the sub-tool streams its OWN diagnostics to stderr (browser-crawl's
                     # 'N api calls, landed on <url>', visual-driver's 'N ok / M failed, K flow(s)' - the detail
                     # that shows whether it rendered/drove the app or got blocked). Dispatched argv only; the
