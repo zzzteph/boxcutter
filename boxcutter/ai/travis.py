@@ -92,8 +92,8 @@ _SYSTEM = (
     "page). Fall back to httpx for a quick liveness/tech check only if the fetch is inconclusive.\n"
     "2. On a LIVE host, spend a FEW MORE quick one-shot checks (fast - NOT a crawl) to see what it actually "
     "exposes; a first impression off the home page is not enough:\n"
-    "   - swagger-specs AND graphql-detect - probe for an exposed OpenAPI/Swagger UI or a GraphQL endpoint "
-    "(an exposed spec is itself a prime 'should-not-be-public' find);\n"
+    "   - swagger-specs AND graphql-detect - map the API surface (note an exposed spec/GraphQL as attack "
+    "surface, but a public Swagger is common and is NOT by itself a High - rate by what the API exposes);\n"
     "   - js-endpoints on the main <script src> bundle - what backend API does the app call;\n"
     "   - SCREENSHOT a login/dashboard/app to SEE it.\n"
     "   Reach for VISUAL-DRIVER (the slow interactive tool) ONLY when a promising host is still unclear after "
@@ -114,16 +114,17 @@ _SYSTEM = (
     "it wants auth / has no root route / is erroring' - it confirms the host EXISTS and NOTHING about an exposed "
     "surface. NEVER write a `why` that upgrades a status code into a finding ('confirming API surface', 'REST "
     "service', 'WebSocket gateway', 'payments endpoint') - that is inventing an opportunity out of nothing.\n"
-    "  - HIGH (you must have SEEN something concrete, never a mere status code): an admin/dashboard/console or a "
-    "login/SSO/IdP UI you rendered; an interactive Swagger/OpenAPI UI, or a spec that LOADED, or a GraphQL "
-    "endpoint that answered introspection; an endpoint returning REAL data with NO auth; a directory listing / "
-    "exposed config / actuator / metrics / debug / stacktrace page; interactive debug/admin/test functionality "
-    "you reached by clicking through; or a dangling-CNAME takeover candidate. These are the 'should NOT be "
-    "public' surfaces - the whole point of travis. No such confirmation -> NOT High, however important the name "
-    "sounds.\n"
-    "  - MEDIUM: a live host worth bob's tools that you could NOT see into yourself - an auth-gated API (401/"
-    "403), a login you saw but couldn't pass, a staging/dev environment, an API-docs portal whose spec you "
-    "couldn't reach. bob has auth/fuzz/path-bust you don't; say 'unconfirmed / auth-gated' in `why`.\n"
+    "  - HIGH: a rendered admin / operations / management / console / dashboard PANEL (e.g. a 'create "
+    "restaurant / manage orders / courier ops' UI) - a publicly reachable admin panel IS the finding; do NOT "
+    "downgrade it because you couldn't confirm each action works without auth. Also High: a login/SSO/IdP "
+    "portal you rendered; an endpoint returning REAL data with NO auth; a directory listing / exposed config / "
+    "secret / actuator-env / debug / stacktrace page; interactive debug/test functionality you reached by "
+    "clicking; or a dangling-CNAME takeover candidate. (An exposed Swagger/OpenAPI UI or a reachable GraphQL "
+    "endpoint is attack SURFACE worth noting, but is NOT by itself a High.)\n"
+    "  - MEDIUM - the DEFAULT for anything live and non-trivial you can't confirm is High: a generic login/app "
+    "you can't see behind and can't tell is privileged; an auth-gated API (401/403); an exposed Swagger/OpenAPI "
+    "UI or GraphQL endpoint; a staging/dev/internal host; a real app (not just marketing). If it's live and "
+    "non-trivial but not a clear High, it's Medium.\n"
     "  - LOW: marketing/landing, a redirect to the main site, CDN-only, a static asset host, a parked page, a "
     "bare error/default page, or an unrendered SPA shell / microfrontend placeholder with nothing behind it.\n"
     "  - SKIP: not live - NXDOMAIN, connection refused, TLS handshake failure, connection reset, timeout.\n\n"
@@ -256,8 +257,8 @@ def _triage(provider, target_url: str, host: str, headers: list, tools_spec: lis
                     depth_nudged = True             # a promising host judged off the home page - do the quick checks
                     messages.append({"role": "user", "content":
                         f"You rated this {interest.title()} but only looked at the landing page. Do the quick "
-                        "checks first: swagger-specs and graphql-detect (an exposed spec is itself a finding), "
-                        "and js-endpoints on its main <script src> to see the backend API. Then re-emit the "
+                        "checks first: swagger-specs and graphql-detect (to map the API surface), and "
+                        "js-endpoints on its main <script src> to see the backend API. Then re-emit the "
                         "verdict."})
                     continue
                 break
@@ -303,22 +304,23 @@ def _triage(provider, target_url: str, host: str, headers: list, tools_spec: lis
 
 
 def _render_report(host: str, row: dict) -> str:
-    """Concise single-host verdict report - same shape every run."""
-    out = [f"## Travis - recon triage: {host}", "",
-           f"**Interest: {row.get('interest', 'Low')}** - {row.get('looks_like') or '(unclassified)'}", "",
-           str(row.get("assessment") or "(no assessment provided)").strip()]
-    concerns = row.get("concerns") or []
-    if concerns:
-        out += ["", "**Should-not-be-public / concerns:**"] + [f"- {c}" for c in concerns]
-    meta = []
+    """Single-host verdict report - ONE labeled field per line so it reads cleanly AND parses cleanly (grep
+    `^Interest:` / split on the first `: `). Same field order every run; the fully-structured record for
+    programmatic use is the JSON `data[0]` in the envelope."""
+    out = [f"## Travis :: {host}", "",
+           f"Interest:  {row.get('interest', 'Low')}",
+           f"Type:      {row.get('looks_like') or '(unclassified)'}"]
     if row.get("status") not in (None, ""):
-        meta.append(f"**Status:** {row['status']}")
+        out.append(f"Status:    {row['status']}")
     if row.get("tech"):
-        meta.append(f"**Tech:** {row['tech']}")
-    if meta:
-        out += ["", "  |  ".join(meta)]
+        out.append(f"Tech:      {row['tech']}")
+    if row.get("url"):
+        out.append(f"URL:       {row['url']}")
     if row.get("recommend"):
-        out += ["", f"**Recommend:** {str(row['recommend']).strip()}"]
+        out.append(f"Recommend: {str(row['recommend']).strip()}")
+    out += ["", "Assessment:", str(row.get("assessment") or "(none)").strip()]
+    concerns = row.get("concerns") or []
+    out += ["", "Concerns:"] + ([f"- {c}" for c in concerns] if concerns else ["- none"])
     return "\n".join(out)
 
 

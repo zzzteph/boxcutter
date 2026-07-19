@@ -9,3 +9,6 @@ venv
 .vscode
 *.md
 !README.md
+opt/
+trace/
+ph.txt
