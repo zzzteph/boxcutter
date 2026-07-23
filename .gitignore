@@ -19,6 +19,9 @@ runs/
 runs2/
 *.log
 
+# caleb coverage working area (harness, ground-truth keys, handoff docs, run artifacts) - kept on disk, not tracked
+opt/
+
 # Test target runtime DB + request logs + uploads + generated fixtures
 test/store.db
 test/logs/

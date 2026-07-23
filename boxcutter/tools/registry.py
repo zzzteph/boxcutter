@@ -9,6 +9,7 @@ from __future__ import annotations
 # Agentic (LLM-driven) commands live in their own package to keep them separate from the deterministic tools.
 from ..ai import (
     bob,
+    caleb,
     crawlio,
     irvin,
     juicy,
@@ -111,6 +112,8 @@ AI = [
     bob,
     # Recon triage scout: probes ONE host lightly and rates how interesting it is for a deeper scan (for bob).
     travis,
+    # Multi-phase / multi-identity orchestrator: authed deep scan, reauth, two-account BFLA, multi-step chains.
+    caleb,
 ]
 
 # Every command resolvable by NAME (tools + ai) - toolschema and the workflow runner look themselves up here.

@@ -12,7 +12,7 @@ from ..core.validators import is_valid_url
 
 NAME = "http-request"
 KIND = "items"
-HELP = "Make an HTTP request to a target URL (POST if --data/-D given, else GET)."
+HELP = "Make an HTTP request to a target URL (POST if --data/-D given, else GET; -X sets any method)."
 
 _TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
 
@@ -23,6 +23,9 @@ def add_arguments(parser) -> None:
                         help="POST body data (omit for GET)")
     parser.add_argument("-H", "--header", dest="header", action="append", default=[],
                         metavar="NAME: VALUE", help='Request header (repeatable)')
+    parser.add_argument("-X", "--method", dest="method", default=None,
+                        help="HTTP method (GET/POST/PUT/PATCH/DELETE/OPTIONS/...); "
+                             "default: POST if -D given, else GET. A body (-D) may accompany any method.")
     add_common_args(parser)
 
 
@@ -39,7 +42,7 @@ def run(args) -> int:
         if len(parts) == 2:
             headers[parts[0].strip()] = parts[1].strip()
 
-    method = "POST" if args.data is not None else "GET"
+    method = (args.method or ("POST" if args.data is not None else "GET")).upper()
 
     try:
         response = http.with_retries(
