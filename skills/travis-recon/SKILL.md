@@ -12,7 +12,13 @@ by confirmed content, capture the visual evidence). **Pure recon** — never tes
 wordlist, never send anything but GET/OPTIONS. Stay on the target's own domain.
 
 ## Setup (do this first)
-- Ensure the image exists: `DOCKER="${DOCKER:-sudo docker}"; $DOCKER images boxcutter` — build if missing (`$DOCKER build -t boxcutter .` from the boxcutter repo root). **This repo's env needs `sudo docker`; elsewhere plain `docker` may work** — set `DOCKER` once and reuse it in every command below.
+- Pull the published image (no local build needed); it runs on docker or podman:
+  ```
+  IMG="${BOXCUTTER_IMAGE:-ghcr.io/zzzteph/boxcutter:latest}"
+  BOX="${BOX:-docker}"          # or BOX=podman; for a root-only docker use BOX='sudo docker'
+  $BOX pull "$IMG"
+  ```
+  Set `BOX` and `IMG` once and reuse them in every command below (`$BOX run --rm "$IMG" …`).
 - Work in a scratch dir so files land somewhere known: `mkdir -p /tmp/travis-recon/<domain> && cd /tmp/travis-recon/<domain>`. (For a batch, use a stable per-domain dir like `/home/steph/rijks/<domain>/`.)
 - Every tool prints a JSON envelope `{"success":..., "data":[...], ...}` to stdout. Parse `data`.
 
@@ -24,7 +30,7 @@ subfinder + wayback + dnsx brute/resolve + wildcard-filter + parallel HTTP alive
 Bash timeout.** Run it with a long timeout, or backgrounded + poll:
 ```
 # option A: long timeout (Bash tool: set timeout to ~540000 ms)
-$DOCKER run --rm boxcutter ai travis <DOMAIN> --discover --triage-top 0 --mut-cap 2000 > seed.json 2>seed.log
+$BOX run --rm "$IMG" ai travis <DOMAIN> --discover --triage-top 0 --mut-cap 2000 > seed.json 2>seed.log
 # option B: background + poll seed.json for a `"success"` envelope
 ```
 `seed.json` `.data[]` = live hosts, each `{host, url, status, title, server, interest, class, why}` (the seed already
@@ -59,10 +65,10 @@ VERIFY each candidate resolves before trusting it:
 
 ```
 # ONE candidate:
-$DOCKER run --rm boxcutter dnsx <candidate.DOMAIN>            # .data non-empty -> it resolves
+$BOX run --rm "$IMG" dnsx <candidate.DOMAIN>            # .data non-empty -> it resolves
 # MANY candidates - dnsx --list reads a file that must be INSIDE the container, so MOUNT it with -v:
 printf '%s\n' cand1.DOMAIN cand2.DOMAIN cand3.DOMAIN > cands.txt
-$DOCKER run --rm -v "$PWD/cands.txt:/c.txt" boxcutter dnsx --list /c.txt   # .data = the ones that resolved
+$BOX run --rm -v "$PWD/cands.txt:/c.txt" "$IMG" dnsx --list /c.txt   # .data = the ones that resolved
 ```
 
 A candidate that resolves AND answers HTTP (Step 4) is a find the passive tools missed — call it out.
@@ -70,7 +76,7 @@ A candidate that resolves AND answers HTTP (Step 4) is a find the passive tools 
 ## Step 4 — PROBE the promising, ambiguous ones (judge from content, not the name)
 Your PRIMARY probe is `http-request` (text — enough to classify most hosts):
 ```
-$DOCKER run --rm boxcutter http-request https://<host>/               # status, title, server, body
+$BOX run --rm "$IMG" http-request https://<host>/               # status, title, server, body
 ```
 Probe the interesting few, not all 500 — `http-request` is enough to *classify* most hosts. (Screenshots come in
 Step 6, where they are mandatory for the ones you rank Critical/High.)
@@ -114,16 +120,16 @@ Robust method — drive chromium headless straight to a file (the built-in `scre
 internally, which is too tight for a cold chromium start on a constrained host):
 ```
 mkdir -p shots
-$DOCKER run --rm -v "$PWD/shots:/shots" --entrypoint chromium boxcutter \
+$BOX run --rm -v "$PWD/shots:/shots" --entrypoint chromium "$IMG" \
   --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --hide-scrollbars \
   --window-size=1366,900 --virtual-time-budget=9000 --timeout=25000 \
   --screenshot=/shots/<host>.png https://<host>/
 # then: Read shots/<host>.png     (harmless Vulkan/GL "errors" in the log still produce a valid PNG)
 ```
-Fallback (base64 via the boxcutter tool, fine on a fast host): `$DOCKER run --rm boxcutter screenshot https://<host>/`
+Fallback (base64 via the boxcutter tool, fine on a fast host): `$BOX run --rm "$IMG" screenshot https://<host>/`
 returns a base64 PNG in `.data[0].image` — decode it to a file, then Read it:
 ```
-$DOCKER run --rm boxcutter screenshot https://<host>/ \
+$BOX run --rm "$IMG" screenshot https://<host>/ \
   | python3 -c "import sys,json,base64; d=(json.load(sys.stdin).get('data') or [{}])[0]; open('shots/x.png','wb').write(base64.b64decode(d.get('image') or ''))"
 ```
 
