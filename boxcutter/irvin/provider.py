@@ -106,7 +106,10 @@ class OpenAI:
         return {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
 
     def send(self, system, messages, tools):
-        body = {"model": self.model, "messages": [{"role": "system", "content": system}] + messages,
+        # seed = best-effort reproducibility (cuts run-to-run variance). NOTE: no `temperature` - gpt-5/o-series
+        # reasoning models reject a non-default temperature, so seed is the safe determinism lever for them.
+        body = {"model": self.model, "seed": 1337,
+                "messages": [{"role": "system", "content": system}] + messages,
                 "tools": [{"type": "function", "function": {
                     "name": t["name"], "description": t["description"], "parameters": t["schema"]}} for t in tools]}
         return _post(self.api, json=body, timeout=180, headers=self._headers()).json()

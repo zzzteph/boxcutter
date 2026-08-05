@@ -49,7 +49,7 @@ HELP = "Bob - short surface scanner: an LLM agent that drives the boxcutter tool
 # The ONLY boxcutter sub-commands bob may drive. `_call` refuses anything else, so bob can never invoke a raw
 # binary or an undefined tool (each is a defined boxcutter command; e.g. katana-crawl itself wraps the katana
 # binary - the `Command: katana ...` you see under --debug is that wrapper's own output).
-_TOOLS = ["http-request", "katana-crawl", "path-bust", "nuclei", "js-endpoints", "fuzz", "sqlmap",
+_TOOLS = ["http-request", "katana-crawl", "path-bust", "api-map", "nuclei", "js-endpoints", "fuzz", "sqlmap",
           "swagger-specs", "swagger-endpoints", "graphql-detect", "graphql-audit", "scan-secrets"]
 
 _SYSTEM = (
@@ -75,6 +75,14 @@ _SYSTEM = (
     "probe a path, and CONFIRM a finding by reading the actual response body.\n"
     "  - katana-crawl <url> [--js] - crawl the linked surface + JS bundles.\n"
     "  - path-bust <base> [--codes 200,401,403] - brute unlinked paths (it self-gates soft-404s).\n"
+    "  - api-map <base> [--paths ...] - METHOD-aware discovery: probes paths x {GET,POST,PUT,PATCH,DELETE,OPTIONS} "
+    "and reports which paths answer which verbs. Finds the POST/PUT/PATCH/DELETE-only routes a GET crawl misses, and "
+    "HIDDEN verbs on a known path (a route the UI only GETs may also accept PATCH/DELETE = state-changing BOLA). "
+    "Feed it the paths you already found via --paths; run it WITH auth. Non-destructive (empty-body probes, never a "
+    "real DELETE). ENUMERATE CLEVERLY: the moment you spot ONE real route, brute your wordlist UNDER its OBSERVED "
+    "prefix (saw `/svc/8a/api/v2/orders` -> try `/svc/8a/api/v2/<word>`, not a bare `/api/`), pivot the version "
+    "(`/v2/`->`/v1/`,`/v3/`), and derive `/{id}`, singular/plural and sub-resources - blind spraying at `/` is the "
+    "last resort. api-map does this for the paths you feed it.\n"
     "  - js-endpoints <js-url> - pull endpoint references out of a JS bundle.\n"
     "  - scan-secrets <url> - regex-scan a URL's body for known-format secrets (AWS/Stripe/GitHub/Slack/...).\n"
     "  - nuclei <url> --tags exposure,misconfig - template scan for exposures/misconfig (pass --tags to focus).\n"
@@ -164,7 +172,12 @@ _SYSTEM = (
     "   (ii) ONE FUZZ CALL PER DISTINCT PARAM-URL. Each PARAMETER is a separate injection surface - a call for "
     "/search?q does NOT cover /product?id, and a call for /a?x=&y= only covers x AND y in one url. Do NOT skip "
     "params to save steps - fuzz is a cheap tool call and injection findings are the highest-value ones you can "
-    "report. A real app has 20-40 distinct param endpoints - keep going until every one is fuzzed. If the app "
+    "report. A real app has 20-40 distinct param endpoints - keep going until every one is fuzzed. On a "
+    "BENCHMARK / multi-endpoint API (a numbered `/api/.../N` family, a challenge board, a catalogue/index endpoint "
+    "that LISTS the rest) a DIFFERENT vuln class is planted on EACH endpoint - fetch the index/list endpoint FIRST "
+    "to enumerate the whole set, then drive EVERY endpoint through the matching check (SQLi incl. BLIND via sqlmap, "
+    "XXE, SSTI, LFI, cmd-injection, IDOR, mass-assignment, JWT alg:none); the finding you are missing is on the "
+    "endpoint you never tested. If the app "
     "exposes GraphQL, run the GRAPHQL DEEP-DIVE play (graphql-audit PLUS schema-guided arg walking) - for a "
     "GraphQL-first app that IS the attack surface, not a footnote.\n"
     "7. REPORT.\n\n"
@@ -386,6 +399,12 @@ _SYSTEM = (
     "application/xml`). ACTION - fuzz it with an XML body carrying an external entity, e.g. `fuzz <url> --data` "
     "an XML doc whose DOCTYPE reads `file:///etc/passwd`. CONFIRM - the file content (`root:x:0:0`) returns = "
     "XXE.\n"
+    "  - PROTOTYPE POLLUTION / INSECURE DESERIALIZATION: TRIGGER - a JSON import / settings / preferences / merge / "
+    "workflow endpoint. ACTION - POST `{\"__proto__\":{\"polluted\":\"y\",\"isAdmin\":true}}` (or a "
+    "`constructor.prototype` variant) then re-read your object / an authz-gated endpoint; and if an import accepts a "
+    "serialized blob, send a benign stack-appropriate gadget (Node `_$$ND_FUNC$$_function(){return 10001}()`, "
+    "Python pickle, PHP `O:`, Java). CONFIRM - your injected key appears where it should NOT / you gained admin "
+    "(prototype pollution), or the benign marker executes (object-injection RCE). Benign markers only.\n"
     "  - SINGLE-REQUEST BUSINESS LOGIC (be SYSTEMATIC - this is HIGH-VALUE and chronically under-tested; once you "
     "have mapped the API, TEST EVERY state-changing operation that trusts a client value, do not just spot one): "
     "TRIGGER - any operation (a REST endpoint OR a GraphQL mutation) that takes a money/quantity/price value or "
@@ -434,6 +453,10 @@ _SYSTEM = (
     "  - IGNORE, never mention: missing security headers, clickjacking, CORS wildcards, cookie flags, TLS/cipher "
     "nits, bare version banners. Noise here.\n"
     "  - REDACT every secret value - report the pattern name + location only, never the live key.\n"
+    "  - ONE finding = ONE specific confirmed vuln on ONE endpoint/param, with the exact URL + payload + the "
+    "observed response that proves it. Do NOT emit vague multi-class summaries ('SQLi/NoSQL/SSTI across N "
+    "endpoints') or hedged/unconfirmed claims ('attempt', 'possible', 'RCE-like', 'no definitive X yet') - a named "
+    "class with no observed proof is worth zero; split real hits into one concrete finding each, or drop them.\n"
     "  - fuzz and graphql-audit self-confirm; report their confirmed injections as findings.\n\n"
 
     "CHAIN-THINKING - YOU BUILD THE CHAINS YOURSELF (this is where you outperform a scanner). There is rarely ONE "
