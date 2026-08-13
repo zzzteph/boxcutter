@@ -39,7 +39,7 @@ from ..core import agentlog
 from ..core.envelope import debug_print, output_result
 from ..irvin import briefing
 from ..irvin.context import extract_json
-from ..irvin.provider import PROVIDERS, add_agent_args
+from ..irvin.provider import PROVIDERS, add_agent_args, make_provider
 from ..tools import toolschema
 
 NAME = "bob"
@@ -3067,7 +3067,8 @@ def run(args) -> int:
         sys.stderr.write(f"bob: an LLM is required - provide --api-key or set {provider_cls.env} "
                          f"for --provider {args.provider}\n")
         return 2
-    provider = provider_cls(args.model or provider_cls.default_model, key, base_url=args.base_url)
+    provider = make_provider(args.provider, args.model, key, base_url=args.base_url,
+                             reasoning=getattr(args, "reasoning", 0))
 
     headers = list(args.header or [])                # sent on every tool call (auth for a login-walled app)
     if args.context.strip():

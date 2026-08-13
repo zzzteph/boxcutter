@@ -73,8 +73,12 @@ boxcutter raw nuclei -u https://example.com -t cves
 LLM-driven agents that drive the same tools on their own. Each needs a provider and API key
 (`--provider` / `--api-key`, or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) and makes many calls.
 List them with `boxcutter ai --list`; run one with `boxcutter ai <agent> <target>` (or bare
-`boxcutter <agent>` when no tool shares the name).
+`boxcutter <agent>` when no tool shares the name). Under docker, pass the key through:
+`docker run --rm -e ANTHROPIC_API_KEY boxcutter irvin example.com`.
 
+- `irvin`: the conductor. Runs travis, then bob, then caleb over a whole domain, verifies and
+  consolidates the findings, and writes a CEO executive summary plus a technical report. It
+  streams every agent's reasoning live and can dump it per agent.
 - `bob`: surface scanner, highlights exposed attack surface.
 - `caleb`: multi-phase, multi-identity orchestrator (authenticated deep scan, reauth, two-account BFLA).
 - `travis`: recon triage, rates how interesting a host is before a deeper scan.
@@ -82,6 +86,26 @@ List them with `boxcutter ai --list`; run one with `boxcutter ai <agent> <target
 - `prawlio`: authenticated crawl (logs in, then crawls under that session).
 - `logio`: auth-only agent that logs in with supplied creds.
 - `juicy`: JS analyst, pulls hidden URLs, DOM XSS, and secrets from a JS file or page.
+
+```bash
+# full engagement from a domain: recon, rank hosts, bob, then caleb, into a verified report
+boxcutter irvin example.com
+
+# scan an explicit list of hosts and skip discovery (or --hosts-file targets.txt, one per line)
+boxcutter irvin --hosts app.example.com,api.example.com --report report.md
+
+# quick pass (bob only, skip caleb's deep pass) and save the CEO + findings report
+boxcutter irvin example.com --quick --report report.md
+
+# authenticated deep scan with two identities for BOLA/BFLA, top 3 ranked hosts only
+boxcutter irvin app.example.com --creds user:pass --creds-b user2:pass2 --max-hosts 3
+
+# dump every agent's reasoning (native thinking + narration) and all artifacts to folders
+boxcutter irvin example.com --reasoning-dir reasoning/ --out-dir run/
+
+# turn native thinking off for a cheaper run, or widen which host tiers get scanned
+boxcutter irvin example.com --reasoning 0 --tiers critical,high,medium
+```
 
 ## Output
 

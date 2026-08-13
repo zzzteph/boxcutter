@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 from ..core import agentlog
 from ..core.envelope import debug_logger, debug_print, harvest_images, output_result, write_report
 from ..irvin import briefing
-from ..irvin.provider import PROVIDERS, add_agent_args
+from ..irvin.provider import PROVIDERS, add_agent_args, make_provider
 from ..tools import toolschema
 
 NAME = "prawlio"
@@ -422,7 +422,8 @@ def run(args) -> int:
     base_url = target if target.startswith(("http://", "https://")) else "https://" + target
     base_host = (urlparse(base_url).hostname or "").lower()
     headers = list(args.header or [])
-    provider = provider_cls(args.model or provider_cls.default_model, key, base_url=args.base_url)
+    provider = make_provider(args.provider, args.model, key, base_url=args.base_url,
+                             reasoning=getattr(args, "reasoning", 0))
 
     # resolve credentials (needed to substitute the login flow's __USER__/__PASS__ tokens when we replay it)
     creds = args.creds
