@@ -60,7 +60,7 @@ from ..core import agentlog
 from ..core.envelope import debug_logger, debug_print, output_result, write_report
 from ..irvin import briefing
 from ..irvin.context import extract_json
-from ..irvin.provider import PROVIDERS, add_agent_args
+from ..irvin.provider import PROVIDERS, add_agent_args, make_provider
 from ..tools import toolschema
 from ..tools.js_endpoints import PATTERNS as _JS_URL_PATTERNS, _should_skip as _skip_path
 from ..tools.scan_secrets import _COMPILED as _SECRET_PATTERNS
@@ -1074,7 +1074,8 @@ def run(args) -> int:
 
     base_host = (urlparse(target).hostname or "").lower()
     headers = list(args.header or [])
-    provider = provider_cls(args.model or provider_cls.default_model, key, base_url=args.base_url)
+    provider = make_provider(args.provider, args.model, key, base_url=args.base_url,
+                             reasoning=getattr(args, "reasoning", 0))
 
     # auth parsed out of --context (a cookie for a login-walled page/bundle). Reuses IRVIN's briefing parser.
     if args.context.strip():

@@ -20,6 +20,7 @@ import time
 from urllib.parse import urlparse
 
 from ..core import http, soft404
+from ..core import repro as repro_mod
 from ..core.args import add_common_args, add_header_arg
 from ..core.envelope import debug_logger, output_result
 
@@ -252,6 +253,7 @@ def run(args) -> int:
             "info": ("live: " + ", ".join(f"{v}({live[v]})" for v in verbs))
                     + (f"; Allow: {allow_s}" if allow_s else "")
                     + ("; WRITE surface - test mass-assignment / BOLA-write / business-logic here" if write else ""),
+            **repro_mod.repro(write[0] if write else (verbs[0] if verbs else "GET"), url),
         })
     findings.sort(key=lambda f: (0 if any(v in _WRITE for v in f["methods"]) else 1, f["url"]))
     dbg(f"api-map: {len(findings)} endpoints "

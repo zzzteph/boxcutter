@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import bob                                   # stable dependency - IMPORT ONLY, never edit
 from ..core.envelope import debug_print, output_result, set_output_kind
-from ..irvin.provider import PROVIDERS, add_agent_args
+from ..irvin.provider import PROVIDERS, add_agent_args, make_provider
 
 NAME = "caleb"
 KIND = "findings"
@@ -2416,7 +2416,8 @@ def _agentic_driver(store: ArtifactStore, sm: SessionManager, args) -> None:
     if not key:
         debug_print("caleb :: no LLM key - skipping agentic driver, running deterministic backstop only")
         return
-    provider = provider_cls(args.model or provider_cls.default_model, key, base_url=args.base_url)
+    provider = make_provider(args.provider, args.model, key, base_url=args.base_url,
+                             reasoning=getattr(args, "reasoning", 0))
     tools_spec = toolschema.native_tools(list(_OBSERVE_TOOLS)) + _custom_tool_defs()
     creds_line = ""
     seed = []

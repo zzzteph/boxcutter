@@ -37,7 +37,7 @@ from ..core import agentlog
 from ..core.envelope import debug_logger, debug_print, harvest_images, output_result, write_report
 from ..irvin import briefing
 from ..irvin.context import extract_json
-from ..irvin.provider import PROVIDERS, add_agent_args
+from ..irvin.provider import PROVIDERS, add_agent_args, make_provider
 from ..tools import toolschema
 
 NAME = "crawlio"
@@ -392,7 +392,8 @@ def run(args) -> int:
     if scope_path in ("", "/"):
         scope_path = ""
     headers = list(args.header or [])
-    provider = provider_cls(args.model or provider_cls.default_model, key, base_url=args.base_url)
+    provider = make_provider(args.provider, args.model, key, base_url=args.base_url,
+                             reasoning=getattr(args, "reasoning", 0))
 
     focus = ""
     if args.context.strip():

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 
 import requests
@@ -41,14 +42,46 @@ def _post(url, *, json, headers, timeout, attempts=4):
     raise RuntimeError("unreachable")
 
 
-class Anthropic:
+class _Provider:
+    """Shared reasoning-capture plumbing every provider inherits, so Travis, Bob, Caleb and the conductor all
+    dump reasoning the SAME way from the ONE place the model actually thinks (send/parse/chat). A provider can
+    be handed a `sink` (a list that collects one record per model turn), a `label` (which agent/phase is
+    thinking right now, for attribution), and `stream=True` (echo the reasoning to stderr live during the run).
+    `reasoning` is the native-thinking token budget (0 = off); when set, each provider enables its model's
+    thinking channel in send()/chat() and parse() keeps the thinking blocks instead of dropping them."""
+
+    def _init_reasoning(self, reasoning=0):
+        self.reasoning = int(reasoning or 0)   # native-thinking token budget; 0 disables it
+        self.sink = None                        # optional list: one {agent,narration,reasoning,calls} per turn
+        self.label = ""                         # current agent/phase tag, set by the caller before its loop
+        self.stream = False                     # echo captured reasoning to stderr as it happens
+
+    def _capture(self, narration, reasoning, calls):
+        """Record one model turn's reasoning + narration, tagged with the current agent label. Returns the
+        record so a caller can also use it. Never raises - reasoning capture must not break a scan."""
+        rec = {"agent": self.label, "model": getattr(self, "model", ""),
+               "reasoning": (reasoning or "").strip(), "narration": (narration or "").strip(),
+               "calls": [c["name"] for c in (calls or []) if isinstance(c, dict) and c.get("name")]}
+        try:
+            if self.sink is not None:
+                self.sink.append(rec)
+            if self.stream and (rec["reasoning"] or rec["narration"]):
+                tag = f"[reason:{self.label}] " if self.label else "[reason] "
+                sys.stderr.write(tag + (rec["reasoning"] or rec["narration"]) + "\n")
+        except Exception:  # noqa: BLE001 - never let logging kill the run
+            pass
+        return rec
+
+
+class Anthropic(_Provider):
     default_model, env = "claude-sonnet-4-6", "ANTHROPIC_API_KEY"
     _default_base, _base_env = "https://api.anthropic.com", "ANTHROPIC_BASE_URL"
 
-    def __init__(self, model, key, base_url=None):
+    def __init__(self, model, key, base_url=None, reasoning=0):
         self.model, self.key = model, key
         base = (base_url or os.environ.get(self._base_env) or self._default_base).rstrip("/")
         self.api = base + "/v1/messages"
+        self._init_reasoning(reasoning)
 
     def _headers(self):
         return {"x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
@@ -56,15 +89,27 @@ class Anthropic:
     def send(self, system, messages, tools):
         body = {"model": self.model, "max_tokens": 8192, "system": system, "messages": messages,
                 "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["schema"]} for t in tools]}
+        if self.reasoning:
+            # Extended thinking needs headroom: max_tokens must exceed the thinking budget. We never set
+            # temperature (thinking forbids a non-default one), and the thinking blocks parse() keeps ride
+            # back in history via assistant_msg (which already returns the full content list, signatures intact).
+            body["max_tokens"] = max(body["max_tokens"], self.reasoning + 4096)
+            body["thinking"] = {"type": "enabled", "budget_tokens": self.reasoning}
         return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
 
     def parse(self, resp):
-        text, calls = "", []
+        text, reasoning, calls = "", "", []
         for b in resp.get("content", []):
-            if b.get("type") == "text":
-                text += b["text"]
-            elif b.get("type") == "tool_use":
+            t = b.get("type")
+            if t == "text":
+                text += b.get("text", "")
+            elif t == "thinking":                       # native chain-of-thought (kept, not dropped)
+                reasoning += b.get("thinking", "")
+            elif t == "redacted_thinking":
+                reasoning += "\n[redacted thinking]\n"
+            elif t == "tool_use":
                 calls.append({"id": b["id"], "name": b["name"], "args": b.get("input") or {}})
+        self._capture(text, reasoning, calls)
         return text, calls
 
     def assistant_msg(self, resp):
@@ -89,18 +134,25 @@ class Anthropic:
         # Anthropic requires max_tokens; None means "use a generous budget" (no artificial cap).
         body = {"model": self.model, "max_tokens": max_tokens or 8192, "system": system,
                 "messages": [{"role": "user", "content": user}]}
-        r = _post(self.api, json=body, timeout=120, headers=self._headers())
-        return "".join(b.get("text", "") for b in r.json().get("content", []) if b.get("type") == "text")
+        if self.reasoning:
+            body["max_tokens"] = max(body["max_tokens"], self.reasoning + 4096)
+            body["thinking"] = {"type": "enabled", "budget_tokens": self.reasoning}
+        content = _post(self.api, json=body, timeout=120, headers=self._headers()).json().get("content", [])
+        text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+        reasoning = "".join(b.get("thinking", "") for b in content if b.get("type") == "thinking")
+        self._capture(text, reasoning, [])
+        return text
 
 
-class OpenAI:
+class OpenAI(_Provider):
     default_model, env = "gpt-4o", "OPENAI_API_KEY"
     _default_base, _base_env = "https://api.openai.com", "OPENAI_BASE_URL"
 
-    def __init__(self, model, key, base_url=None):
+    def __init__(self, model, key, base_url=None, reasoning=0):
         self.model, self.key = model, key
         base = (base_url or os.environ.get(self._base_env) or self._default_base).rstrip("/")
         self.api = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
+        self._init_reasoning(reasoning)
 
     def _headers(self):
         return {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
@@ -112,6 +164,8 @@ class OpenAI:
                 "messages": [{"role": "system", "content": system}] + messages,
                 "tools": [{"type": "function", "function": {
                     "name": t["name"], "description": t["description"], "parameters": t["schema"]}} for t in tools]}
+        if self.reasoning:   # opt-in: needs a reasoning-capable model (o-series / gpt-5); gpt-4o rejects it
+            body["reasoning_effort"] = "high" if self.reasoning >= 8000 else "medium"
         return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
 
     def parse(self, resp):
@@ -123,7 +177,10 @@ class OpenAI:
             except json.JSONDecodeError:
                 args = {}
             calls.append({"id": c["id"], "name": c["function"]["name"], "args": args})
-        return msg.get("content") or "", calls
+        text = msg.get("content") or ""
+        # LiteLLM / vLLM / o-series surface the model's thinking as reasoning_content (or reasoning); keep it.
+        self._capture(text, msg.get("reasoning_content") or msg.get("reasoning") or "", calls)
+        return text, calls
 
     def assistant_msg(self, resp):
         return [resp["choices"][0]["message"]]
@@ -147,10 +204,14 @@ class OpenAI:
         # OpenAI/LiteLLM: max_tokens is optional - omit it so the model uses its full budget (no cap).
         body = {"model": self.model,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        if self.reasoning:
+            body["reasoning_effort"] = "high" if self.reasoning >= 8000 else "medium"
         if max_tokens:
             body["max_tokens"] = max_tokens
-        r = _post(self.api, json=body, timeout=120, headers=self._headers())
-        return r.json()["choices"][0]["message"].get("content") or ""
+        msg = _post(self.api, json=body, timeout=120, headers=self._headers()).json()["choices"][0]["message"]
+        text = msg.get("content") or ""
+        self._capture(text, msg.get("reasoning_content") or msg.get("reasoning") or "", [])
+        return text
 
 
 class LiteLLM(OpenAI):
@@ -160,6 +221,43 @@ class LiteLLM(OpenAI):
 
 
 PROVIDERS = {"anthropic": Anthropic, "openai": OpenAI, "litellm": LiteLLM}
+
+
+# Reasoning-capture context. Lets a conductor collect reasoning from the agents it drives WITHOUT changing
+# their run() signatures: an agent builds its provider via make_provider(), which auto-attaches whatever
+# sink/label/stream/budget is active. Standalone (no active context) => budget 0 (thinking off), sink None =>
+# behaviour is byte-for-byte what it was before this refactor.
+_ACTIVE = {"sink": None, "label": "", "stream": False, "reasoning": 0}
+
+
+def set_reasoning_context(*, sink=None, label="", stream=False, reasoning=0):
+    """Turn on capture for every provider built after this call (until cleared). `sink` collects one record per
+    model turn; `label` attributes them to an agent/phase; `stream` echoes to stderr live; `reasoning` is the
+    native-thinking token budget."""
+    _ACTIVE.update(sink=sink, label=label, stream=bool(stream), reasoning=int(reasoning or 0))
+
+
+def clear_reasoning_context():
+    _ACTIVE.update(sink=None, label="", stream=False, reasoning=0)
+
+
+def reasoning_label(label):
+    """Re-tag the current agent/phase without disturbing the sink/stream/budget - the conductor calls this
+    between agents so each one's reasoning lands under its own name."""
+    _ACTIVE["label"] = label or ""
+
+
+def make_provider(name, model=None, key=None, base_url=None, reasoning=0):
+    """Build a provider by name with reasoning capture wired in, so native-thinking dump works the same for
+    every agent and the conductor. An explicit `reasoning` budget wins; otherwise the active context's budget
+    applies. The returned instance is pre-attached to the active sink/label/stream."""
+    cls = PROVIDERS[name]
+    budget = int(reasoning or 0) or int(_ACTIVE.get("reasoning") or 0)
+    p = cls(model or cls.default_model, key, base_url, reasoning=budget)
+    p.sink = _ACTIVE.get("sink")
+    p.label = _ACTIVE.get("label") or ""
+    p.stream = bool(_ACTIVE.get("stream"))
+    return p
 
 
 def add_ai_provider_args(parser) -> None:

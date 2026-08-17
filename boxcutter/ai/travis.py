@@ -37,7 +37,7 @@ from ..core import agentlog
 from ..core.envelope import debug_print, harvest_images, output_result
 from ..irvin import briefing
 from ..irvin.context import extract_json
-from ..irvin.provider import PROVIDERS, add_agent_args
+from ..irvin.provider import PROVIDERS, add_agent_args, make_provider
 from ..tools import toolschema
 
 NAME = "travis"
@@ -600,7 +600,8 @@ def run(args) -> int:
             sys.stderr.write(f"travis: an LLM is required - provide --api-key or set {provider_cls.env} "
                              f"for --provider {args.provider}\n")
             return 2
-        provider = provider_cls(args.model or provider_cls.default_model, key, base_url=args.base_url)
+        provider = make_provider(args.provider, args.model, key, base_url=args.base_url,
+                                 reasoning=getattr(args, "reasoning", 0))
 
     headers = list(args.header or [])
     if provider and args.context.strip():
