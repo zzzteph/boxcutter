@@ -18,6 +18,7 @@ import time
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from ..core import http
+from ..core import repro as repro_mod
 from ..core.args import add_common_args, add_header_arg
 from ..core.envelope import debug_logger, output_result
 
@@ -80,6 +81,16 @@ def _send(sess, method, base, params, timeout):
     return r.get("status"), len(norm), dt
 
 
+def _repro(method, base, params, args):
+    """A replayable curl + raw request for the confirming param set (query for GET, form body for POST)."""
+    hdrs = _hdrs(args)
+    if method == "POST":
+        return repro_mod.repro("POST", base, {**hdrs, "Content-Type": "application/x-www-form-urlencoded"},
+                               urlencode(params))
+    url = base + ("?" + urlencode(params) if params else "")
+    return repro_mod.repro("GET", url, hdrs)
+
+
 def run(args) -> int:
     dbg = debug_logger(args.debug)
     target = (args.target or "").strip()
@@ -120,7 +131,7 @@ def run(args) -> int:
                 findings.append({"severity": "high", "title": f"Blind boolean SQLi in '{name}'", "url": base,
                                  "info": f"param '{name}': base=[{b_status},{b_len}b], TRUE({t_pl})=>[{ts},{tl}b], "
                                          f"FALSE({f_pl})=>[{fs},{fl}b] - the true/false condition flips the result "
-                                         f"vs baseline (boolean-blind SQLi)."})
+                                         f"vs baseline (boolean-blind SQLi).", **_repro(method, base, tp, args)})
                 dbg(f"  BOOLEAN-BLIND '{name}' via {t_pl}")
                 break
         # ---- time-differential (confirm by scaling) ----
@@ -137,7 +148,8 @@ def run(args) -> int:
                 findings.append({"severity": "critical", "title": f"Blind time-based {cls} injection in '{name}'",
                                  "url": base,
                                  "info": f"param '{name}' [{label}]: sleep({D})=>{t1:.1f}s, sleep({n2})=>{t2:.1f}s, "
-                                         f"base={b_time:.1f}s - delay SCALES with the requested sleep (confirmed time-blind)."})
+                                         f"base={b_time:.1f}s - delay SCALES with the requested sleep (confirmed time-blind).",
+                                 **_repro(method, base, p1, args)})
                 dbg(f"  TIME-BLIND '{name}' via {label} ({t1:.1f}s vs {t2:.1f}s)")
                 break
 

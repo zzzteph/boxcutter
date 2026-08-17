@@ -17,6 +17,7 @@ import re
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from ..core import http
+from ..core import repro as repro_mod
 from ..core.args import add_common_args
 from ..core.envelope import debug_logger, output_result
 
@@ -116,7 +117,9 @@ def run(args) -> int:
                 findings.append({"severity": "high", "title": f"BOLA/IDOR: identity B reads {urlparse(url).path}",
                                  "url": url,
                                  "info": f"unauth={ns} (gated) but B={bs} ({blen}b) — B accessed an access-controlled "
-                                         f"object" + (f"; A={ra.get('status')} (owner) confirms it's a real record" if owner else "")})
+                                         f"object (replay the request below with identity B's session)"
+                                         + (f"; A={ra.get('status')} (owner) confirms it's a real record" if owner else ""),
+                                 **repro_mod.repro("GET", url)})
     dbg(f"bola-walk: {len(findings)} cross-account access(es)")
     output_result(findings, args.output)
     return 0

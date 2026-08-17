@@ -161,6 +161,49 @@ def include_block(target_url: str) -> str:
 
 # -- Report parsing ----------------------------------------------------------
 
+# Alerts boxcutter DROPS from every ZAP scan (crawl / scan-url / scan-full / scan-openapi) - the low-signal
+# header/hygiene noise the operator does not want reported. Matched case-insensitively against the exact
+# pluginId OR a substring of the alert NAME. Add a line to extend.
+_ZAP_SUPPRESS_IDS = {
+    "10003",  # Vulnerable JS Library
+    "10020",  # Missing Anti-clickjacking Header (X-Frame-Options / CSP frame-ancestors)
+    "10021",  # X-Content-Type-Options Header Missing
+    "10035",  # Strict-Transport-Security Header not set
+    "10038",  # Content Security Policy (CSP) Header Not Set (+ its sub-alerts)
+    "10055",  # CSP (e.g. "Failure to Define Directive with No Fallback")
+    "10063",  # Permissions Policy Header Not Set
+    "90003",  # Sub Resource Integrity Attribute Missing
+}
+_ZAP_SUPPRESS_NAMES = (
+    # everything related to missing / weak security headers
+    "header not set",
+    "header missing",
+    "header is not set",
+    "anti-clickjacking",
+    "content security policy",
+    "csp:",
+    "x-content-type-options",
+    "strict-transport-security",
+    "permissions policy",
+    "cache-control",
+    # other low-value / FP-prone alerts the operator turned off
+    "sub resource integrity",
+    "vulnerable js library",
+)
+
+
+def _is_suppressed(alert: dict) -> bool:
+    """True if this raw ZAP alert is on boxcutter's suppression list (header/hygiene noise)."""
+    if str(alert.get("pluginid", "")) in _ZAP_SUPPRESS_IDS:
+        return True
+    name = str(alert.get("name") or alert.get("alert") or "").lower()
+    # all TIME-BASED SQL injection variants (SQLite/MySQL/PostgreSQL/Oracle/MsSQL/Hypersonic) are FP-prone -
+    # drop them all, but keep other time-based classes (e.g. OS command injection) and non-time-based SQLi.
+    if "sql injection" in name and "time based" in name:
+        return True
+    return any(s in name for s in _ZAP_SUPPRESS_NAMES)
+
+
 def read_alerts(report_path: str) -> list[dict]:
     """Flatten + dedupe alerts from a traditional-json ZAP report."""
     try:
@@ -174,6 +217,8 @@ def read_alerts(report_path: str) -> list[dict]:
     alerts: list[dict] = []
     for site in doc.get("site", []) or []:
         for alert in site.get("alerts", []) or []:
+            if _is_suppressed(alert):
+                continue
             instances = alert.get("instances") or []
             instance = instances[0] if instances else {}
             alerts.append(

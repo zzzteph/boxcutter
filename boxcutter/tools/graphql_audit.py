@@ -13,9 +13,12 @@ exposed/unauthenticated mutations (dry-probe).
 from __future__ import annotations
 
 import json as jsonlib
+import random
 import re
+from urllib.parse import quote
 
 from ..core import http
+from ..core import repro as repro_mod
 from ..core.args import add_common_args, add_header_arg
 from ..core.envelope import debug_logger, output_result
 from ..core.validators import is_valid_url
@@ -76,9 +79,21 @@ class _Ctx:
             return http.send("GET", self.url, params={"query": query}, headers=self.headers, timeout=self.timeout)
         return http.send("POST", self.url, json={"query": query}, headers=self.headers, timeout=self.timeout)
 
+    # -- replayable reproductions for a finding (copy into curl / Burp) -------
+    def repro(self, query, method="POST") -> dict:
+        if method == "GET":
+            url = self.url + "?query=" + quote(query)
+            hdrs = {k: v for k, v in self.headers.items() if k.lower() != "content-type"}
+            return repro_mod.repro("GET", url, hdrs)
+        return repro_mod.repro("POST", self.url, self.headers, jsonlib.dumps({"query": query}))
 
-def _finding(sev, title, info, url):
-    return {"severity": sev, "title": title, "info": info, "url": url}
+
+def _finding(sev, title, info, url, repro=None):
+    f = {"severity": sev, "title": title, "info": info, "url": url}
+    if repro:
+        f["curl"] = repro.get("curl")
+        f["request"] = repro.get("request")
+    return f
 
 
 # --- posture ----------------------------------------------------------------
@@ -92,7 +107,8 @@ def _check_introspection(ctx, findings):
         findings.append(_finding(
             "medium", "GraphQL introspection enabled",
             "The full schema is queryable via __schema - it maps every type, field and "
-            "argument for an attacker. Disable introspection in production.", ctx.url))
+            "argument for an attacker. Disable introspection in production.", ctx.url,
+            repro=ctx.repro(INTROSPECTION)))
         return schema
     return None
 
@@ -105,7 +121,7 @@ def _check_get_csrf(ctx, findings):
             "medium", "GraphQL accepts queries over GET (CSRF)",
             "Operations are accepted as a GET ?query= parameter, so a cross-site request "
             "(or a cached/logged URL) can drive the API - state-changing mutations over GET are CSRF-able.",
-            ctx.url))
+            ctx.url, repro=ctx.repro("{__typename}", "GET")))
 
 
 def _check_batching(ctx, findings):
@@ -116,7 +132,8 @@ def _check_batching(ctx, findings):
         findings.append(_finding(
             "low", "GraphQL aliasing/batching not limited",
             "Many aliased operations run in a single request with no cost/complexity limit - "
-            "enables brute force and denial of service via query amplification.", ctx.url))
+            "enables brute force and denial of service via query amplification.", ctx.url,
+            repro=ctx.repro(q)))
 
 
 def _check_verbose_errors(ctx, findings):
@@ -127,7 +144,7 @@ def _check_verbose_errors(ctx, findings):
         findings.append(_finding(
             "high", "GraphQL error leaks secrets / stack trace",
             "An invalid query returns an error containing secrets or a stack trace:\n"
-            + body[:400], ctx.url))
+            + body[:400], ctx.url, repro=ctx.repro("{ this_field_does_not_exist_zzz }")))
 
 
 # --- sensitive fields -------------------------------------------------------
@@ -140,11 +157,13 @@ def _check_secret_fields(ctx, schema, findings):
             continue  # only blind-query the no-arg fields (safe)
         leaf = _leaf_selection(schema, f.get("type"))
         sel = (" { %s }" % leaf) if leaf else ""
-        body = jsonlib.dumps(_json(ctx.gql("{ %s%s }" % (f["name"], sel))) or "")
+        q = "{ %s%s }" % (f["name"], sel)
+        body = jsonlib.dumps(_json(ctx.gql(q)) or "")
         if _SECRET.search(body):
             findings.append(_finding(
                 "high", f"GraphQL field '{f['name']}' returns secrets",
-                f"Querying {{ {f['name']} }} returns sensitive data:\n" + body[:300], ctx.url))
+                f"Querying {{ {f['name']} }} returns sensitive data:\n" + body[:300], ctx.url,
+                repro=ctx.repro(q)))
 
 
 # --- schema-guided argument injection ---------------------------------------
@@ -152,9 +171,34 @@ def _check_secret_fields(ctx, schema, findings):
 _PAYLOADS = [
     ("sqli", "1' OR '1'='1"),
     ("sqli", "1\""),
-    ("ssti", "${{7*7}}"),
     ("error", "'\""),
 ]
+
+
+def _ssti_payload_and_expected():
+    """A random ``${{a*b}}`` probe and its expected product. Random operands each run make a coincidental
+    match against a random token/challenge in the response astronomically unlikely (unlike a fixed 7*7=49)."""
+    a, b = random.randint(1000, 9999), random.randint(1000, 9999)
+    return "${{%d*%d}}" % (a, b), str(a * b)
+
+
+def _confirm_ssti(ctx, field, arg, leaf):
+    """Confirm template injection on one argument with TWO independent randomized multiplications: both must
+    come back COMPUTED, and the literal payload must NOT be reflected. One coincidence against a random token
+    is unlikely; two with different operands is effectively impossible - so a random ``challenge`` in the
+    response can no longer produce a false positive. Returns the (payload, query) that proved it, or None."""
+    proof = None
+    for _ in range(2):
+        payload, expected = _ssti_payload_and_expected()
+        q = _build_query(field, arg, payload, leaf)
+        r = ctx.gql(q)
+        if r.get("error") or r.get("status") is None:
+            return None
+        body = r.get("body") or ""
+        if expected not in body or payload in body:   # not computed, or just reflected -> not SSTI
+            return None
+        proof = (payload, q)
+    return proof
 
 
 def _check_arg_injection(ctx, schema, findings):
@@ -167,6 +211,12 @@ def _check_arg_injection(ctx, schema, findings):
             continue
         leaf = _leaf_selection(schema, f.get("type"))
         for arg in scalar_args:
+            # SSTI first, via a randomized TWO-SHOT confirmation - kills false positives from a random
+            # token/challenge in the response coincidentally containing the expected number.
+            ssti = _confirm_ssti(ctx, f["name"], arg["name"], leaf)
+            if ssti:
+                grouped.setdefault((f["name"], arg["name"], "ssti"), []).append(ssti)
+                continue
             for cls, payload in _PAYLOADS:
                 q = _build_query(f["name"], arg["name"], payload, leaf)
                 r = ctx.gql(q)
@@ -176,9 +226,11 @@ def _check_arg_injection(ctx, schema, findings):
                     break  # one confirmed class per arg is enough
     for (fname, aname, cls), hits in grouped.items():
         sev = "high" if cls in ("sqli", "ssti") else "medium"
+        q0 = hits[0][1]
         info = (f"Argument '{aname}' on field '{fname}' is injectable ({cls}). Confirmed:\n"
                 + "\n".join(f"  {p}  =>  {q}" for p, q in hits[:5]))
-        findings.append(_finding(sev, f"GraphQL [{cls}] in {fname}({aname}:)", info, ctx.url))
+        findings.append(_finding(sev, f"GraphQL [{cls}] in {fname}({aname}:)", info, ctx.url,
+                                 repro=ctx.repro(q0)))
 
 
 def _injection_hit(cls, r, payload):
@@ -187,8 +239,6 @@ def _injection_hit(cls, r, payload):
     body = r.get("body") or ""
     if cls in ("sqli", "error") and _SQL_ERR.search(body):
         return "sqli"
-    if cls == "ssti" and "49" in body and "${{7*7}}" not in body:
-        return "ssti"
     return None
 
 
@@ -214,7 +264,7 @@ def _check_mutations(ctx, schema, findings):
             "These mutations are reachable and not auth-gated (dry-probed with no args, so "
             "nothing was executed):\n  " + ", ".join(exposed[:20])
             + "\nReview them for authorization and abuse (e.g. privilege change, content edit).",
-            ctx.url))
+            ctx.url, repro=ctx.repro("mutation { %s }" % exposed[0])))
 
 
 # --- schema helpers ---------------------------------------------------------

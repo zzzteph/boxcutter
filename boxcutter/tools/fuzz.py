@@ -30,6 +30,7 @@ from collections import Counter
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from ..core import http
+from ..core import repro as repro_mod
 from ..core.args import add_common_args
 from ..core.envelope import debug_logger, output_result
 from ..core.validators import is_valid_url
@@ -555,13 +556,14 @@ def _run_inject_mode(method, target, body, sess, deadline: float, dbg) -> list[d
             if out_of_time:
                 break
 
-    return [_grouped_finding(method, cls, param, hs) for (param, cls), hs in hits.items()]
+    return [_grouped_finding(method, cls, param, hs, body) for (param, cls), hs in hits.items()]
 
 
 # -- finding builders (boxcutter {severity, title, info, url} shape) ----------
 
-def _grouped_finding(method, cls, param, hits: list[dict]) -> dict:
-    """One finding per (param, class), listing every confirmed payload as evidence."""
+def _grouped_finding(method, cls, param, hits: list[dict], body=None) -> dict:
+    """One finding per (param, class), listing every confirmed payload as evidence, plus a replayable curl +
+    raw request built from the request that confirmed it."""
     first = hits[0]
     n = len(hits)
     lines = [
@@ -575,12 +577,16 @@ def _grouped_finding(method, cls, param, hits: list[dict]) -> dict:
     for h in hits:
         evidence = (h["evidence"] or "").replace("\n", " ")[:100]
         lines.append(f"  - {h['payload']}  =>  {evidence}")
-    return {
+    finding = {
         "severity": _SEVERITY.get(cls, "medium"),
         "title": f"[{method}] [{cls}] in '{param}' ({n} payload{'s' if n != 1 else ''})",
         "info": "\n".join(lines),
         "url": first["url"] or "",
     }
+    # the confirmed request: for a body-fuzz the payload lives in the body; otherwise it is already in the URL
+    req_body = str(body).replace("{FUZZ}", first["payload"]) if (param == "__BODY_FUZZ__" and body) else None
+    finding.update(repro_mod.repro(method, first["url"] or "", None, req_body))
+    return finding
 
 
 def _numeric_finding(url, value, resp, content_type) -> dict:

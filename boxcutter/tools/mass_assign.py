@@ -15,6 +15,7 @@ import json
 from urllib.parse import urlparse
 
 from ..core import http
+from ..core import repro as repro_mod
 from ..core.args import add_common_args, add_header_arg
 from ..core.envelope import debug_logger, output_result
 
@@ -87,14 +88,15 @@ def run(args) -> int:
                 confirmed = f'"{attr}"' in (vr.get("body") or "") and marker(val) in (vr.get("body") or "")
             except Exception:  # noqa: BLE001
                 pass
+        req = repro_mod.repro(method, target, {"Content-Type": "application/json", **_hmap(args)}, json.dumps(body))
         if confirmed:
             findings.append({"severity": "high", "title": f"Mass-assignment: '{attr}={marker(val)}' persisted",
                              "url": target, "info": f"{method} accepted a client-set '{attr}={marker(val)}' and "
-                             f"{urlparse(args.verify).path} confirms it stuck (privilege/state escalation)."})
+                             f"{urlparse(args.verify).path} confirms it stuck (privilege/state escalation).", **req})
         elif echoed:
             findings.append({"severity": "medium", "title": f"Possible mass-assignment: '{attr}' echoed",
                              "url": target, "info": f"{method} 200 echoed client-set '{attr}={marker(val)}' — "
-                             f"pass --verify <read-endpoint> to confirm it persists (not just reflected)."})
+                             f"pass --verify <read-endpoint> to confirm it persists (not just reflected).", **req})
     dbg(f"mass-assign: {len(findings)} accepted privileged attribute(s)")
     output_result(findings, args.output)
     return 0
