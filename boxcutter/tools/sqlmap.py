@@ -26,6 +26,8 @@ _BLOCK = re.compile(r"^---$(.*?)^---$", re.M | re.S)
 def add_arguments(parser) -> None:
     parser.add_argument("target", help="Target URL")
     parser.add_argument("--timeout", type=int, default=300, help="Process timeout in seconds")
+    parser.add_argument("--method", default=None, help="HTTP method (e.g. POST/PUT) for a body request")
+    parser.add_argument("--data", default=None, help="Request body to test (enables POST/PUT injection testing)")
     add_opt_args(parser)
     add_header_arg(parser)
     add_common_args(parser)
@@ -49,6 +51,10 @@ def run(args) -> int:
     ]
     for header in args.header:
         cmd += ["-H", header]
+    if getattr(args, "data", None):
+        cmd += ["--data", args.data]
+    if getattr(args, "method", None):
+        cmd += ["--method", args.method]
     cmd += process.split_opt_args(opt_args)
     dbg(f"Command: {process.format_command(cmd)}")
 

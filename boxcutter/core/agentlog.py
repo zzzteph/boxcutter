@@ -9,7 +9,7 @@ produced it:
                 statuses / a landed-page + api-flow count for the visual driver), so a reader sees the OUTCOME
                 of each action, not only that it was issued.
   * forward_debug - append --debug to a sub-tool dispatch when the agent itself is running under --debug, so
-                the sub-tool streams its own diagnostics (browser-crawl's landed-url, visual-driver's ok/failed
+                the sub-tool streams its own diagnostics (harvest's landed-url, visual-driver's ok/failed
                 /flow counts, ...) instead of staying silent inside the agent.
 
 Kept in core - the lowest layer - so both boxcutter/ai/* and boxcutter/irvin/* import it without a cycle.

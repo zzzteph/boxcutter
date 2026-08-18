@@ -13,7 +13,7 @@ caleb is BUILT FROM SCRATCH. It REUSES three existing agents as sub-tools, by IM
              + a library of LLM-free primitives (token forge/crack, backstops, http helpers) caleb builds on.
   - crawlio  - endpoint / surface discovery in recon.
   - travis   - single-host recon triage to seed recon.
-Plus any boxcutter TOOL that helps the recon reach (notably `browser-crawl`, to render the SPA and capture the
+Plus any boxcutter TOOL that helps the recon reach (notably `harvest`, to render the SPA and capture the
 XHR/fetch calls webpack hides). The phase engine, artifact store, session manager, chaining, --creds/--context
 parsing and report writer are ALL new code here.
 
@@ -41,9 +41,9 @@ KIND = "findings"
 HELP = ("Caleb - multi-phase / multi-identity orchestrator: authenticated deep scan, reauth, two-account BFLA, "
         "and multi-step chains (reuses bob as its scanning muscle).")
 
-# Tools caleb may drive directly for recon (beyond bob's own). browser-crawl renders the SPA and captures the
+# Tools caleb may drive directly for recon (beyond bob's own). harvest renders the SPA and captures the
 # XHR/fetch API calls a static bundle-scrape cannot see - the fix for heavily web-packed apps.
-_RECON_TOOLS = ("browser-crawl", "katana-crawl", "http-request", "swagger-specs", "graphql-detect")
+_RECON_TOOLS = ("harvest", "katana-crawl", "http-request", "swagger-specs", "graphql-detect")
 
 # Backend/API hosts often live on an api-/backend-style subdomain while the apex serves only the UI.
 _BACKEND_SUBS = ("api", "apis", "backend", "gateway", "gw", "app", "rest", "graphql", "gql", "data", "core",
@@ -137,8 +137,8 @@ def _norm(url: str) -> str:
 
 def _ccall(argv: list, headers: list, debug: bool = False) -> str:
     """caleb's tool runner. bob's own tools go through bob._call (so they share bob's WAF cookie-jar + header
-    injection); caleb's EXTRA tools (browser-crawl, ...) - which bob's allowlist rejects - run in-process here.
-    This is why caleb can drive browser-crawl (its webpacked-SPA capture) that bob cannot."""
+    injection); caleb's EXTRA tools (harvest, ...) - which bob's allowlist rejects - run in-process here.
+    This is why caleb can drive harvest (its webpacked-SPA capture) that bob cannot."""
     if not argv:
         return json.dumps({"success": False, "error": "empty call"})
     if argv[0] in getattr(bob, "_TOOLS", ()):
@@ -839,14 +839,14 @@ def phase_p0_recon(store: ArtifactStore, args) -> None:
     map endpoints/params, run bob's unauth battery for baseline findings, and record leaked creds/tokens/leads."""
     base = store.base_url
     debug_print(f"caleb :: P0 recon on {base}")
-    # 1) browser-crawl: render + capture real API calls (method-aware) that a static scrape misses
-    raw = _ccall(["browser-crawl", base], [], args.debug)
+    # 1) harvest: render + capture real API calls (method-aware) that a static scrape misses
+    raw = _ccall(["harvest", base, "--max-pages", "4", "--max-time", "90", "--max-actions", "25"], [], args.debug)
     for d in (_j(raw).get("data") or []):
         if isinstance(d, dict) and d.get("url"):
-            store.add_endpoint(d["url"], d.get("method", "GET"), "browser-crawl")
+            store.add_endpoint(d["url"], d.get("method", "GET"), "harvest")
         elif isinstance(d, str):
-            store.add_endpoint(d, "GET", "browser-crawl")
-    store.cache[("browser-crawl", base)] = raw
+            store.add_endpoint(d, "GET", "harvest")
+    store.cache[("harvest", base)] = raw
     # 2) seed bob's cache with observation (base page + crawl + a GraphQL probe) for its miners/backstops
     for argv in (["http-request", base + "/"], ["katana-crawl", base + "/", "--js"],
                  ["graphql-detect", base]):
@@ -859,7 +859,7 @@ def phase_p0_recon(store: ArtifactStore, args) -> None:
     except Exception:  # noqa: BLE001
         pass
     # 3b) parse param-links straight out of fetched HTML (href/src/action) - the fix for a NON-SPA app whose
-    #     `?id=`-style params the crawler/browser-crawl don't surface but the page itself links (agnostic).
+    #     `?id=`-style params the crawler/harvest don't surface but the page itself links (agnostic).
     _extract_html_links(store)
     # 3c) path-bust for UNLINKED paths (hidden admin/panels/consoles a crawl can't see) - run at the root AND
     #     INSIDE each discovered directory (so a nested `/admin/panel/` is found), then re-parse for login forms.
@@ -1950,7 +1950,7 @@ _SYSTEM = (
     "1. UNDERSTAND the surface: call `caleb_state` to see what recon already mapped (endpoints, hosts, tokens, "
     "leads). The API/backend often lives on a DIFFERENT host than the UI (an api./backend. subdomain OR a wholly "
     "different domain the app itself calls) - those backend hosts are IN SCOPE; third-party hosts (CDN/analytics/"
-    "payment) are not. If the app is a heavy SPA, use `browser-crawl` to render it and capture the XHR/fetch API "
+    "payment) are not. If the app is a heavy SPA, use `harvest` to render it and capture the XHR/fetch API "
     "calls a static scrape misses.\n"
     "2. ACQUIRE IDENTITIES with `acquire_identity`. Prefer SELF-acquisition (it proves the vuln): register a fresh "
     "account; grab a token a debug/whoami endpoint hands out; FORGE an admin token from a weak/guessable signing "
@@ -2114,7 +2114,7 @@ _SYSTEM = (
     "PATCH of a benign field (or DELETE only a resource you created); never DoS. Stay on the app's own hosts; "
     "redact secret values.")
 
-# LEAN tool surface: recon/discovery is seeded deterministically in P0 (browser-crawl, katana, path-bust, mining) and
+# LEAN tool surface: recon/discovery is seeded deterministically in P0 (harvest, katana, path-bust, mining) and
 # handed to the agent via `state`. The agent then drives with BATCH tools - never hand-probing a wordlist one URL at a
 # time (that burns steps AND gets fooled by a soft-404 catch-all that 200s every path): path-bust for file/dir
 # discovery (it calibrates the catch-all and only reports structure-DISTINCT hits), api-map for the method-aware API

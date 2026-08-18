@@ -12,8 +12,11 @@ steps:
     do:
       - workflow: web-crawl
         target: ${live.item}
-        save: urls
+        save: crawl
 
+  # flatten the corpus to URL strings (sqlmap needs concrete URLs), then extend with JS-extracted endpoints
+  - select: ${crawl | urls}
+    save: urls
   - for_each: ${urls | js}
     do:
       - tool: js-endpoints
@@ -29,6 +32,16 @@ steps:
     do:
       - tool: sqlmap
         target: ${params.item}
+        save: findings
+
+  # POST/PUT lane: sqlmap the captured body of each state-changing endpoint (empty on a non-SPA target)
+  - for_each: ${crawl | writes}
+    do:
+      - tool: sqlmap
+        target: ${crawl.item.url}
+        flags:
+          --method: ${crawl.item.method}
+          --data: ${crawl.item.body}
         save: findings
 
   # discover OpenAPI/Swagger specs on the target, then sqlmap every documented

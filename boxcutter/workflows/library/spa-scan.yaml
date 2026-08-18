@@ -1,0 +1,58 @@
+name: spa-scan
+help: browser-crawl a JS/SPA in real Chromium (clicks, submits, captures every request incl. the cross-origin API), then DAST each endpoint - endpoint-scan (fuzz + nuclei-dast + sqlmap + zap-scan-url) on each param URL, the body of each POST/PUT fuzzed too, plus GraphQL audit and secrets on JS
+input: url
+output: findings
+
+steps:
+  # the given URL is the target as-is (no httpx liveness probe)
+  - select: ${url}
+    save: live
+
+  # deep browser crawl -> the full endpoint corpus (objects: method / url / body / headers / params),
+  # including the cross-origin api.* backend a same-origin spider never sees.
+  - for_each: ${live}
+    do:
+      - tool: harvest
+        target: ${live.item}
+        args: --max-pages 0 --max-time 300 --max-actions 0
+        save: corpus
+
+  # GET/query lane: DAST each parameterised URL via endpoint-scan (fuzz + nuclei-dast + sqlmap + zap-scan-url)
+  - select: ${corpus | urls | params | dedup}
+    save: params
+  - for_each: ${params}
+    do:
+      - workflow: endpoint-scan
+        target: ${params.item}
+        save: findings
+
+  # POST/PUT/PATCH lane: pass the captured method + body straight to fuzz so the BODY is injection-tested
+  # (fuzz auto-injects each body param and infers the Content-Type from the body shape).
+  - for_each: ${corpus | writes}
+    do:
+      - tool: fuzz
+        target: ${corpus.item.url}
+        flags:
+          --method: ${corpus.item.method}
+          --data: ${corpus.item.body}
+        args: --timeout 120
+        save: findings
+
+  # discover + audit GraphQL endpoint(s) - a SPA's GraphQL API is often the whole attack surface
+  - for_each: ${live}
+    do:
+      - tool: graphql-detect
+        target: ${live.item}
+        save: gql
+  - for_each: ${gql}
+    do:
+      - tool: graphql-audit
+        target: ${gql.item}
+        save: findings
+
+  # secrets in each JS file the crawl loaded
+  - for_each: ${corpus | urls | js}
+    do:
+      - tool: scan-secrets
+        target: ${corpus.item}
+        save: findings

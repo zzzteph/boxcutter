@@ -1,6 +1,6 @@
 """crawlio - a focused, single-agent CRAWLER whose ONE job is a comprehensive, VERIFIED endpoint list.
 
-It drives the mapping tools (screenshot, katana-crawl, browser-crawl, js-endpoints, swagger-specs/-endpoints,
+It drives the mapping tools (screenshot, katana-crawl, harvest, js-endpoints, swagger-specs/-endpoints,
 path-bust, http-request) in one LLM tool-calling loop, then a DETERMINISTIC code gate re-verifies the
 result. The whole value is the last mile most crawlers skip - a host that returns the same page for any path
 (a catch-all / soft-404 / SPA front-controller) makes every guessed path look "alive". crawlio's model is told
@@ -48,7 +48,7 @@ HELP = "Single-agent crawler: build a comprehensive, code-verified endpoint list
 # (path-bust applies its own content/structure catch-all gate). There is no raw-guessing brute tool anymore, so
 # no UNTRUSTED set. visual-driver is TRUSTED for the api FLOWS it captures - they are real requests the page
 # actually made while a human-like session drove it.
-_TRUSTED = {"katana-crawl", "swagger-specs", "swagger-endpoints", "browser-crawl", "js-endpoints", "screenshot",
+_TRUSTED = {"katana-crawl", "swagger-specs", "swagger-endpoints", "harvest", "js-endpoints", "screenshot",
             "path-bust", "visual-driver"}
 _TOOLS = sorted(_TRUSTED | {"http-request"})
 
@@ -66,17 +66,18 @@ _SYSTEM = (
     "app or a dead/404/parked page. If it's dead, say so and stop early - there is nothing to crawl.\n"
     "  2. KATANA + CHEAP SOURCES: if the app is alive, `katana-crawl <base>` for the linked surface (TRUSTED), "
     "and check robots.txt / sitemap.xml / .well-known with `http-request` for listed paths.\n"
-    "  3. BROWSER + SPEC + JS: ALWAYS `browser-crawl <base>` - render the app and COLLECT the real endpoints it "
+    "  3. BROWSER + SPEC + JS: ALWAYS `harvest <base>` - render the app and COLLECT the real endpoints it "
     "calls (XHR/fetch, with methods + bodies). This is a PRIMARY endpoint source (not optional, not SPA-only) and "
     "catches the live API surface katana never sees. Then `swagger-specs <host>` -> `swagger-endpoints <spec>` if "
     "a spec exists (TRUSTED - declared API); `js-endpoints <jsfile>` on JS katana finds (references - verify the "
     "ones that matter).\n"
-    "  3b. VISION WHEN THE APP IS A RICH SPA: browser-crawl clicks blindly by selector and often barely leaves "
-    "the landing shell. If the app only reveals its real API once a HUMAN uses it (type an address and get "
-    "results, open a restaurant/product, apply a filter, page a list) - or its controls resist selectors (a map, "
-    "a canvas, a CSS-in-JS widget, a bot check) - DRIVE it with `visual-driver` (see the VISION manual below): "
-    "SEE each screen and pursue the key user journeys to TRIGGER and CAPTURE the real API flows browser-crawl "
-    "missed. This is how you collect the deep surface.\n"
+    "  3b. VISION WHEN THE APP IS A RICH SPA: harvest already DRIVES the app (clicks links/buttons, submits "
+    "forms, follows routes across many states) and captures most of the API on its own. But when the app only "
+    "reveals its real API once a HUMAN uses it a specific way (type an address and get results, open a "
+    "restaurant/product, apply a filter, page a list) - or its controls resist selectors (a map, a canvas, a "
+    "CSS-in-JS widget, a bot check) - DRIVE it with `visual-driver` (see the VISION manual below): SEE each "
+    "screen and pursue the key user journeys to TRIGGER and CAPTURE the real API flows harvest could not "
+    "reach. This is how you collect the deep surface.\n"
     "  4. BRUTE - BREADTH FIRST: `path-bust <base> --full` - ONE wide sweep with the ~12k breadth list to MAP "
     "where things live. It is SELF-VERIFIED (runs its own catch-all gate), so its hits are real paths, not "
     "guesses. Treat it as your map of the app's directory structure; a partial sweep is fine.\n"
@@ -97,8 +98,9 @@ _SYSTEM = (
     "Ex: `screenshot https://site/app`.\n"
     "  - katana-crawl <url> [--js] - the LINKED surface from real hrefs (TRUSTED - observed). "
     "Ex: `katana-crawl https://site`; `katana-crawl https://site --js` to surface JS bundles.\n"
-    "  - browser-crawl <url> - render a JS/SPA and capture its routes + real XHR/fetch (TRUSTED - observed). Use "
-    "when the page is a blank/SPA shell without JS. Ex: `browser-crawl https://site`.\n"
+    "  - harvest <url> - DEEP-crawl a JS/SPA in a real browser (clicks/submits across many states) and capture "
+    "its routes + real XHR/fetch with methods + bodies (TRUSTED - observed). A PRIMARY endpoint source, not "
+    "SPA-only. Ex: `harvest https://site`.\n"
     "  - visual-driver <url> --session <id> --action '<verb:args>' [--action ...] - DRIVE the app by SCREEN "
     "COORDINATES like a human (VISION): each call returns a gridded screenshot AND the api flows your actions "
     "triggered (TRUSTED - observed). Reuse the SAME --session id every call so page state carries over. Use it to "
@@ -144,7 +146,7 @@ _SYSTEM = (
     "submit a purchase / delete / logout. Stay on the target host. A few PURPOSEFUL journeys beat dozens of "
     "aimless clicks - vision is expensive, so spend it where the API lives.\n"
     "OUTPUT: visual-driver returns a `state` record plus `flows`; every flow's request url+method is a REAL "
-    "observed endpoint - treat them exactly like browser-crawl's XHR (deduped, catch-all-checked).\n\n"
+    "observed endpoint - treat them exactly like harvest's XHR (deduped, catch-all-checked).\n\n"
 
     "CATCH-ALL AWARENESS. A 200 is NOT proof of a real path: many hosts route EVERY path through one "
     "front-controller (Caddy try_files, an SPA, an index.php that only reads the query), so a made-up path "
@@ -163,7 +165,7 @@ _SYSTEM = (
 
     "NARRATE - before each tool call, say in ONE short sentence WHY you're making it and what you expect it to "
     "tell you (e.g. 'probing the well-known paths for an OpenAPI spec', 'the app is a blank SPA shell so I need "
-    "browser-crawl to see its real XHR calls', 'digging the /admin folder the sweep surfaced'). One line, then "
+    "harvest to see its real XHR calls', 'digging the /admin folder the sweep surfaced'). One line, then "
     "call the tool - this keeps the run auditable so a reader can follow your reasoning, not just your commands.\n\n"
 
     "DELIVERABLE - when the STOP gate is met, END with ONE fenced ```json block and nothing after it. Every "
@@ -407,7 +409,7 @@ def run(args) -> int:
     scope_note = (f"SCOPE: crawl ONLY under {base_url} - paths starting with {scope_path} (never parent/sibling "
                   "paths).\n" if scope_path else f"SCOPE: the whole host {base_host}.\n")
     user = (f"TARGET: {base_url}\n" + scope_note + (f"BRIEFING: {focus}\n" if focus else "") +
-            "Follow the FLOW: screenshot, katana, ALWAYS browser-crawl (collect real XHR/fetch endpoints), "
+            "Follow the FLOW: screenshot, katana, ALWAYS harvest (collect real XHR/fetch endpoints), "
             "spec/JS, then a breadth `path-bust --full` sweep, pick the interesting folders, and dig into each "
             "precisely with the curated list. Emit the json list when the STOP gate is met.")
     messages = [{"role": "user", "content": user}]
@@ -473,7 +475,7 @@ def run(args) -> int:
                     run_argv = argv
                     if c["name"] == "path-bust":       # blocking call -> cap it with a fixed per-call timeout
                         run_argv = _bound_timeout(argv, 300)
-                    # forward --debug so the sub-tool streams its OWN diagnostics to stderr (browser-crawl's
+                    # forward --debug so the sub-tool streams its OWN diagnostics to stderr (harvest's
                     # 'N api calls, landed on <url>', visual-driver's 'N ok / M failed, K flow(s)' - the detail
                     # that shows whether it rendered/drove the app or got blocked). Dispatched argv only; the
                     # cache key stays the clean argv above.

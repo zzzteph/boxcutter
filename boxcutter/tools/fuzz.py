@@ -21,6 +21,7 @@ probing filters soft-404s with UUID canaries and dedupes bodies / redirect targe
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 import re
 import statistics
@@ -101,6 +102,11 @@ def run(args) -> int:
         return 1
 
     extra_headers = _parse_headers(args.header)
+    # a captured POST body needs the right Content-Type or the server won't parse it; infer from the body
+    # shape when the caller didn't set one (JSON object/array -> json, else form-urlencoded).
+    if args.data and not any(k.lower() == "content-type" for k in extra_headers):
+        extra_headers["Content-Type"] = ("application/json" if args.data.strip()[:1] in "{["
+                                         else "application/x-www-form-urlencoded")
     dbg = debug_logger(args.debug)
     sess = http.session(extra_headers or None)
     deadline = time.time() + max(1, args.timeout)
@@ -289,6 +295,8 @@ def _substitute(method, url, body, param, payload, sess):
         new_url = url.replace("{FUZZ}", quote(payload, safe=_FUZZ_SAFE))
     elif param == "__BODY_FUZZ__":
         new_body = (body or "").replace("{FUZZ}", payload)
+    elif param.startswith("body:"):
+        new_body = _set_body_param(body, param[5:], payload)
     else:
         parsed = urlparse(url)
         qs = parse_qsl(parsed.query, keep_blank_values=True)
@@ -299,12 +307,46 @@ def _substitute(method, url, body, param, payload, sess):
     return resp
 
 
+def _body_param_names(body) -> list:
+    """Top-level param names in a request body (JSON object keys or urlencoded form keys)."""
+    b = (body or "").strip()
+    if not b:
+        return []
+    if b[:1] in "{[":
+        try:
+            obj = json.loads(b)
+            return list(obj.keys()) if isinstance(obj, dict) else []
+        except (ValueError, TypeError):
+            return []
+    return [k for k, _ in parse_qsl(b, keep_blank_values=True)]
+
+
+def _set_body_param(body, name, value) -> str:
+    """Return `body` with param `name` set to `value` (JSON object or urlencoded form; body kept as-is if it
+    is neither)."""
+    b = (body or "").strip()
+    if b[:1] in "{[":
+        try:
+            obj = json.loads(b)
+            if isinstance(obj, dict):
+                obj[name] = value
+                return json.dumps(obj)
+        except (ValueError, TypeError):
+            pass
+        return body
+    return urlencode([(k, value if k == name else v)
+                      for k, v in parse_qsl(b, keep_blank_values=True)])
+
+
 def _param_targets(url: str, body) -> list[str]:
     if "{FUZZ}" in url:
         return ["__URL_FUZZ__"]
     if body and "{FUZZ}" in str(body):
         return ["__BODY_FUZZ__"]
-    return [k for k, _ in parse_qsl(urlparse(url).query, keep_blank_values=True)]
+    # query params, plus - for a POST/PUT with a body and no marker - each body param as `body:<name>`, so a
+    # captured POST's body is injection-tested the same way query params are.
+    return ([k for k, _ in parse_qsl(urlparse(url).query, keep_blank_values=True)]
+            + [f"body:{n}" for n in _body_param_names(body)])
 
 
 # Error/exception fingerprints that mean a candidate BASELINE is NOT a clean control (the app choked on the
@@ -318,7 +360,7 @@ def _baseline_candidates(url: str, param: str) -> list[str]:
     """Control values to try for a parameter's baseline, best first. The param's OWN original value is the
     truest 'normal' request; then neutral fallbacks that stay VALID in the common contexts - a number (valid
     both as an unquoted numeric AND inside a quoted string), then a benign word."""
-    if param in ("__URL_FUZZ__", "__BODY_FUZZ__"):
+    if param in ("__URL_FUZZ__", "__BODY_FUZZ__") or param.startswith("body:"):
         return ["8261749", "boxbaseline"]
     orig = dict(parse_qsl(urlparse(url).query, keep_blank_values=True)).get(param)
     return ([orig] if orig not in (None, "") else []) + ["8261749", "boxbaseline"]
@@ -583,8 +625,13 @@ def _grouped_finding(method, cls, param, hits: list[dict], body=None) -> dict:
         "info": "\n".join(lines),
         "url": first["url"] or "",
     }
-    # the confirmed request: for a body-fuzz the payload lives in the body; otherwise it is already in the URL
-    req_body = str(body).replace("{FUZZ}", first["payload"]) if (param == "__BODY_FUZZ__" and body) else None
+    # the confirmed request: for a body fuzz the payload lives in the body; otherwise it is already in the URL
+    if param == "__BODY_FUZZ__" and body:
+        req_body = str(body).replace("{FUZZ}", first["payload"])
+    elif param.startswith("body:") and body:
+        req_body = _set_body_param(body, param[5:], first["payload"])
+    else:
+        req_body = None
     finding.update(repro_mod.repro(method, first["url"] or "", None, req_body))
     return finding
 

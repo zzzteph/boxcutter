@@ -45,7 +45,7 @@ _EXPLOIT_EXECUTORS = {"sqli", "xss", "path-traversal"}
 # timing is the tell that a command didn't really do its work (a false-negative risk). http-request/screenshot
 # are legitimately fast and excluded.
 _HEAVY_TOOLS = {"fuzz", "sqlmap", "dirsearch", "dirb", "path-fuzz", "nuclei", "katana-crawl", "git-extract",
-                "subfinder", "browser-crawl", "browser-actions", "visual-driver"}
+                "subfinder", "harvest", "browser-actions", "visual-driver"}
 
 # coverage: which vuln-lane must have run over an endpoint's STRUCTURAL FAMILY for it to count as tested. A
 # family collapses id-like path segments to {id} and keys on the set of param NAMES, so /user/1?tab and

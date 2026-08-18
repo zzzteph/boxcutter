@@ -4,7 +4,7 @@ Playwright publishes no musl/Alpine wheel, but the image already ships chromium 
 launches that chromium headless on a ``--remote-debugging-port`` and talks CDP over its WebSocket via the
 pure-Python ``websocket-client`` lib (installs fine on musl). The headline capability is ``Network.enable`` ->
 a ``Network.requestWillBeSent`` event for every request the page makes, so a SPA's real (often cross-origin)
-API surface is captured by listening, not guessing. Used by browser-crawl/login/actions.
+API surface is captured by listening, not guessing. Used by harvest/login/actions.
 
 Usage::
 
@@ -251,6 +251,7 @@ class Chrome:
                     self._flows[rid] = {
                         "method": req.get("method", "GET"), "url": url, "type": rtype,
                         "req_body": (req.get("postData") or "")[:_BODY_CAP], "req_auth": auth[:1400],
+                        "req_headers": {str(k): str(v)[:600] for k, v in hdrs.items()},
                         "status": None, "mime": "", "resp_body": None,
                         "_finished": False, "_body_done": False,
                     }
@@ -451,6 +452,8 @@ class Chrome:
             rec = {"type": "flow", "method": f["method"], "url": f["url"], "status": f["status"]}
             if f.get("req_auth"):
                 rec["req_auth"] = f["req_auth"]        # the Authorization/bearer the app sent (session artifact)
+            if f.get("req_headers"):
+                rec["req_headers"] = f["req_headers"]  # the FULL request header set, for faithful replay
             if f["req_body"]:
                 rec["req_body"] = f["req_body"]
             if f["resp_body"] is not None:

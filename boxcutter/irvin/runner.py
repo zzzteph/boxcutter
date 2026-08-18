@@ -37,7 +37,7 @@ ALLOWED = {
     "dirsearch", "dirb", "path-fuzz", "nuclei", "git-extract", "scan-secrets", "screenshot",
     "fuzz", "sqlmap", "swagger-parser", "swagger-endpoints", "swagger-specs",
     "graphql-detect", "graphql-audit", "http-request",
-    "browser-crawl", "browser-login", "browser-actions", "visual-driver",
+    "harvest", "browser-login", "browser-actions", "visual-driver",
     "--list", "--help",
 }
 _ALWAYS = {"--list", "--help"}

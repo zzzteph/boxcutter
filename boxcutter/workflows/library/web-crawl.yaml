@@ -1,15 +1,22 @@
 name: web-crawl
-help: crawl a URL with Katana + ZAP, merged and deduped - the crawl you usually want
+help: crawl a URL with Katana + ZAP + harvest (real-browser, SPA-aware), merged - emits the endpoint CORPUS (URL strings from the spiders + method/url/body objects from harvest). Project it with ${crawl | urls} for URLs, or ${crawl | writes} for the POST/PUT endpoints.
 input: target
-output: urls
+output: crawl
 
-# Was a Python tool that drove both crawlers in-process; now a workflow so each
-# crawler runs through the normal tool path (header/debug propagation, graceful
-# skip when a binary is missing). Filter the result with ${... | js|params}.
+# Each crawler runs through the normal tool path (header/debug propagation, graceful skip when a binary is
+# missing). Katana/ZAP contribute URL strings; harvest contributes FULL objects (method/url/body/headers) so
+# the POST/PUT surface survives. Downstream: ${crawl | urls} flattens everything to URL strings (for the
+# | js|params filters), ${crawl | writes} takes just the state-changing endpoints.
 steps:
   - tool: katana-crawl
     target: ${target}
-    save: urls
+    save: crawl
   - tool: zap-crawl
     target: ${target}
-    save: urls
+    save: crawl
+  # harvest drives the app in a headless browser and captures the SPA's real endpoints (incl. the cross-origin
+  # api.* backend the HTTP spiders miss), keeping its full objects. Degrades to nothing if chromium is absent.
+  - tool: harvest
+    target: ${target}
+    args: --max-pages 0 --max-time 300 --max-actions 0   # deep crawl: unlimited pages/actions, 5-min cap
+    save: crawl

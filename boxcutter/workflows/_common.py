@@ -28,6 +28,7 @@ HEADER_CAPABLE = {
     "swagger-specs", "swagger-endpoints",
     "zap-scan-url", "zap-scan-openapi", "zap-scan-full", "zap-crawl",
     "graphql-detect", "graphql-audit",
+    "harvest",
 }
 
 

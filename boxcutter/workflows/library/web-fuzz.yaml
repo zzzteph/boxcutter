@@ -12,8 +12,11 @@ steps:
     do:
       - workflow: web-crawl
         target: ${live.item}
-        save: urls
+        save: crawl
 
+  # flatten the corpus to URL strings, then extend with JS-extracted endpoints
+  - select: ${crawl | urls}
+    save: urls
   - for_each: ${urls | js}
     do:
       - tool: js-endpoints
@@ -29,6 +32,17 @@ steps:
     do:
       - tool: fuzz
         target: ${params.item}
+        args: --timeout 120
+        save: findings
+
+  # POST/PUT lane: fuzz the captured body of each state-changing endpoint (empty on a non-SPA target)
+  - for_each: ${crawl | writes}
+    do:
+      - tool: fuzz
+        target: ${crawl.item.url}
+        flags:
+          --method: ${crawl.item.method}
+          --data: ${crawl.item.body}
         args: --timeout 120
         save: findings
 

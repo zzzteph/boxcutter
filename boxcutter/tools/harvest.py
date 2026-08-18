@@ -1,6 +1,6 @@
 """harvest - a deterministic, browser-driven DEEP crawler that maps an app's real request surface.
 
-Where `browser-crawl` renders ONE page and grabs its XHR, `harvest` drives the whole app like a user: it
+Where the raw HTTP tools fetch a SPA's empty shell, `harvest` drives the whole app like a user: it
 opens the target in a headless browser (CDP over system chromium, see core.cdp), dismisses consent banners,
 fills and submits forms, clicks the safe controls, follows in-scope links breadth-first, and does it across
 MANY states - capturing EVERY request the app makes (GET/POST/PUT/PATCH/..., XHR/fetch and full navigations,
@@ -63,9 +63,9 @@ def add_arguments(parser) -> None:
                         help="Attach to a persistent browser session (e.g. one already logged in by "
                              "logio/prawlio) to crawl AUTHENTICATED, instead of a fresh browser.")
     parser.add_argument("--max-pages", dest="max_pages", type=int, default=40,
-                        help="Max distinct states to visit (default 40).")
+                        help="Max distinct states to visit (default 40; 0 = unlimited, bounded only by --max-time).")
     parser.add_argument("--max-actions", dest="max_actions", type=int, default=20,
-                        help="Max fill+click actions per state (default 20).")
+                        help="Max fill+click actions per state (default 20; 0 = unlimited, bounded by --max-time).")
     parser.add_argument("--max-time", dest="max_time", type=int, default=180,
                         help="Overall crawl budget in seconds (default 180).")
     parser.add_argument("--timeout", type=int, default=45, help="Per-page load timeout (seconds).")
@@ -131,6 +131,18 @@ def _host_ok(host: str, patterns: list) -> bool:
     return False
 
 
+_NOISE_HEADERS = {"accept", "accept-encoding", "accept-language", "user-agent", "referer", "origin",
+                  "connection", "host", "content-length", "cache-control", "pragma", "dnt",
+                  "sec-fetch-mode", "sec-fetch-site", "sec-fetch-dest", "sec-fetch-user",
+                  "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "upgrade-insecure-requests"}
+
+
+def _useful_headers(hdrs: dict) -> dict:
+    """Drop the browser boilerplate, keep the app-set headers (Authorization, Content-Type, X-CSRF-Token,
+    custom X-* / API headers) so a replayed request carries what the server actually needs."""
+    return {k: v for k, v in (hdrs or {}).items() if k.lower() not in _NOISE_HEADERS}
+
+
 def _param_pairs(url: str, body: str | None, mime: str) -> list[tuple]:
     """(where, name, value) for every query + body param, best-effort (urlencoded or JSON body)."""
     pairs = [("query", k, v) for k, v in parse_qsl(urlparse(url).query, keep_blank_values=True)]
@@ -149,6 +161,37 @@ def _param_pairs(url: str, body: str | None, mime: str) -> list[tuple]:
 
 
 # -- interaction (deterministic, bounded) ------------------------------------
+_DEEP_LINKS_JS = r"""(() => {
+  const out = new Set();
+  const abs = (p) => { try { return new URL(p, location.href).href } catch(e){ return null } };
+  const add = (v) => { if (v){ const u = abs(v); if (u && /^https?:/.test(u)) out.add(u.split('#')[0]); } };
+  const visit = (root) => {
+    if (!root || !root.querySelectorAll) return;
+    try {
+      root.querySelectorAll('a[href]').forEach(a => add(a.getAttribute('href')));
+      // router-link style controls (Vue/React) that navigate without an <a href>
+      root.querySelectorAll('[to],[routerlink],[data-href],[data-to]').forEach(el => {
+        ['to','routerlink','data-href','data-to'].forEach(k => { const v = el.getAttribute(k); if (v && v[0]==='/') add(v); });
+      });
+      root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) visit(el.shadowRoot); });   // pierce shadow DOM
+    } catch(e) {}
+  };
+  visit(document);
+  try { document.querySelectorAll('iframe').forEach(f => { try { if (f.contentDocument) visit(f.contentDocument); } catch(e){} }); } catch(e){}
+  return Array.from(out);
+})()"""
+
+
+def _deep_links(page) -> list:
+    """Every navigable link the frontier should consider: plain <a href>, router-link controls that navigate
+    without an anchor (Vue/React), and links nested in shadow DOM or same-origin iframes - all of which a plain
+    `a[href]` query misses on a modern SPA."""
+    try:
+        return page.eval(_DEEP_LINKS_JS) or []
+    except CDPError:
+        return []
+
+
 def _dismiss_consent(page, dbg) -> None:
     for t in _CONSENT:
         try:
@@ -165,7 +208,7 @@ def _auto_fill(page, budget, dbg) -> int:
     """Type a throwaway value into empty text-like inputs and press Enter - reaches the 'enter your address'
     style APIs a click alone never triggers."""
     filled = 0
-    for _ in range(min(6, budget)):
+    for _ in range(6 if budget <= 0 else min(6, budget)):
         try:
             val = page.fill_nth(0)
         except CDPError:
@@ -181,11 +224,12 @@ def _auto_fill(page, budget, dbg) -> int:
     return filled
 
 
-def _auto_click(page, budget, dbg) -> int:
-    """Click through live clickable elements up to the budget, peeking each label first so a destructive
-    control (logout/delete/pay/...) is skipped WITHOUT ever being clicked."""
+def _auto_click(page, budget, dbg, deadline=None) -> int:
+    """Click through live clickable elements up to the budget (0 = unlimited), peeking each label first so a
+    destructive control (logout/delete/pay/...) is skipped WITHOUT ever being clicked. Stops at `deadline` so
+    an unlimited budget can never spin forever on a page that keeps revealing new controls."""
     clicked = 0
-    while clicked < budget:
+    while (budget <= 0 or clicked < budget) and (deadline is None or time.monotonic() < deadline):
         try:
             if page.clickable(1) < 1:
                 break
@@ -218,8 +262,10 @@ def _crawl(page, target, opts, dbg, navigate=True) -> None:
     queued = {_template(target)}
     visited = 0
     start = time.monotonic()
+    deadline = start + opts["max_time"]
 
-    while frontier and visited < opts["max_pages"] and (time.monotonic() - start) < opts["max_time"]:
+    max_pages = opts["max_pages"]                      # 0 (or negative) = unlimited, time-bounded only
+    while frontier and (max_pages <= 0 or visited < max_pages) and time.monotonic() < deadline:
         url = frontier.popleft()
         try:
             if page.current_url().split("#")[0] != url.split("#")[0]:
@@ -228,26 +274,29 @@ def _crawl(page, target, opts, dbg, navigate=True) -> None:
             dbg(f"harvest: navigate failed {url}: {exc}")
             continue
         visited += 1
-        dbg(f"harvest: [{visited}/{opts['max_pages']}] {url}")
+        dbg(f"harvest: [{visited}/{max_pages or '∞'}] {url}")
         _dismiss_consent(page, dbg)
         _auto_fill(page, opts["max_actions"], dbg)
-        _auto_click(page, opts["max_actions"], dbg)
+        _auto_click(page, opts["max_actions"], dbg, deadline)
         try:
             page.scroll("bottom")
             page.wait(300)
         except CDPError:
             pass
-        # enqueue new in-scope, not-yet-templated links
-        for h in {x for x in scope if x}:
-            try:
-                found = page.links(same_host=h)
-            except CDPError:
-                found = []
-            for link in found:
-                tmpl = _template(link)
-                if tmpl not in queued and _in_scope(link, scope):
-                    queued.add(tmpl)
-                    frontier.append(link)
+        # enqueue new in-scope links: anchors + router-link controls + shadow DOM + same-origin iframes
+        for link in _deep_links(page):
+            tmpl = _template(link)
+            if tmpl not in queued and _in_scope(link, scope):
+                queued.add(tmpl)
+                frontier.append(link)
+        # a click may have SPA-navigated to a route with no link - enqueue wherever we ended up
+        try:
+            cur = page.current_url().split("#")[0]
+        except CDPError:
+            cur = ""
+        if cur and _in_scope(cur, scope) and _template(cur) not in queued:
+            queued.add(_template(cur))
+            frontier.append(cur)
     dbg(f"harvest: crawled {visited} state(s), frontier left {len(frontier)}")
 
 
@@ -277,7 +326,7 @@ def _build(page, opts) -> tuple[list, dict, dict]:
         if agg is None:
             agg = {"method": m, "url": u, "template": tmpl, "type": r.get("type", "other"),
                    "status": r.get("status"), "params": [n for _, n, _ in pairs], "count": 0,
-                   "_body": body, "_auth": auth, "_mime": mime}
+                   "_body": body, "_auth": auth, "_mime": mime, "_headers": fl.get("req_headers") or {}}
             corpus[key] = agg
         agg["count"] += 1
         # parameter catalog: name -> {types, where, sample, count}
@@ -289,14 +338,13 @@ def _build(page, opts) -> tuple[list, dict, dict]:
 
     items = []
     for agg in sorted(corpus.values(), key=lambda a: (a["template"], a["method"])):
-        headers = {}
-        if agg["_auth"]:
-            headers["Authorization"] = agg["_auth"]
-        if agg["_body"] and ("json" in (agg["_mime"] or "") or agg["_body"].strip()[:1] in "{["):
-            headers.setdefault("Content-Type", "application/json")
+        headers = _useful_headers(agg["_headers"])
+        if agg["_body"] and not any(k.lower() == "content-type" for k in headers) and \
+                (("json" in (agg["_mime"] or "")) or agg["_body"].strip()[:1] in "{["):
+            headers["Content-Type"] = "application/json"
         item = {"method": agg["method"], "url": agg["url"], "template": agg["template"],
                 "type": agg["type"], "status": agg["status"], "params": agg["params"],
-                "seen": agg["count"]}
+                "seen": agg["count"], "body": agg["_body"] or "", "headers": headers}
         item.update(repro_mod.repro(agg["method"], agg["url"], headers or None, agg["_body"]))
         items.append(item)
 
@@ -316,7 +364,7 @@ def _write_har(page, path: str, patterns=None) -> None:
     for r in reqs:
         f = flows.get((r["method"], r["url"]), {})
         req = {"method": r["method"], "url": r["url"], "httpVersion": "HTTP/1.1",
-               "headers": ([{"name": "Authorization", "value": f["req_auth"]}] if f.get("req_auth") else []),
+               "headers": [{"name": k, "value": v} for k, v in (f.get("req_headers") or {}).items()],
                "queryString": [{"name": k, "value": v} for k, v in parse_qsl(urlparse(r["url"]).query)],
                "cookies": [], "headersSize": -1, "bodySize": len(f.get("req_body") or "")}
         if f.get("req_body"):

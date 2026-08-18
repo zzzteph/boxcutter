@@ -12,8 +12,11 @@ steps:
     do:
       - workflow: web-crawl
         target: ${live.item}
-        save: urls
+        save: crawl
 
+  # flatten the corpus to URL strings for the URL-based lanes, then extend with JS-extracted endpoints
+  - select: ${crawl | urls}
+    save: urls
   - for_each: ${urls | js}
     do:
       - tool: js-endpoints
@@ -36,6 +39,17 @@ steps:
     do:
       - workflow: endpoint-scan
         target: ${params.item}
+        save: findings
+
+  # POST/PUT lane: fuzz the captured body of each state-changing endpoint (empty on a non-SPA target)
+  - for_each: ${crawl | writes}
+    do:
+      - tool: fuzz
+        target: ${crawl.item.url}
+        flags:
+          --method: ${crawl.item.method}
+          --data: ${crawl.item.body}
+        args: --timeout 120
         save: findings
 
   # discover + DAST OpenAPI/Swagger endpoints - delegated to swagger-scan (find

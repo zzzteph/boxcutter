@@ -50,6 +50,28 @@ def _url(items: list) -> list:
     return out
 
 
+_WRITE_METHODS = {"POST", "PUT", "PATCH"}
+
+
+def _urls(items: list) -> list:
+    """Each item's URL: an object's ``url`` field, or a string passed through. Flattens harvest's corpus of
+    objects into the URL string list the ``| js|params`` filters and the fuzzers expect."""
+    out: list[str] = []
+    for it in items:
+        if isinstance(it, str):
+            out.append(it)
+        elif isinstance(it, dict) and it.get("url"):
+            out.append(it["url"])
+    return dedupe(out)
+
+
+def _writes(items: list) -> list:
+    """Keep the state-changing endpoints (POST/PUT/PATCH objects), the ones a URL-string pipeline drops. Their
+    method/body/headers are then passed to a fuzzer via a step's ``flags:``."""
+    return [it for it in items if isinstance(it, dict)
+            and str(it.get("method", "")).upper() in _WRITE_METHODS]
+
+
 FILTERS = {
     "params": _params,
     "js": _js,
@@ -57,4 +79,6 @@ FILTERS = {
     "unique": _unique,
     "hosts": _hosts,
     "url": _url,
+    "urls": _urls,
+    "writes": _writes,
 }

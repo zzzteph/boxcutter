@@ -33,7 +33,7 @@ RUN apk add --no-cache \
         libpcap-dev nss freetype harfbuzz ttf-freefont
 ENV HTTPX_NO_COLOR=1
 
-# Browser-driven tools (browser-crawl/login/actions) drive the system chromium above over the Chrome DevTools
+# Browser-driven tools (harvest/login/actions) drive the system chromium above over the Chrome DevTools
 # Protocol (boxcutter/core/cdp.py) using the pure-Python websocket-client lib - which installs fine on musl,
 # unlike Playwright (no Alpine/musl wheel). The tools import it lazily and degrade gracefully if it is absent.
 RUN pip3 install --no-cache-dir --break-system-packages websocket-client

@@ -141,6 +141,12 @@ def _run_step(step: dict, variables: dict, args, dbg) -> None:
         return
 
     extra = shlex.split(str(step.get("args", "")))
+    # `flags:` passes object-item fields to the tool as CLEAN argv tokens (no shell parsing), so a captured
+    # method/body/content-type survives quoting - e.g. flags: {--method: ${posts.item.method}, --data: ...}
+    for flag, ref in (step.get("flags") or {}).items():
+        val = _resolve_scalar(ref, variables)
+        if val not in (None, ""):
+            extra += [str(flag), str(val)]
     kind = getattr(module, "KIND", "items")  # findings | urls | items
     collected: list = []
     for target in _targets(step, variables):
@@ -198,7 +204,12 @@ def _targets(step: dict, variables: dict) -> list:
     # A step runs on a single value: its `target:`, or - inside a for_each - the
     # current loop item. Iterating a list is always done with for_each/do.
     if "target" in step:
-        items = _resolve_list(step["target"], variables)
+        val = _resolve_scalar(step["target"], variables)     # handles ${x} and ${x.item.field}
+        if isinstance(val, str):
+            return [val] if val else [""]
+        if isinstance(val, dict):
+            return [""]                                       # a dict item needs field access (${x.item.field})
+        items = _resolve_list(step["target"], variables)      # a list ref (e.g. ${urls | params}) keeps old behavior
         return items[:1] if items else [""]
     return [variables["_target"]]
 
@@ -223,6 +234,25 @@ def _resolve_list(ref, variables: dict) -> list:
         if f is not None:
             items = f(items)
     return items
+
+
+def _resolve_scalar(ref, variables: dict):
+    """Resolve ``${name}`` or ``${name.field.field}`` (dot access into an object item) to a single value.
+    A non-``${}`` ref is returned as-is. Used for a step's ``target`` and for ``flags:`` values, where one
+    value is wanted, not a list, e.g. ``${posts.item.url}`` / ``${posts.item.method}``. Loop-item vars are
+    named ``<list>.item`` (a dot in the name), so the LONGEST variable-name prefix wins, the rest is field
+    access into the (dict) item."""
+    if not (isinstance(ref, str) and ref.startswith("${") and ref.endswith("}")):
+        return ref
+    tokens = ref[2:-1].split("|")[0].strip().split(".")
+    for i in range(len(tokens), 0, -1):
+        key = ".".join(tokens[:i])
+        if key in variables:
+            val = variables[key]
+            for field in tokens[i:]:
+                val = val.get(field, "") if isinstance(val, dict) else ""
+            return val
+    return ""
 
 
 def _pick(items: list, path: str) -> list:
