@@ -204,6 +204,34 @@ def _is_suppressed(alert: dict) -> bool:
     return any(s in name for s in _ZAP_SUPPRESS_NAMES)
 
 
+# -- explicit scan-plan rule disables ---------------------------------------
+# Rules boxcutter turns OFF in EVERY active-scan plan (zap-scan-url, zap-scan-full) so ZAP never RUNS them -
+# not just hides them after the fact. `threshold` is QUOTED so the YAML parser doesn't read `off` as a boolean.
+# The report `risks` block drops medium (keeps high only). Keep in sync with the output-side suppression above.
+PASSIVE_DISABLE_JOB = (
+    "  - type: passiveScan-config\n"
+    "    rules:\n"
+    "      - id: 10003        # Vulnerable JS Library\n"
+    "        threshold: \"OFF\"\n"
+)
+# All of ZAP's TIME-BASED (blind) SQL-injection active-scan rules - the DB-specific scanners, one per engine.
+# These are the FP-prone "... (Time Based)" alerts. The generic SQL Injection scanner (40018, error/boolean/
+# UNION-based) stays ENABLED so real SQLi is still found.
+_TIME_BASED_SQLI = {
+    40019: "SQL Injection - MySQL (Time Based)",
+    40020: "SQL Injection - Hypersonic SQL (Time Based)",
+    40021: "SQL Injection - Oracle (Time Based)",
+    40022: "SQL Injection - PostgreSQL (Time Based)",
+    40024: "SQL Injection - SQLite (Time Based)",
+    40027: "SQL Injection - MsSQL (Time Based)",
+}
+ACTIVE_DISABLE_RULES = "      rules:\n" + "".join(
+    f"        - id: {rid}      # {name}\n          threshold: \"OFF\"\n"
+    for rid, name in _TIME_BASED_SQLI.items())
+# The report job's severities to include - medium dropped as noise.
+REPORT_RISKS = "    risks:\n      - high\n"
+
+
 def read_alerts(report_path: str) -> list[dict]:
     """Flatten + dedupe alerts from a traditional-json ZAP report."""
     try:

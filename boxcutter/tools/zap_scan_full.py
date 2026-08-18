@@ -65,6 +65,7 @@ def _build_plan(target_url: str, report_path: str, urls_path: str) -> str:
         - {context_url}{includes}
 
 jobs:
+{_zap.PASSIVE_DISABLE_JOB}
   - type: spider
     parameters:
       context: target
@@ -97,7 +98,7 @@ jobs:
     policyDefinition:
       defaultStrength: medium
       defaultThreshold: low
-
+{_zap.ACTIVE_DISABLE_RULES}
   - type: report
     parameters:
       template: traditional-json
@@ -106,7 +107,6 @@ jobs:
       reportTitle: 'ZAP Full Scan'
     risks:
       - high
-      - medium
     confidences:
       - high
       - medium

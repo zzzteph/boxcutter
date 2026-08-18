@@ -43,6 +43,11 @@ boxcutter swagger-scan https://api.example.com/openapi.json
 boxcutter swagger-scan api.example.com                              # find the spec first
 boxcutter graphql-audit https://api.example.com/graphql
 
+# map the app in a headless browser (SPA-aware: clicks links, submits forms, captures every request)
+boxcutter harvest https://app.example.com                          # dedupe into an endpoint corpus
+boxcutter harvest https://app.example.com --har traffic.har        # + a Burp/ZAP-importable HAR
+boxcutter harvest https://app.example.com --header "Cookie: session=..."    # authenticated crawl
+
 # start from a domain
 boxcutter recon example.com                                        # subdomains that resolve
 boxcutter env-scan example.com --steps                             # scan the whole environment
@@ -60,8 +65,8 @@ boxcutter raw nuclei -u https://example.com -t cves
 ```
 
 **Tools:** `subfinder` `dnsx` `httpx` `screenshot` `wayback` · `katana-crawl` `zap-crawl`
-`js-endpoints` · `nuclei` `sqlmap` `dirb` `dirsearch` `zap-scan-*` · `fuzz` `path-fuzz` ·
-`scan-secrets` `git-extract` · `swagger-*` `graphql-*` · `http-request`.
+`js-endpoints` `browser-crawl` `harvest` · `nuclei` `sqlmap` `dirb` `dirsearch` `zap-scan-*` · `fuzz`
+`path-fuzz` · `scan-secrets` `git-extract` · `swagger-*` `graphql-*` · `http-request`.
 **Workflows:** `web-full` `web-scan` `endpoint-scan` `web-fuzz` `web-sqlmap` `swagger-scan`
 `graphql-scan` `secrets-scan` `recon` `env-scan` `env-nuclei` `env-takeover`.
 
