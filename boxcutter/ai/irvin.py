@@ -20,6 +20,8 @@ import os
 import sys
 from urllib.parse import urlparse
 
+from ..core.args import add_common_args
+from ..core.envelope import output_result
 from ..irvin import pipeline
 from ..irvin import provider as _prov
 from ..irvin.context import Context
@@ -27,7 +29,7 @@ from ..irvin.provider import PROVIDERS, add_ai_provider_args, make_provider
 from ..irvin.runner import Runner
 
 NAME = "irvin"
-KIND = "items"
+KIND = "findings"
 HELP = "Conductor: travis -> bob -> caleb, verified + consolidated, with a CEO report and per-agent reasoning."
 
 
@@ -79,6 +81,9 @@ def add_arguments(parser) -> None:
                              "writes it.")
     parser.add_argument("--out-dir", dest="out_dir", default=None, metavar="DIR",
                         help="Save everything into DIR: report.md, trail.json, and a reasoning/ folder.")
+    # standard tool output flags (--output/--jsonl/--table/--debug): default stdout is the JSON findings
+    # envelope, parseable exactly like every other tool; --table prints the human Markdown report instead.
+    add_common_args(parser)
 
 
 def _dump_reasoning(sink, out_dir: str) -> list:
@@ -189,7 +194,11 @@ def run(args) -> int:
         close_all_sessions()          # tear down any browser session a sub-agent left open
 
     final = (report or "(no report generated)") + _reasoning_appendix(sink, args.reasoning_dir)
-    print(final)
+    # Output exactly like every other tool: --table renders the FINDINGS as a table; otherwise the JSON
+    # findings envelope (each finding severity/title/url/evidence, parseable uniformly). The Markdown report
+    # rides along in extra["report"], and --report / --out-dir write it to disk.
+    output_result(ctx.landscape["findings"], args.output,
+                  extra={"target": ctx.base_url, "report": report, "reasoning_records": len(sink)})
 
     if args.report:
         with open(args.report, "w", encoding="utf-8") as fh:

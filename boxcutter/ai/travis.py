@@ -575,10 +575,8 @@ def _run_discover(args, provider, headers: list, domain: str) -> int:
     extra = {"domain": domain, "stats": stats, "next": nxt,
              "notification": f"[travis] discovered {stats.get('live', 0)} live host(s) on {domain}; "
                              f"{sum(1 for r in rows if r['interest'] == 'High')} High-interest"}
-    if getattr(args, "table", False) and not args.output:
-        sys.stdout.write(report + "\n")
-    else:
-        output_result(rows, args.output, extra=extra)
+    # --table renders the ranked-host table (same as every tool); the report rides in extra["report"].
+    output_result(rows, args.output, extra=extra)
     return 0
 
 
@@ -646,8 +644,6 @@ def run(args) -> int:
 
     extra = {"host": host, "url": base_url, "interest": interest, "report": report,
              "notification": notif, "next": next_urls, "steps": steps}
-    if getattr(args, "table", False) and not args.output:
-        sys.stdout.write(report + "\n")
-    else:
-        output_result([row], args.output, extra=extra)
+    # --table renders the host row as a table (same as every tool); the report rides in extra["report"].
+    output_result([row], args.output, extra=extra)
     return 0

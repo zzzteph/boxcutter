@@ -3216,8 +3216,7 @@ def run(args) -> int:
             sys.stderr.write(f"bob: could not write report to {args.report}: {exc}\n")
 
     extra = {"target": base_url, "report": report, "summary": summary, "notification": notif, "steps": step + 1}
-    if getattr(args, "table", False) and not args.output:
-        sys.stdout.write(report + "\n")
-    else:
-        output_result(findings, args.output, extra=extra)
+    # Output exactly like every deterministic tool: --table renders the findings table, otherwise the JSON
+    # findings envelope. The human report rides in extra["report"] and is written by --report / --out-dir.
+    output_result(findings, args.output, extra=extra)
     return 0

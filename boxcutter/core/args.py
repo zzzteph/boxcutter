@@ -20,6 +20,12 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Also save the data to FILE as JSON Lines (one record per line)",
     )
     parser.add_argument(
+        "--json",
+        metavar="FILE",
+        default=None,
+        help="Also save the full JSON envelope to FILE (success/kind/data/error + extras, script-readable)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Print progress/diagnostics to stderr",

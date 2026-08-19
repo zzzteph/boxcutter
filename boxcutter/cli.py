@@ -22,6 +22,7 @@ from .core import capability
 from .core.args import add_common_args, add_severity_arg
 from .core.envelope import (
     output_result,
+    set_json_file,
     set_jsonl_file,
     set_output_kind,
     set_severity_filter,
@@ -242,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
 
     set_table_mode(getattr(args, "table", False))
     set_jsonl_file(getattr(args, "jsonl", None))
+    set_json_file(getattr(args, "json", None))
     set_output_kind(getattr(args, "_kind", "items"))
     # Findings-only filter; a no-op for url/items output. Set once here so it
     # applies to a single tool and to a workflow's final aggregated output alike.

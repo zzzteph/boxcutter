@@ -2949,8 +2949,7 @@ def run(args) -> int:
     extra = {"target": base_url, "report": report, "hosts": store.hosts,
              "identities": [{"label": s["label"], "role": s.get("role"), "source": s.get("source")} for s in store.sessions],
              "rounds": store.rounds}
-    if getattr(args, "table", False) and not args.output:
-        sys.stdout.write(report + "\n")
-    else:
-        output_result(store.findings, args.output, extra=extra)
+    # Output exactly like every deterministic tool: --table renders the findings table, otherwise the JSON
+    # findings envelope. The human report rides in extra["report"] and is written by --report / --out-dir.
+    output_result(store.findings, args.output, extra=extra)
     return 0

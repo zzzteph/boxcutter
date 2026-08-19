@@ -34,6 +34,11 @@ _FORCE_JSON_FILE = False
 # record per line). Only the outermost, user-facing result writes it.
 _JSONL_FILE: str | None = None
 
+# Optional --json path: the whole envelope (success/kind/data/error + extras) is
+# also written here as one pretty JSON object. Like --jsonl it is a side sink -
+# stdout still carries the primary output - so scripts can read a fixed file.
+_JSON_FILE: str | None = None
+
 # The kind of payload the current tool/workflow emits: one of "findings", "urls",
 # "items". Set by the CLI/runner from the tool's KIND before it runs, so every
 # envelope is self-describing and consumers know the data shape up front.
@@ -57,6 +62,11 @@ def set_force_json_file(enabled: bool) -> bool:
 def set_jsonl_file(path: str | None) -> None:
     global _JSONL_FILE
     _JSONL_FILE = path or None
+
+
+def set_json_file(path: str | None) -> None:
+    global _JSON_FILE
+    _JSON_FILE = path or None
 
 
 def set_output_kind(kind: str) -> None:
@@ -212,6 +222,13 @@ def output_result(
         with open(_JSONL_FILE, "w", encoding="utf-8") as fh:
             for item in data:
                 fh.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    # --json: also write the whole envelope as one pretty JSON object (not just the
+    # data - carries success/kind/error and extras like the agents' report), so a
+    # script can always read the full result from a fixed file path.
+    if _JSON_FILE:
+        with open(_JSON_FILE, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
     # --output FILE: a readable table, always (machine output goes to --jsonl/stdout).
     if output_file is not None:
