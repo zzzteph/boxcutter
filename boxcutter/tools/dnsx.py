@@ -10,6 +10,7 @@ include the resolved A/CNAME record on each line (host [A] 1.2.3.4  /  host [CNA
 from __future__ import annotations
 
 import os
+import re
 
 from ..core import fsutil, process
 from ..core.args import add_common_args
@@ -38,6 +39,21 @@ def _base_domain(name: str) -> str:
     """Registrable-ish base: last two labels (best-effort; fine for wildcard calibration)."""
     parts = (name or "").strip().strip(".").split(".")
     return ".".join(parts[-2:]) if len(parts) >= 2 else name
+
+
+# dnsx annotates each line with the DNS response code (because we pass -rcode noerror). Strip it so the
+# output is bare hostnames, like subfinder - or `host [A] 1.2.3.4` when --resp added the record (record
+# tags like [A]/[CNAME]/[AAAA] are kept; only the rcode tag is removed).
+_RCODE_TAG = re.compile(r"\s*\[(?:NOERROR|NXDOMAIN|SERVFAIL|REFUSED|NOTIMP|FORMERR)\]")
+
+
+def _clean_lines(raw: str) -> list[str]:
+    out = []
+    for ln in raw.splitlines():
+        ln = _RCODE_TAG.sub("", ln).strip()
+        if ln:
+            out.append(ln)
+    return out
 
 
 def run(args) -> int:
@@ -89,7 +105,7 @@ def run(args) -> int:
     raw = fsutil.read_text(result_file)
     fsutil.remove(result_file)
 
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    lines = _clean_lines(raw)
     dbg(f"dnsx: {len(lines)} resolved line(s)")
     output_result(lines, args.output)
     return 0
@@ -120,4 +136,4 @@ def brute(domain: str, wordlist: str, *, wildcard: bool = False, resp: bool = Fa
         return None
     raw = fsutil.read_text(result_file)
     fsutil.remove(result_file)
-    return [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    return _clean_lines(raw)
