@@ -93,3 +93,31 @@ def run(args) -> int:
     dbg(f"dnsx: {len(lines)} resolved line(s)")
     output_result(lines, args.output)
     return 0
+
+
+def brute(domain: str, wordlist: str, *, wildcard: bool = False, resp: bool = False,
+          rate: int = 0, timeout: int = 120, dbg=None) -> list[str] | None:
+    """Resolve ``<word>.<domain>`` for each word in ``wordlist``; return the resolved lines
+    (``host`` or ``host [A] 1.2.3.4`` with --resp). ``wildcard`` adds dnsx ``-wd`` filtering.
+    Returns None only when dnsx produced no output file (a hard failure) - distinct from ``[]``
+    (ran fine, nothing resolved). Emits no envelope, so callers can post-process the result
+    (e.g. fall back to an unfiltered pass when filtering removed everything)."""
+    cmd = ["dnsx", "-duc", "-rcode", "noerror", "-silent", "-a", "-aaaa", "-cname",
+           "-d", domain, "-w", wordlist]
+    if wildcard:
+        cmd += ["-wd", domain]
+    if resp:
+        cmd += ["-resp"]
+    if rate and rate > 0:
+        cmd += ["-rl", str(rate)]
+    result_file = fsutil.temp_file("dnsx_out_")
+    cmd += ["-o", result_file]
+    if dbg:
+        dbg(f"Command: {process.format_command(cmd)}")
+
+    process.run(cmd, timeout=timeout)
+    if not os.path.exists(result_file):
+        return None
+    raw = fsutil.read_text(result_file)
+    fsutil.remove(result_file)
+    return [ln.strip() for ln in raw.splitlines() if ln.strip()]
