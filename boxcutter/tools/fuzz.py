@@ -487,9 +487,19 @@ def _new_match(pattern: str, body: str, baseline_body: str, cache: dict):
     return None
 
 
-def _check_signal_reliable(method, url, body, param, payload_raw, pattern_raw, sess):
+def _is_html_response(resp) -> bool:
+    """True when the response would be parsed as HTML by a browser - the only context where a reflected
+    payload is XSS. A JS/JSON/plain response that echoes ``<script>`` is not (e.g. googletagmanager's
+    gtag/destination returns application/javascript). A missing/blank Content-Type is treated as
+    HTML-eligible (servers often omit it and default to text/html) so real reflections are not dropped."""
+    ct = (resp.get("headers") or {}).get("Content-Type", "").split(";")[0].strip().lower()
+    return ct in ("", "text/html", "application/xhtml+xml")
+
+
+def _check_signal_reliable(method, url, body, param, payload_raw, pattern_raw, sess, html_only=False):
     """Re-fire a dynamic payload to confirm. Shot 1 hit -> 2 more, need >=2/3;
-    shot 1 miss -> 4 more, need >=4/5. Returns (ok, signal, evidence, payload, url, status)."""
+    shot 1 miss -> 4 more, need >=4/5. Returns (ok, signal, evidence, payload, url, status).
+    ``html_only`` (used for XSS) requires the reflecting response to be HTML."""
     state = {"signal": None, "evidence": None, "payload": None, "url": url, "status": None}
 
     def _shot() -> bool:
@@ -499,6 +509,8 @@ def _check_signal_reliable(method, url, body, param, payload_raw, pattern_raw, s
             return False
         m = _match(pattern, resp["body"])
         if not m:
+            return False
+        if html_only and not _is_html_response(resp):     # a reflection in JS/JSON is not XSS
             return False
         state.update(signal="pattern_match", evidence=m.group(0)[:200],
                      payload=payload, url=resp["_url"], status=resp["status"])
@@ -564,7 +576,7 @@ def _run_inject_mode(method, target, body, sess, deadline: float, dbg) -> list[d
                     break
                 if _needs_reliability(payload_raw):
                     ok, signal, evidence, payload, url, status = _check_signal_reliable(
-                        method, target, body, param, payload_raw, pattern_raw, sess)
+                        method, target, body, param, payload_raw, pattern_raw, sess, html_only=(cls == "xss"))
                 else:
                     payload, pattern = _resolve_one(payload_raw, pattern_raw)
                     resp = _substitute(method, target, body, param, payload, sess)
@@ -573,7 +585,8 @@ def _run_inject_mode(method, target, body, sess, deadline: float, dbg) -> list[d
                         # Diff against the baseline: only a match the unfuzzed page
                         # did not already have counts as a signal.
                         m = _new_match(pattern, resp["body"], baseline_body, baseline_cache)
-                        if m:
+                        # XSS only counts when the reflection lands in an HTML response (a JS/JSON echo is not XSS).
+                        if m and (cls != "xss" or _is_html_response(resp)):
                             ok, signal, evidence = True, "pattern_match", m.group(0)[:200]
                             url, status = resp["_url"], resp["status"]
                 if ok:

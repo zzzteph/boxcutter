@@ -33,6 +33,7 @@ from .workflows._common import (
     add_dump_option,
     add_header_option,
     add_overrides_option,
+    add_scope_option,
     add_show_findings_option,
     add_steps_option,
 )
@@ -120,6 +121,7 @@ def _add_workflow_parser(subparsers: argparse._SubParsersAction) -> None:
         add_show_findings_option(sub)
         add_dump_option(sub)
         add_header_option(sub)
+        add_scope_option(sub)
         sub.set_defaults(_run=module.run)
     wf.set_defaults(_run=_run_workflow_index)
 

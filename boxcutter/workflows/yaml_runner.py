@@ -34,6 +34,7 @@ import os
 import pathlib
 import shlex
 
+from ..core import scope
 from ..core.envelope import (
     debug_logger,
     dedupe,
@@ -66,6 +67,9 @@ def run_spec(spec: dict, args) -> int:
     input_name = spec.get("input", "target")
     value = args.target.strip()
     variables: dict[str, object] = {input_name: value, "_target": value}
+    # Scope: every saved URL/host/finding is kept within these base domains (see _save). Fixed for the whole
+    # run - a for_each item never widens it - so a crawl's third-party hits are dropped, not scanned.
+    variables["_scope"] = _scope_bases(args, value)
 
     for step in spec.get("steps", []):
         _run_step(step, variables, args, dbg)
@@ -267,8 +271,33 @@ def _pick(items: list, path: str) -> list:
     return cur
 
 
+def _scope_bases(args, target: str) -> list:
+    """Resolve the run's in-scope base domains: --no-scope disables it ([]), --scope sets explicit domains,
+    else the target's own registrable domain."""
+    if getattr(args, "no_scope", False):
+        return []
+    explicit = getattr(args, "scope", None)
+    if explicit:
+        return [h for h in (scope.host_of(d) for d in str(explicit).split(",")) if h]
+    return scope.scope_bases(target)
+
+
+def _in_scope_item(item, bases: list) -> bool:
+    """A string is scoped by itself; an object (a finding, a harvest corpus entry) by its ``url`` field.
+    Anything without a host (a non-URL string, an object with no url) is kept."""
+    if isinstance(item, str):
+        return scope.in_scope(item, bases)
+    if isinstance(item, dict):
+        url = item.get("url")
+        return scope.in_scope(url, bases) if isinstance(url, str) and url else True
+    return True
+
+
 def _save(step: dict, variables: dict, result: list) -> None:
     name = step["save"]
+    bases = variables.get("_scope") or []
+    if bases:
+        result = [x for x in result if _in_scope_item(x, bases)]
     combined = list(variables.get(name, [])) + list(result)
     if all(isinstance(x, str) for x in combined):
         combined = dedupe(combined)

@@ -75,6 +75,25 @@ def add_overrides_option(parser) -> None:
     )
 
 
+def add_scope_option(parser) -> None:
+    """Add scope controls. By default a workflow keeps every collected URL/host/finding within the target's
+    own registrable domain, so third-party assets a crawl pulls in (googletagmanager.com, a CDN, fonts, ...)
+    are dropped instead of scanned."""
+    parser.add_argument(
+        "--scope",
+        metavar="DOMAINS",
+        default=None,
+        help="Comma-separated in-scope domains; a host matches a domain or any of its subdomains. "
+             "Overrides the default (the target's own registrable domain).",
+    )
+    parser.add_argument(
+        "--no-scope",
+        dest="no_scope",
+        action="store_true",
+        help="Disable scope filtering - scan every discovered host, third parties included.",
+    )
+
+
 def add_header_option(parser) -> None:
     """Add the repeatable ``--header`` option, propagated to header-capable tools."""
     parser.add_argument(
@@ -142,6 +161,8 @@ def run_workflow(module, target: str, args) -> list:
                 output=out,
                 tool_overrides=getattr(args, "tool_overrides", []),
                 header=getattr(args, "header", []),
+                scope=getattr(args, "scope", None),
+                no_scope=getattr(args, "no_scope", False),
             )
         )
     finally:

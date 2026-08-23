@@ -6,4 +6,4 @@ uniform JSON envelope ``{success, data, error}``. The tools are ported 1:1
 from the ShrewdEye scanner's Laravel artisan commands.
 """
 
-__version__ = "0.2.9"
+__version__ = "0.3.0"
