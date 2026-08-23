@@ -1,10 +1,13 @@
 name: env-takeover
-help: subfinder, then nuclei takeover templates on every discovered subdomain
+help: subfinder + dns-brute, then nuclei takeover templates on every discovered subdomain
 input: target
 output: findings
 
 steps:
   - tool: subfinder
+    target: ${target}
+    save: hosts
+  - tool: dns-brute
     target: ${target}
     save: hosts
 

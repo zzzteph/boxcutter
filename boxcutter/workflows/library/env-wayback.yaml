@@ -1,10 +1,13 @@
 name: env-wayback
-help: subfinder, wayback every subdomain, then endpoint-scan every parameterised URL (deduped)
+help: subfinder + dns-brute, wayback every subdomain, then endpoint-scan every parameterised URL (deduped)
 input: target
 output: findings
 
 steps:
   - tool: subfinder
+    target: ${target}
+    save: hosts
+  - tool: dns-brute
     target: ${target}
     save: hosts
 

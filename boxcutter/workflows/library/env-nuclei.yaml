@@ -1,10 +1,13 @@
 name: env-nuclei
-help: subfinder -> nuclei across the env (takeover on all hosts; web-nuclei template passes on live hosts)
+help: subfinder + dns-brute -> nuclei across the env (takeover on all hosts; web-nuclei template passes on live hosts)
 input: target
 output: findings
 
 steps:
   - tool: subfinder
+    target: ${target}
+    save: hosts
+  - tool: dns-brute
     target: ${target}
     save: hosts
 
