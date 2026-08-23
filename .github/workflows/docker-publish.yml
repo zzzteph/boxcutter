@@ -21,22 +21,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # One job per target. Each builds a multi-arch (amd64 + arm64) image and pushes
-  # the manifest to both registries directly - build-push-action handles the
-  # manifest list, so there is no digest/merge step. Runs sequentially (slim
-  # first, full last) so `:latest` is the most-recently-pushed tag and shows as
-  # the suggested pull command on the registry package page.
+  # Builds the full multi-arch (amd64 + arm64) image and pushes the manifest to
+  # both registries directly - build-push-action handles the manifest list, so
+  # there is no digest/merge step. Every build publishes `latest` and the current
+  # `__version__` to Docker Hub and GHCR.
   publish:
-    name: Publish ${{ matrix.target }}
+    name: Publish
     runs-on: ubuntu-latest
     permissions:
       packages: write
       contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        target: [slim, full]
     steps:
       - name: Check out the repo
         uses: actions/checkout@v6
@@ -60,6 +54,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Single source of truth for the published version tag: boxcutter/__init__.py
+      # __version__ (also what `boxcutter --version` reports). Bump it per change.
+      - name: Read version
+        id: version
+        run: |
+          v=$(sed -n 's/.*__version__ *= *"\([^"]*\)".*/\1/p' boxcutter/__init__.py)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "boxcutter version: $v"
+
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
@@ -67,11 +70,12 @@ jobs:
           images: |
             zzzteph/boxcutter
             ghcr.io/${{ github.repository }}
-          flavor: ${{ matrix.target == 'slim' && 'suffix=-slim,onlatest=true' || '' }}
-          # Only ever publish `latest` (and `latest-slim` for the slim target via
-          # flavor) - no version/ref tags, regardless of the release version.
+          # Every build publishes BOTH `latest` and the current `__version__`, for
+          # every architecture (amd64 + arm64), to Docker Hub and GHCR (so the tags
+          # are, per registry: latest and X.Y.Z).
           tags: |
             type=raw,value=latest
+            type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push
@@ -79,13 +83,13 @@ jobs:
         uses: docker/build-push-action@3b5e8027fcad23fda98b2e3ac259d8d67585f671
         with:
           context: .
-          target: ${{ matrix.target }}
+          target: full
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+          cache-from: type=gha,scope=full
+          cache-to: type=gha,mode=max,scope=full
 
       - name: Inspect manifest
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}

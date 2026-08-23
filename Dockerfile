@@ -22,10 +22,6 @@ WORKDIR /work
 ENTRYPOINT ["python3", "/opt/boxcutter/boxcutter.py"]
 CMD ["--help"]
 
-FROM base AS slim
-COPY boxcutter /opt/boxcutter/boxcutter
-COPY boxcutter.py /opt/boxcutter/boxcutter.py
-
 FROM base AS full
 RUN apk add --no-cache \
         openjdk17-jre \

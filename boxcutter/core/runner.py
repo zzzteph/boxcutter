@@ -20,8 +20,8 @@ def run_tool(module, argv: list[str]) -> dict:
     Example: ``run_tool(subfinder, ["example.com"])`` ->
     ``{"success": True, "data": [...], "error": None}``.
     """
-    # In a slim image the tool's binary may be absent; skip it cleanly so the
-    # workflow keeps going (the step just contributes no findings).
+    # The tool's binary may be absent (e.g. running outside the Docker image); skip
+    # it cleanly so the workflow keeps going (the step just contributes no findings).
     if not capability.name_available(module.NAME):
         req = capability.requirement_for(module.NAME)
         return {"success": False, "data": [], "error": f"{module.NAME} requires '{req}' (not installed)"}

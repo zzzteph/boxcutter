@@ -1,9 +1,10 @@
 """Which tools can actually run in this image.
 
-A tool that wraps an external binary only works if that binary is present. The
-same boxcutter code ships in both the full and slim images, so the CLI checks at
-runtime which tools are usable: ``--list`` hides the rest, and running one (or a
-workflow step that needs one) fails honestly instead of faking an empty result.
+A tool that wraps an external binary only works if that binary is present, which
+is not guaranteed (running the code outside the Docker image, or a binary that
+failed to install), so the CLI checks at runtime which tools are usable:
+``--list`` hides the rest, and running one (or a workflow step that needs one)
+fails honestly instead of faking an empty result.
 
 Tools not listed here are pure-Python and always available.
 """
