@@ -213,6 +213,13 @@ def _desugar(argv: list[str]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    # --version works in ANY position. argparse's version action only fires when
+    # --version precedes the subcommand; tacked onto a scan (e.g. `web-full <t>
+    # --version`) it would otherwise reach the subparser and error. Handle it up
+    # front so `boxcutter --version` and `boxcutter <tool> ... --version` both work.
+    if "--version" in raw_argv:
+        print(f"boxcutter {__version__}")
+        return 0
     parser = build_parser()
     args, extras = parser.parse_known_args(_desugar(raw_argv))
     # Passthrough tolerance: a tool that wraps an external binary and exposes

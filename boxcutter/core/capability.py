@@ -18,6 +18,7 @@ import shutil
 REQUIREMENTS: dict[str, str] = {
     "subfinder": "subfinder",
     "dnsx": "dnsx",
+    "dns-brute": "dnsx",
     "httpx": "httpx",
     "screenshot": "chromium-browser",
     "katana-crawl": "katana",

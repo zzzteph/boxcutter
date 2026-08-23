@@ -29,6 +29,7 @@ from . import (
     vision_verify,
     dirb,
     dirsearch,
+    dns_brute,
     dnsx,
     fuzz,
     git_extract,
@@ -62,6 +63,7 @@ TOOLS = [
     # Recon
     subfinder,
     dnsx,
+    dns_brute,
     httpx_probe,
     api_map,
     smart_enum,
