@@ -150,7 +150,12 @@ def _check_verbose_errors(ctx, findings):
 # --- sensitive fields -------------------------------------------------------
 
 def _check_secret_fields(ctx, schema, findings):
-    """Query each no-argument top-level field and flag any that return secrets."""
+    """Query each no-argument top-level field and flag any that ACTUALLY return a secret to us.
+
+    The field must return a non-null value: a query that is denied (``{"errors":[{"message":"Not
+    Authorized"}],"data":null}``) returned nothing, so it is not a leak. And the secret pattern is matched
+    against the field NAME or its returned VALUE only - never the whole response body, whose error ``path``
+    echoes the field name (``jwtToken`` -> "jwt") and would self-match on every denied secret-named field."""
     qtype = ((schema.get("queryType") or {}).get("name")) or "Query"
     for f in _fields_of(schema, qtype):
         if f.get("args"):
@@ -158,11 +163,19 @@ def _check_secret_fields(ctx, schema, findings):
         leaf = _leaf_selection(schema, f.get("type"))
         sel = (" { %s }" % leaf) if leaf else ""
         q = "{ %s%s }" % (f["name"], sel)
-        body = jsonlib.dumps(_json(ctx.gql(q)) or "")
-        if _SECRET.search(body):
+        resp = _json(ctx.gql(q))
+        data = resp.get("data") if isinstance(resp, dict) else None
+        if not isinstance(data, dict):
+            continue                                   # transport error / null data - the field returned nothing
+        value = data.get(f["name"])
+        if value in (None, "", [], {}):
+            continue                                   # field denied or empty - not a leak (the FP case)
+        value_json = jsonlib.dumps(value)
+        # A leak = a field NAMED like a secret that returned a value, or a value that itself looks secret.
+        if _SECRET.search(f["name"]) or _SECRET.search(value_json):
             findings.append(_finding(
                 "high", f"GraphQL field '{f['name']}' returns secrets",
-                f"Querying {{ {f['name']} }} returns sensitive data:\n" + body[:300], ctx.url,
+                f"Querying {{ {f['name']} }} returned a value unauthenticated:\n" + value_json[:300], ctx.url,
                 repro=ctx.repro(q)))
 
 
@@ -244,25 +257,39 @@ def _injection_hit(cls, r, payload):
 
 # --- mutations: safe dry-probe ----------------------------------------------
 
+# Auth denial in an error message (covers "Not Authorized" / "Not Authenticated" / 401 / 403 / access denied).
+_AUTH_ERR = re.compile(
+    r"unauthenticated|unauthori[sz]|not\s+auth|forbidden|not\s+allowed|access\s+denied|"
+    r"requires?\s+(?:auth|login|permission)|permission\s+denied|\b401\b|\b403\b|login\s+required", re.I)
+# A schema/validation error - returned BEFORE the resolver runs, so it says nothing about authorization.
+_VALIDATION_ERR = re.compile(
+    r"argument|required|must be|expected|cannot query field|of type|syntax|did you mean|provide", re.I)
+
+
 def _check_mutations(ctx, schema, findings):
     mtype = ((schema.get("mutationType") or {}).get("name"))
     if not mtype:
         return
     exposed = []
     for f in _fields_of(schema, mtype):
-        # send the mutation with NO arguments: a required-arg validation error means it
-        # is REACHABLE + UNAUTH, but (because GraphQL validates before executing) nothing ran.
+        # Dry-probe the mutation with NO arguments (nothing executes destructively). We can only claim it is
+        # unauthenticated if the resolver was actually REACHED without an auth error: an auth error means it
+        # is gated (good), and a required-arg VALIDATION error is returned pre-auth so it proves nothing.
         doc = _json(ctx.gql("mutation { %s }" % f["name"]))
-        body = jsonlib.dumps(doc) if doc else ""
-        if re.search(r"unauthor|forbidden|not allowed|requires? auth|permission", body, re.I):
-            continue  # auth-gated - good
-        if re.search(r"argument|required|must be|expected|cannot query field|of type", body, re.I):
-            exposed.append(f["name"])
+        if not isinstance(doc, dict):
+            continue
+        body = jsonlib.dumps(doc)
+        if _AUTH_ERR.search(body):
+            continue                        # auth-gated - good
+        if _VALIDATION_ERR.search(body):
+            continue                        # pre-auth validation error - inconclusive, NOT evidence of exposure
+        exposed.append(f["name"])           # reached without an auth or validation error -> ran unauthenticated
     if exposed:
         findings.append(_finding(
-            "high", "GraphQL mutations exposed without authentication",
-            "These mutations are reachable and not auth-gated (dry-probed with no args, so "
-            "nothing was executed):\n  " + ", ".join(exposed[:20])
+            "high", "GraphQL mutations executable without authentication",
+            "These mutations were dry-probed with no arguments and returned WITHOUT an auth error or a "
+            "required-argument validation error - so the resolver was reached unauthenticated:\n  "
+            + ", ".join(exposed[:20])
             + "\nReview them for authorization and abuse (e.g. privilege change, content edit).",
             ctx.url, repro=ctx.repro("mutation { %s }" % exposed[0])))
 
