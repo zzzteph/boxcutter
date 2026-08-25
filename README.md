@@ -140,6 +140,40 @@ boxcutter irvin example.com --reasoning-dir reasoning/ --out-dir run/
 boxcutter irvin example.com --reasoning 0 --tiers critical,high,medium
 ```
 
+## Server & agents
+
+The same image is also a web app and a scale-out scanner fleet. `boxcutter serve` runs the
+UI/API (with one built-in agent); `boxcutter agent` turns any host into a scanner that pulls
+jobs from that server over HTTP. One image, one version for all three modes, so every push
+rebuilds them together and an agent can never disagree with the engine it runs.
+
+**Run the server** (one host). Then open `http://<host>:8000` and log in with `root` / `root`
+(you are forced to change it on first login):
+
+```bash
+docker run -d --name boxcutter-server -p 8000:8000 -v boxcutter-data:/data \
+  ghcr.io/zzzteph/boxcutter serve
+```
+
+The server includes a built-in scanner that starts idle. Raise its "number of boxcutters" on
+the Scanners page to scan from the server host itself, or add dedicated agents:
+
+**Run an agent** (any number of other hosts). Copy the enroll token from the server's Scanners
+page, then point an agent at the server:
+
+```bash
+docker run -d --name boxcutter-agent \
+  ghcr.io/zzzteph/boxcutter agent --server https://scanner.example.com --token <ENROLL_TOKEN>
+```
+
+The agent enrolls, heartbeats, and runs N `boxcutter` jobs in parallel (`--concurrency N`, or
+change it live from the Scanners page). It also serves a small local control UI on `:7070`
+(login `root` / `root`) to set the server URL and token without redeploying. Put TLS (a reverse
+proxy) in front of the server for remote agents and browsers.
+
+From a source checkout (no Docker): `pip install -r server/requirements.txt` then
+`boxcutter serve`. Agents need no extra dependencies: `boxcutter agent --server ... --token ...`.
+
 ## Output
 
 One JSON envelope on stdout: `{ "success": true, "kind": "findings", "data": [...], "error": null }`.

@@ -5,6 +5,9 @@
 *.pyo
 .venv
 venv
+**/node_modules
+web/dist
+server/data
 .idea
 .vscode
 *.md

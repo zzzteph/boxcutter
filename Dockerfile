@@ -1,3 +1,15 @@
+# boxcutter - ONE image, three modes: the scanning engine (default CLI), the web server (`boxcutter serve`),
+# and a scale-out scanner agent (`boxcutter agent`). One build, one __version__ for all three - so a push
+# rebuilds everything together and an agent can never disagree with the engine it runs.
+
+# ---- stage: build the Vue SPA for `boxcutter serve` (VITE_API_BASE unset -> same-origin/relative API) ----
+FROM node:20-alpine AS web
+WORKDIR /web
+COPY web/package*.json ./
+RUN npm install
+COPY web/ ./
+RUN npm run build
+
 FROM alpine:3.20 AS base
 RUN apk add --no-cache \
         bash ca-certificates bind-tools wget curl unzip git \
@@ -56,3 +68,19 @@ RUN apk add --no-cache --virtual .dirb-build gcc make curl-dev musl-dev libcurl 
 
 COPY boxcutter /opt/boxcutter/boxcutter
 COPY boxcutter.py /opt/boxcutter/boxcutter.py
+
+# --- web server mode (`boxcutter serve`): FastAPI API + the built SPA + a built-in agent ---
+# Server deps go in a DEDICATED venv so the lean engine's system-python imports stay untouched (the base marks
+# system python externally-managed, PEP 668). `boxcutter serve` execs this venv for uvicorn; the engine and
+# `boxcutter agent` keep using the on-PATH python. The agent mode needs no extra deps - it is stdlib + the engine.
+COPY server /opt/boxcutter/server
+RUN python3 -m venv /opt/srv \
+ && /opt/srv/bin/pip install --no-cache-dir -r /opt/boxcutter/server/requirements.txt
+COPY --from=web /web/dist /opt/boxcutter/server/web_dist
+# DB + JWT secret + built-in-agent config persist here; mount a named volume to keep them across restarts.
+ENV DATA_DIR=/data \
+    DATABASE_URL=sqlite:////data/boxcutter_ui.db \
+    PYTHONUNBUFFERED=1
+VOLUME ["/data"]
+# 8000 = web UI/API (`boxcutter serve`); 7070 = a scanner's local control UI (`boxcutter agent`)
+EXPOSE 8000 7070
