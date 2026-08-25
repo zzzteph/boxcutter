@@ -164,6 +164,21 @@ proxy) in front of the server for remote agents and browsers.
 From a source checkout (no Docker): `pip install -r server/requirements.txt` then
 `boxcutter serve`. Agents need no extra dependencies: `boxcutter agent --server ... --token ...`.
 
+### Local models (Ollama)
+
+The AI agents can run on a local model instead of a hosted API - no key, no per-token cost. Install Ollama on
+a host (`curl -fsSL https://ollama.com/install.sh | sh`, then `ollama serve`), then in the UI under **LLM
+Profiles → Local models** click **Download** for a small model (`qwen2.5:7b` is a good default; the listed
+models all fit ~8GB RAM) and **Use in a profile** - an `ai_agent` template then runs on it.
+
+Models run where they're downloaded: the server manages the server host's Ollama, and each **agent** has its
+own Download buttons (on its `:7070` control UI) for its own Ollama - so a scanner only ever claims a job whose
+model it has installed. If the server (or an agent) runs in Docker and Ollama runs on the host, point it at the
+host with `OLLAMA_BASE_URL=http://host.docker.internal:11434` (on Linux also add
+`--add-host=host.docker.internal:host-gateway`); left blank, the server auto-detects that case. Small local
+models are weaker at multi-step agent reasoning than the hosted providers - good for cheap/offline passes, not
+a like-for-like swap for a deep scan.
+
 ## Output
 
 One JSON envelope on stdout: `{ "success": true, "kind": "findings", "data": [...], "error": null }`.

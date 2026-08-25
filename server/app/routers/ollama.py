@@ -40,6 +40,8 @@ def pull(body: PullIn, admin: User = Depends(require_admin)):
         ol.pull_async(body.name)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except RuntimeError as e:                   # Ollama host not reachable - a clear message, not a raw stack
+        raise HTTPException(503, str(e))
     return {"ok": True}
 
 

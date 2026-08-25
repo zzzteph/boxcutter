@@ -432,11 +432,17 @@ def delete_runner(runner_id: int, admin: User = Depends(require_admin), session:
         # the built-in agent is a permanent fixture — set its concurrency to 0 to idle it, but it can't be removed
         raise HTTPException(400, "the built-in agent can't be removed — set its concurrency to 0 to idle it")
     name = r.name or f"runner #{r.id}"
-    for job in session.exec(select(Job).where(
-            Job.runner_id == runner_id, Job.status.in_(["claimed", "running"]))).all():
-        job.status = "pending"
+    # Detach everything that references this runner BEFORE deleting it: requeue its in-flight jobs, and clear
+    # runner_id on ALL its jobs + activity rows - so the DELETE never hits a foreign-key constraint (Postgres)
+    # and leaves no dangling references (SQLite).
+    for job in session.exec(select(Job).where(Job.runner_id == runner_id)).all():
+        if job.status in ("claimed", "running"):
+            job.status = "pending"
         job.runner_id = None
         session.add(job)
+    for act in session.exec(select(Activity).where(Activity.runner_id == runner_id)).all():
+        act.runner_id = None
+        session.add(act)
     session.delete(r)
     session.commit()
     log_activity(session, "runner_deleted", f"Scanner '{name}' removed", severity="warn")

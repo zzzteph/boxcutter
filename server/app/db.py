@@ -27,6 +27,7 @@ _ADDED_COLUMNS = [
     ("job", "token", "VARCHAR(32)", "''"),
     ("runner", "internal", "BOOLEAN", "0"),
     ("runner", "engine_version", "VARCHAR(64)", "''"),
+    ("job", "needs_model", "VARCHAR(120)", "''"),
 ]
 
 

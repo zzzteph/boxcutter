@@ -28,9 +28,29 @@ _PULLS: dict = {}                       # name -> {"status": pulling|done|error,
 _LOCK = threading.Lock()
 
 
+_RESOLVED = {"url": ""}
+# When ollama_base_url is unset, try these in order. host.docker.internal is the Docker-Desktop bridge to the
+# HOST's Ollama - the common case where the server runs in a container and Ollama runs on the machine.
+_DEFAULT_CANDIDATES = ("http://localhost:11434", "http://host.docker.internal:11434")
+
+
 def base_url() -> str:
+    """The Ollama root URL. An explicit ollama_base_url always wins; otherwise the first reachable of
+    localhost / host.docker.internal, probed once and cached (so the server-in-Docker + Ollama-on-host case
+    works with no config)."""
     from .config import settings
-    return (settings.ollama_base_url or "http://localhost:11434").rstrip("/")
+    if settings.ollama_base_url:
+        return settings.ollama_base_url.rstrip("/")
+    if _RESOLVED["url"]:
+        return _RESOLVED["url"]
+    for cand in _DEFAULT_CANDIDATES:
+        try:
+            urllib.request.urlopen(cand + "/api/tags", timeout=2).read()
+            _RESOLVED["url"] = cand
+            return cand
+        except Exception:  # noqa: BLE001
+            continue
+    return _DEFAULT_CANDIDATES[0]                        # nothing up yet; localhost for a clear error message
 
 
 def openai_base() -> str:
@@ -61,10 +81,23 @@ def list_installed() -> list:
         return []
 
 
+def _friendly(exc) -> str:
+    """Turn a raw urllib connection error into an actionable message."""
+    s = str(exc)
+    low = s.lower()
+    if "refused" in low or "111" in s or "10061" in s or "urlopen" in low or "timed out" in low:
+        return f"Ollama not reachable at {base_url()} - is it running? (start Ollama, or set ollama_base_url)"
+    return s[:200]
+
+
 def pull_async(name: str) -> None:
-    """Start a background pull of a catalog model. Raises ValueError for a model not in the catalog."""
+    """Start a background pull of a catalog model. Raises ValueError for a model not in the catalog, or a
+    RuntimeError with a clear message when the Ollama host is not reachable."""
     if name not in _NAMES:
         raise ValueError("model is not in the curated catalog")
+    if not reachable():
+        raise RuntimeError(f"Ollama not reachable at {base_url()} - is it running? "
+                           "(start Ollama on that host, or set ollama_base_url)")
     with _LOCK:
         if _PULLS.get(name, {}).get("status") == "pulling":
             return
@@ -93,7 +126,7 @@ def _do_pull(name: str) -> None:
             _PULLS[name] = {"status": "done", "detail": "installed"}
     except Exception as exc:  # noqa: BLE001
         with _LOCK:
-            _PULLS[name] = {"status": "error", "detail": str(exc)[:200]}
+            _PULLS[name] = {"status": "error", "detail": _friendly(exc)}
 
 
 def _progress(j: dict) -> str:

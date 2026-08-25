@@ -159,9 +159,20 @@ def _ollama_reachable() -> bool:
         return False
 
 
+def _ollama_friendly(exc) -> str:
+    s = str(exc)
+    low = s.lower()
+    if "refused" in low or "111" in s or "10061" in s or "urlopen" in low or "timed out" in low:
+        return f"Ollama not reachable at {OLLAMA_URL} - is it running on this agent host?"
+    return s[:200]
+
+
 def _ollama_pull(name: str) -> None:
     if name not in _CATALOG_NAMES:
         raise ValueError("model not in catalog")
+    if not _ollama_reachable():
+        raise RuntimeError(f"Ollama not reachable at {OLLAMA_URL} - is it running on this agent host? "
+                           "(install/start Ollama, or set AGENT_OLLAMA_URL)")
     with _MODEL_LOCK:
         if _MODEL_PULLS.get(name, {}).get("status") == "pulling":
             return
@@ -194,7 +205,7 @@ def _do_model_pull(name: str) -> None:
         _ollama_installed(force=True)
     except Exception as exc:  # noqa: BLE001
         with _MODEL_LOCK:
-            _MODEL_PULLS[name] = {"status": "error", "detail": str(exc)[:200]}
+            _MODEL_PULLS[name] = {"status": "error", "detail": _ollama_friendly(exc)}
 
 
 def _model_status() -> dict:
@@ -821,6 +832,8 @@ class Handler(BaseHTTPRequestHandler):
                 _ollama_pull(name)
             except ValueError:
                 return self._send(400, json.dumps({"ok": False, "error": "unknown model"}))
+            except RuntimeError as e:
+                return self._send(503, json.dumps({"ok": False, "error": str(e)}))
             return self._send(200, json.dumps({"ok": True}))
         self._send(404, "{}")
 
