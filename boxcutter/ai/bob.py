@@ -35,6 +35,7 @@ import string
 import sys
 from urllib.parse import urlparse
 
+from . import skills
 from ..core import agentlog
 from ..core.envelope import debug_print, output_result
 from ..irvin import briefing
@@ -211,36 +212,10 @@ _SYSTEM = (
     "marker (e.g. `fuzz \"https://host/api/orders/{NUMBERS}\"`) to WALK the neighbouring objects. CONFIRM - "
     "other ids return VALID objects that are NOT yours (another user's order / profile / invoice) = IDOR / "
     "broken object-level authorization.\n"
-    "  - SWAGGER / OPENAPI SPEC: TRIGGER - swagger-specs found a spec (or you see a Swagger/OpenAPI UI). ACTION "
-    "- swagger-endpoints to MAP every operation, then WORK THE WHOLE LIST: http-request each UNAUTHENTICATED to "
-    "see which need no auth; on any operation taking an object-id path/query param run the ID ENUMERATION play; "
-    "flag test/debug ops (below); and FUZZ every endpoint (its --fuzzable variants). CONFIRM - a spec is the "
-    "full map of the API's real surface, so unauth operations returning data, enumerable objects, working "
-    "test/debug ops, and injections are ALL findings - do NOT stop at 'a spec exists'.\n"
-    "  - GRAPHQL DEEP-DIVE (when the API is GraphQL this IS the whole attack surface - never stop at 'introspection "
-    "enabled'): TRIGGER - graphql-detect found a GraphQL endpoint, a /graphql path answers a POST "
-    "`{\"query\":\"{__typename}\"}`, or the SPA bundle points at a single GraphQL URL. ACTION - (1) graphql-audit it "
-    "(introspection, arg-injection SQLi/SSTI, verbose errors, mutation exposure - it self-confirms these). (2) Then "
-    "go BEYOND the auto-audit, which ONLY injects no-arg fields and merely DRY-probes mutations: send your OWN "
-    "http-request POSTs of `{\"query\":\"...\"}` bodies to /graphql, driven by the introspected schema, and reason "
-    "GENERICALLY about each field by its name, args and return type (never a memorised query name):\n"
-    "     - EXCESSIVE DATA: on any field returning a user/account/object type, SELECT the sensitive scalar "
-    "subfields (`password`, `passwordHash`, `token`, `accessToken`, `apiKey`, `secret`, `email`, `ssn`, `card`). A "
-    "field that returns another principal's credential/token/PII unauthenticated is excessive-data exposure.\n"
-    "     - BOLA VIA ARGS: any field taking an `id`/`code`/`slug`/`userId`/`orderId`-style arg - pass ids you were "
-    "NOT given (walk 1,2,3; sequential codes like `GC-00001`; a UUID you saw echoed elsewhere) and select the "
-    "sensitive subfields. Objects that are not yours coming back = BOLA / broken object-level auth.\n"
-    "     - PATH TRAVERSAL VIA ARGS: any arg named `file`/`path`/`doc`/`name`/`template`/`report` - set it to "
-    "`../../../../etc/passwd`; file contents back = traversal.\n"
-    "     - MUTATIONS YOU MUST EXECUTE (the auto-audit will not - it dry-probes): run the SINGLE-REQUEST ones with "
-    "real args and read the response. A register/signup that accepts and reflects a `role`/`credits`/`isAdmin` "
-    "input field = mass-assignment; a requestPasswordReset/forgotPassword that RETURNS the reset token in its "
-    "response = leaked/weak reset; a loginAs/impersonate/switchUser that mints ANOTHER user's token with no admin "
-    "check = broken auth (then CHAIN that token); a checkout/refund/transfer that trusts a client "
-    "`total`/`amount`/negative value = business logic.\n"
-    "   CONFIRM - unauth sensitive fields, another principal's object, file contents in a field, a stuck privileged "
-    "input field, a returned reset token, or a minted foreign token are EACH a separate finding. The `extensions` "
-    "stack traces on errors are verbose-error disclosure.\n"
+    "  - API SURFACE (Swagger/OpenAPI and GraphQL): run swagger-specs and graphql-detect on the host. If either "
+    "finds something, a DETAILED exploitation playbook for that surface is injected into this prompt below - "
+    "follow it. A spec or a GraphQL endpoint IS the full map of the API's real surface; never stop at 'a spec "
+    "exists' / 'introspection enabled'.\n"
     "  - TEST / DEBUG ENDPOINTS: TRIGGER - the app is an API (a spec / GraphQL / a bare-JSON root); test/debug "
     "leftovers are the highest-yield unauth wins. ACTION - probe these CONCRETE paths in ONE batch (they are "
     "cheap http-requests): `/debug`, `/_debug`, `/__debug`, `/_dev`, `/api/debug`, `/api/_debug`, "
@@ -3052,6 +3027,63 @@ def add_arguments(parser) -> None:
     add_agent_args(parser, max_steps=500)
 
 
+# Query-param names that hint at a specific attack surface (matched against params seen in discovered URLs).
+_SSRF_PARAMS = {"url", "uri", "link", "src", "source", "dest", "destination", "callback", "webhook", "feed",
+                "proxy", "fetch", "load", "remote", "target", "image", "img", "imageurl", "avatar", "host",
+                "site", "open", "reference", "u"}
+_REDIRECT_PARAMS = {"redirect", "redirect_uri", "redirecturl", "redir", "return", "returnurl", "return_to",
+                    "returnto", "continue", "next", "dest", "destination", "url", "goto", "out", "rurl"}
+_LFI_PARAMS = {"file", "filename", "filepath", "path", "doc", "document", "template", "page", "include",
+               "download", "view", "dir", "folder", "report", "read", "content", "style", "pdf"}
+_SSTI_ENGINES = ("jinja", "twig", "freemarker", "velocity", "smarty", "thymeleaf", "mako")
+
+
+def _signals(cache: dict) -> set:
+    """Deterministic surface signals from what the tools have observed so far. Drives skills.for_signals() so a
+    surface-specific playbook is injected into the prompt only when that surface is actually present - and the
+    same target always yields the same signals, so runs stay reproducible."""
+    sig: set = set()
+    params: set = set()
+    blobs = []
+    for key, val in cache.items():
+        tool = (key[0] if isinstance(key, (tuple, list)) and key else str(key)).lower()
+        try:
+            blob = (tool + " " + (val if isinstance(val, str) else json.dumps(val, default=str)))[:8000].lower()
+        except Exception:  # noqa: BLE001
+            blob = tool
+        blobs.append(blob)
+        params.update(re.findall(r"[?&]([a-z0-9_.\-\[\]]{1,40})=", blob))
+    text = " ".join(blobs)[:400000]
+
+    if "graphql" in text or "__typename" in text or "__schema" in text:
+        sig.add("graphql")
+    if "swagger" in text or "openapi" in text:
+        sig.add("swagger")
+    if "eyj" in text:                                                  # a JWT (eyJ...) was observed
+        sig.add("jwt")
+    if params:                                                         # any query param = injectable input surface
+        sig.add("xss")
+    if params & _SSRF_PARAMS:
+        sig.add("ssrf")
+    if params & _REDIRECT_PARAMS:
+        sig.add("open-redirect")
+    if params & _LFI_PARAMS:
+        sig.add("lfi")
+    if "application/xml" in text or "text/xml" in text or "<?xml" in text or "soap" in text:
+        sig.add("xxe")
+    if "multipart/form-data" in text or "upload" in text or 'type="file"' in text or "type='file'" in text:
+        sig.add("file-upload")
+    if "access-control-allow-origin" in text:
+        sig.add("cors")
+    if any(t in text for t in _SSTI_ENGINES):
+        sig.add("ssti")
+    if ('type="password"' in text or "type='password'" in text or "set-cookie" in text
+            or any(p in text for p in ("/login", "/signin", "/sign-in", "/oauth", "/session", "/sso",
+                                       "/logout", "/auth/"))):
+        sig.add("auth")
+    return sig
+
+
 def run(args) -> int:
     target = args.target.strip()
     if not target:
@@ -3063,7 +3095,7 @@ def run(args) -> int:
 
     provider_cls = PROVIDERS[args.provider]          # bob is an LLM agent - a provider/key is MANDATORY
     key = args.api_key or os.environ.get(provider_cls.env)
-    if not key:
+    if not key and getattr(provider_cls, "requires_key", True):
         sys.stderr.write(f"bob: an LLM is required - provide --api-key or set {provider_cls.env} "
                          f"for --provider {args.provider}\n")
         return 2
@@ -3096,7 +3128,10 @@ def run(args) -> int:
 
     for step in range(max(1, args.max_steps)):
         try:
-            resp = provider.send(_SYSTEM, messages, tools_spec)
+            # Signal-triggered skills: inject a surface-specific playbook (GraphQL, Swagger) only once the tools
+            # have actually observed that surface - so a plain site never carries API-only methodology.
+            system = _SYSTEM + skills.for_signals(_signals(cache))
+            resp = provider.send(system, messages, tools_spec)
         except Exception as exc:  # noqa: BLE001
             sys.stderr.write(f"bob: provider error: {exc}\n")
             break

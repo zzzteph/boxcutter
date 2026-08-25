@@ -19,7 +19,7 @@ from .activity import cap_job_events, prune_logs
 from .config import settings
 from .db import engine, init_db
 from .queue import requeue_stale
-from .routers import admin, auth, keys, runners, scans, templates
+from .routers import admin, auth, keys, ollama, runners, scans, templates
 from .seed import seed
 
 
@@ -117,6 +117,7 @@ app.include_router(runners.router)
 app.include_router(templates.router)
 app.include_router(admin.router)
 app.include_router(keys.router)
+app.include_router(ollama.router)
 
 # Prod: serve the built SPA if present (web/dist copied to ./web_dist in the image).
 _web = Path(__file__).resolve().parent.parent / "web_dist"

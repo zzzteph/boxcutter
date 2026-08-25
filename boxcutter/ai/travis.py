@@ -594,7 +594,7 @@ def run(args) -> int:
     if not deterministic_only:
         provider_cls = PROVIDERS[args.provider]
         key = args.api_key or os.environ.get(provider_cls.env)
-        if not key:
+        if not key and getattr(provider_cls, "requires_key", True):
             sys.stderr.write(f"travis: an LLM is required - provide --api-key or set {provider_cls.env} "
                              f"for --provider {args.provider}\n")
             return 2

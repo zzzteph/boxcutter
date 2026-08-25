@@ -50,6 +50,8 @@ class _Provider:
     `reasoning` is the native-thinking token budget (0 = off); when set, each provider enables its model's
     thinking channel in send()/chat() and parse() keeps the thinking blocks instead of dropping them."""
 
+    requires_key = True                      # providers with no API key (e.g. local Ollama) override to False
+
     def _init_reasoning(self, reasoning=0):
         self.reasoning = int(reasoning or 0)   # native-thinking token budget; 0 disables it
         self.sink = None                        # optional list: one {agent,narration,reasoning,calls} per turn
@@ -220,7 +222,20 @@ class LiteLLM(OpenAI):
     _default_base, _base_env = "http://localhost:4000", "LITELLM_BASE_URL"
 
 
-PROVIDERS = {"anthropic": Anthropic, "openai": OpenAI, "litellm": LiteLLM}
+class Ollama(OpenAI):
+    """Local Ollama - OpenAI-compatible API at :11434/v1, NO API key needed (models run on your own box):
+    `boxcutter <agent> --provider ollama --model llama3.1:8b`. Point elsewhere with --llm-proxy-url /
+    OLLAMA_BASE_URL. NOTE: small local models are markedly weaker at multi-step agentic reasoning than the
+    hosted providers - good for cheap/offline passes, not a like-for-like swap for a deep scan."""
+    default_model, env = "llama3.1:8b", "OLLAMA_API_KEY"
+    _default_base, _base_env = "http://localhost:11434/v1", "OLLAMA_BASE_URL"
+    requires_key = False
+
+    def __init__(self, model, key, base_url=None, reasoning=0):
+        super().__init__(model, key or "ollama", base_url, reasoning)   # Ollama ignores the bearer token
+
+
+PROVIDERS = {"anthropic": Anthropic, "openai": OpenAI, "litellm": LiteLLM, "ollama": Ollama}
 
 
 # Reasoning-capture context. Lets a conductor collect reasoning from the agents it drives WITHOUT changing
@@ -267,7 +282,8 @@ def add_ai_provider_args(parser) -> None:
     (`boxcutter logio ...`) puts flags AFTER the agent name - so a shared adder, not a group argument, is the
     correct way to share them."""
     parser.add_argument("--provider", default="anthropic", choices=list(PROVIDERS),
-                        help="LLM provider (default anthropic; 'litellm' fronts any provider via your gateway)")
+                        help="LLM provider (default anthropic; 'ollama' runs a local model with no key; "
+                             "'litellm' fronts any provider via your gateway)")
     parser.add_argument("--model", default=None, help="Model id (default: the provider's default)")
     parser.add_argument("--api-key", dest="api_key", default=None,
                         help="LLM API key (or set the provider's env var, e.g. ANTHROPIC_API_KEY)")

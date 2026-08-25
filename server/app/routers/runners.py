@@ -161,9 +161,15 @@ def enroll(body: EnrollIn, session: Session = Depends(get_session)):
 
 
 # ---- job loop -----------------------------------------------------------------------------------------------
+class ClaimIn(BaseModel):
+    models: list[str] = []                 # local models the agent has installed (gates ollama-profile jobs)
+
+
 @router.post("/runner/claim")
-def claim(runner: Runner = Depends(current_runner), session: Session = Depends(get_session)):
-    job = claim_job(session, runner)
+def claim(body: ClaimIn = ClaimIn(), runner: Runner = Depends(current_runner),
+          session: Session = Depends(get_session)):
+    # NEVER hand this runner a job whose required local model it lacks - it simply isn't selected for it.
+    job = claim_job(session, runner, body.models)
     if not job:
         return {"job": None}
     tmpl = session.get(Template, job.template_id)

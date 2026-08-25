@@ -117,6 +117,91 @@ def save_config(cfg: dict) -> None:
 CFG = load_config()
 
 
+# ---- local models (this agent's OWN Ollama) -----------------------------------------------------------------
+# Each agent runs models on its own hardware: it pulls to its LOCAL Ollama and reports which it has installed,
+# so the server never hands it a job whose model it can't run. Point elsewhere with AGENT_OLLAMA_URL.
+OLLAMA_URL = os.environ.get("AGENT_OLLAMA_URL", "http://localhost:11434").rstrip("/")
+MODEL_CATALOG = [
+    {"name": "qwen2.5:3b",       "size_gb": 2.0, "note": "fast, low-RAM"},
+    {"name": "llama3.2:3b",      "size_gb": 2.0, "note": "low-RAM alt"},
+    {"name": "phi3.5",           "size_gb": 2.2, "note": "3.8B"},
+    {"name": "mistral:7b",       "size_gb": 4.4, "note": "all-round"},
+    {"name": "qwen2.5:7b",       "size_gb": 4.7, "note": "recommended"},
+    {"name": "qwen2.5-coder:7b", "size_gb": 4.7, "note": "tool-use"},
+    {"name": "llama3.1:8b",      "size_gb": 4.9, "note": "strong"},
+]
+_CATALOG_NAMES = {m["name"] for m in MODEL_CATALOG}
+_MODEL_PULLS: dict = {}
+_MODEL_LOCK = threading.Lock()
+_INSTALLED = {"models": [], "at": 0.0}       # ~10s cache so the claim loop doesn't hammer Ollama
+
+
+def _ollama_installed(force: bool = False) -> list:
+    now = time.monotonic()
+    if not force and _INSTALLED["models"] and now - _INSTALLED["at"] < 10:
+        return _INSTALLED["models"]
+    out: list = []
+    try:
+        with urllib.request.urlopen(OLLAMA_URL + "/api/tags", timeout=3) as r:
+            data = json.loads(r.read().decode() or "{}")
+        out = sorted({(m.get("name") or "").split("@")[0] for m in (data.get("models") or []) if m.get("name")})
+    except Exception:  # noqa: BLE001
+        out = []
+    _INSTALLED.update(models=out, at=now)
+    return out
+
+
+def _ollama_reachable() -> bool:
+    try:
+        urllib.request.urlopen(OLLAMA_URL + "/api/tags", timeout=2).read()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ollama_pull(name: str) -> None:
+    if name not in _CATALOG_NAMES:
+        raise ValueError("model not in catalog")
+    with _MODEL_LOCK:
+        if _MODEL_PULLS.get(name, {}).get("status") == "pulling":
+            return
+        _MODEL_PULLS[name] = {"status": "pulling", "detail": "starting"}
+    _spawn(_do_model_pull, (name,))
+
+
+def _do_model_pull(name: str) -> None:
+    try:
+        body = json.dumps({"name": name, "stream": True}).encode()
+        req = urllib.request.Request(OLLAMA_URL + "/api/pull", data=body,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        detail = "starting"
+        with urllib.request.urlopen(req, timeout=3600) as r:
+            for raw in r:
+                try:
+                    j = json.loads(raw.decode())
+                except ValueError:
+                    continue
+                if j.get("error"):
+                    raise RuntimeError(j["error"])
+                st = j.get("status", "")
+                if j.get("total"):
+                    st = f"{st} {int(100 * (j.get('completed') or 0) / j['total'])}%"
+                detail = st or detail
+                with _MODEL_LOCK:
+                    _MODEL_PULLS[name] = {"status": "pulling", "detail": detail}
+        with _MODEL_LOCK:
+            _MODEL_PULLS[name] = {"status": "done", "detail": "installed"}
+        _ollama_installed(force=True)
+    except Exception as exc:  # noqa: BLE001
+        with _MODEL_LOCK:
+            _MODEL_PULLS[name] = {"status": "error", "detail": str(exc)[:200]}
+
+
+def _model_status() -> dict:
+    with _MODEL_LOCK:
+        return {k: dict(v) for k, v in _MODEL_PULLS.items()}
+
+
 # ---- http helpers (stdlib) ----------------------------------------------------------------------------------
 def _req(method: str, path: str, body: dict | None = None, token: str | None = None, timeout: int = 60):
     url = CFG["server_url"].rstrip("/") + path
@@ -369,7 +454,8 @@ def worker(idx: int) -> None:
                 time.sleep(1.0)
                 continue
             try:
-                res = _req("POST", "/runner/claim", {}, CFG["token"], timeout=65)
+                # report the local models we have, so the server never hands us a job we can't run
+                res = _req("POST", "/runner/claim", {"models": _ollama_installed()}, CFG["token"], timeout=65)
             except Exception:  # noqa: BLE001
                 time.sleep(2.0)
                 continue
@@ -617,6 +703,9 @@ _DASH_HTML = ("<!doctype html><meta charset=utf-8><meta name=viewport content='w
               "<div class=row style='justify-content:flex-start;gap:8px'>"
               "<button onclick=save()>Save &amp; connect</button>"
               "<button class=ghost id=drainbtn onclick=drain()>Pause (drain)</button></div></div>"
+              "<div class=card><h2>Local models (Ollama)</h2>"
+              "<div class=muted id=olstat style='font-size:12px'>—</div>"
+              "<div id=models style='margin-top:8px'></div></div>"
               "<div class=card><h2>Agent password</h2>"
               "<div class=muted style='font-size:12px'>The scanner's own login (default root/root). Independent of the server.</div>"
               "<label>New password</label><input id=newpw type=password placeholder='at least 4 characters'>"
@@ -645,7 +734,14 @@ _DASH_HTML = ("<!doctype html><meta charset=utf-8><meta name=viewport content='w
               "async function setpw(){let r=await fetch('/set-password',{method:'POST',headers:{'Content-Type':'application/json'},"
               "body:JSON.stringify({new_password:newpw.value})});"
               "document.getElementById('pwmsg').textContent=r.ok?'\\u2713 updated':'too short (min 4)';newpw.value='';}"
-              "setInterval(refresh,2000);refresh();</script>")
+              "async function loadModels(){try{let r=await fetch('/models');if(!r.ok)return;let s=await r.json();"
+              "document.getElementById('olstat').innerHTML='Ollama '+(s.reachable?'<span class=ok>reachable</span>':'<span class=bad>not running</span>')+' at '+esc(s.base)+' — models run on THIS agent';"
+              "let el=document.getElementById('models');el.innerHTML=(s.models||[]).map(function(m){"
+              "var a=m.installed?'<span class=ok>installed</span>':(m.pull&&m.pull.status===\"pulling\"?'<span class=muted>'+esc(m.pull.detail||'downloading…')+'</span>':(m.pull&&m.pull.status===\"error\"?'<span class=bad>'+esc(m.pull.detail)+'</span>':'<button data-pull=\"'+esc(m.name)+'\">Download</button>'));"
+              "return '<div class=slot style=\"display:flex;justify-content:space-between;align-items:center;gap:8px\"><span>'+esc(m.name)+' <span class=muted>~'+m.size_gb+'GB · '+esc(m.note)+'</span></span><span>'+a+'</span></div>';}).join('');"
+              "el.onclick=function(e){var n=e.target.getAttribute('data-pull');if(n)pullModel(n);};}catch(e){}}"
+              "async function pullModel(n){await fetch('/pull',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})});loadModels();}"
+              "setInterval(refresh,2000);setInterval(loadModels,2500);refresh();loadModels();</script>")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -677,6 +773,15 @@ class Handler(BaseHTTPRequestHandler):
             with _LOCK:
                 self._send(200, json.dumps({**STATE, "concurrency": CFG.get("concurrency", 1),
                                             "server": CFG.get("server_url", "")}))
+        elif self.path == "/models":
+            if not self._authed():
+                return self._send(401, "{}")
+            installed = set(_ollama_installed())
+            st = _model_status()
+            self._send(200, json.dumps({
+                "reachable": _ollama_reachable(), "base": OLLAMA_URL,
+                "models": [{**m, "installed": m["name"] in installed, "pull": st.get(m["name"])}
+                           for m in MODEL_CATALOG]}))
         elif self._authed():
             self._send(200, _DASH_HTML, "text/html")
         else:
@@ -709,6 +814,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, json.dumps({"ok": False, "error": "password too short"}))
             CFG["ui_password_hash"] = _hash_pw(new)
             save_config(CFG)
+            return self._send(200, json.dumps({"ok": True}))
+        if self.path == "/pull":
+            name = str(self._json_body().get("name", ""))
+            try:
+                _ollama_pull(name)
+            except ValueError:
+                return self._send(400, json.dumps({"ok": False, "error": "unknown model"}))
             return self._send(200, json.dumps({"ok": True}))
         self._send(404, "{}")
 

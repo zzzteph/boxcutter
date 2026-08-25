@@ -19,6 +19,14 @@ runs/
 runs2/
 *.log
 
+# Frontend build artifacts (the Docker image builds its own via the node stage)
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Server runtime data (SQLite DB + generated secret; not source)
+server/data/
+
 # caleb coverage working area (harness, ground-truth keys, handoff docs, run artifacts) - kept on disk, not tracked
 opt/
 

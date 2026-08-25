@@ -75,31 +75,21 @@ boxcutter raw nuclei -u https://example.com -t cves
 
 ## Browser crawl (SPA)
 
-`harvest` drives the target in a real headless browser (Chromium over CDP): it clicks links,
-submits forms, and follows routes across the app, capturing every request the page makes (GET
-and POST, XHR/fetch and full navigations), including the cross-origin `api.*` backend a plain
-spider never sees. It dedupes into an endpoint corpus (path ids templated to `{id}`), records
-a parameter catalog, and can write a Burp/ZAP-importable HAR. Every captured request carries a
-copy-paste curl and a raw request.
+`harvest` drives the target in a real headless browser (Chromium over CDP): clicks links,
+submits forms, follows routes, and captures every request (GET/POST, XHR/fetch, navigations),
+including the cross-origin `api.*` backend a plain spider never sees. It dedupes into an endpoint
+corpus (path ids templated to `{id}`) with a copy-paste curl per request, and can write a
+Burp/ZAP-importable HAR. It feeds the shared `web-crawl` step, so `web-full`/`web-scan` pick up a
+SPA's API surface, and the `spa-scan` workflow DASTs every captured URL.
 
 ```bash
-boxcutter harvest https://app.example.com
-boxcutter harvest https://app.example.com --capture-host "*.example.com"   # keep the org, drop trackers/CDNs
+boxcutter harvest https://app.example.com --capture-host "*.example.com"   # keep the org, drop trackers
 boxcutter harvest https://app.example.com --header "Cookie: session=..." --har traffic.har   # authed + HAR
-boxcutter harvest https://app.example.com | jq -r '.data[].curl'           # every request as a curl
-```
-
-`harvest` also feeds the shared `web-crawl` step, so `web-full` and `web-scan` pick up a SPA's
-API surface. The `spa-scan` workflow chains it into the scanners: harvest the app, then
-DAST each parameterised URL (fuzz + nuclei-dast + sqlmap + zap-scan-url), plus GraphQL audit
-and secrets on each JS file.
-
-```bash
 boxcutter workflow spa-scan https://app.example.com --header "Cookie: session=..."
 ```
 
-Under docker, mount a dir for the HAR: `docker run --rm -v "$PWD:/out" boxcutter harvest
-https://app.example.com --har /out/traffic.har`. Needs the full image (bundles chromium).
+Mount a dir for the HAR: `docker run --rm -v "$PWD:/out" boxcutter harvest https://app.example.com
+--har /out/traffic.har`. Needs the full image (bundles chromium).
 
 ## AI agents
 
@@ -178,7 +168,6 @@ From a source checkout (no Docker): `pip install -r server/requirements.txt` the
 
 One JSON envelope on stdout: `{ "success": true, "kind": "findings", "data": [...], "error": null }`.
 `kind` is `findings` | `urls` | `items`. Gate on `success`/`data`, not the exit code.
-Tools need Python 3 and `requests`; workflows need PyYAML. Both are bundled in the image.
 
 ## Credits
 

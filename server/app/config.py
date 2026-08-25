@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     admin_password: str = "root"
 
     boxcutter_image: str = "ghcr.io/zzzteph/boxcutter:latest"
+    # Shared Ollama host (root URL) for local models, reached by the server (pull/list) AND every agent
+    # (inference). Leave blank for the co-located default; set to a routable address on a multi-host deploy.
+    ollama_base_url: str = ""
     job_visibility_timeout: int = 180        # seconds without a heartbeat before a claimed job is requeued
     job_max_attempts: int = 3                # a job is retried up to this many times before it's marked failed
     activity_retention_days: int = 30        # prune activity + job-event log rows older than this (0 = keep all)

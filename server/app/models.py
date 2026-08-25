@@ -107,6 +107,9 @@ class Job(SQLModel, table=True):
     target_id: int = Field(foreign_key="target.id")
     template_id: int = Field(foreign_key="template.id")
     run_no: int = 0
+    # the local model this job REQUIRES (an ai_agent template on an ollama profile); empty = any agent can run
+    # it. An agent only claims a job whose needs_model it has installed - so a model it can't run is never taken.
+    needs_model: str = Field(default="", max_length=120)
     dedup_key: str = Field(index=True, unique=True, max_length=128)
     # opaque per-job run token: integer PKs get reused after a scan is deleted (SQLite reuses rowids), so a
     # stale agent finishing a deleted job could post its result to a REUSED id now owned by a new scan. The

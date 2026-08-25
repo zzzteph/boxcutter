@@ -1068,7 +1068,7 @@ def run(args) -> int:
         target = "https://" + target
     provider_cls = PROVIDERS[args.provider]
     key = args.api_key or os.environ.get(provider_cls.env)
-    if not key:
+    if not key and getattr(provider_cls, "requires_key", True):
         sys.stderr.write(f"juicy: provide --api-key or set {provider_cls.env} for --provider {args.provider}\n")
         return 2
 
