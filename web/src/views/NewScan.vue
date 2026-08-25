@@ -1,8 +1,9 @@
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../api'
 import TemplatePicker from '../components/TemplatePicker.vue'
+import Select from '../components/Select.vue'
 
 const router = useRouter()
 const templates = ref([])
@@ -20,6 +21,13 @@ function rmCustom(i) { vars.custom.splice(i, 1) }
 const targetCount = computed(() => targets.value.split(/\s+/).filter(Boolean).length)
 const selTmpl = computed(() => templates.value.find(t => t.id === templateId.value) || null)
 const isAgent = computed(() => selTmpl.value?.kind === 'ai_agent')
+
+// per-scan LLM profile override + reasoning dump (agent templates only)
+const profiles = ref([])
+const profileId = ref(null)
+const showReasoning = ref(false)
+const profileOpts = computed(() => profiles.value.map(p => ({ value: p.id, label: `${p.name} (${p.provider})` })))
+watch(templateId, () => { profileId.value = selTmpl.value?.llm_profile_id ?? null })
 
 function specTokens(spec) {
   const out = []
@@ -56,6 +64,8 @@ function varsPayload() {
   if (isAgent.value) {
     if (vars.context.trim()) v.context = vars.context.trim()
     if (vars.creds.trim()) v.creds = vars.creds.trim()
+    if (profileId.value) v.llm_profile_id = profileId.value
+    if (showReasoning.value) v.reasoning = 8000
   }
   const custom = vars.custom.filter(c => c.key.trim()).map(c => ({ key: c.key.trim(), value: c.value }))
   if (custom.length) v.custom = custom
@@ -64,6 +74,7 @@ function varsPayload() {
 
 async function load() {
   templates.value = await api.get('/templates')
+  profiles.value = await api.get('/llm-profiles')
   if (!templateId.value && templates.value[0]) templateId.value = templates.value[0].id
 }
 async function create() {
@@ -120,6 +131,12 @@ onMounted(load)
       <template v-if="isAgent">
         <p class="muted" style="margin-top:0">These values are specific to <b>this</b> scan / customer and are
           passed to the agent at run time — not stored on the shared template.</p>
+        <label>LLM profile <span class="muted">— overrides the template's for this scan</span></label>
+        <Select v-model="profileId" :options="profileOpts" placeholder="Use the template's profile" />
+        <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer">
+          <input type="checkbox" v-model="showReasoning" style="width:auto" />
+          Show the agent's reasoning — stream WHY it picks each tool into the live log
+        </label>
         <label>Context (engagement / scope guidance)</label>
         <textarea v-model="vars.context" rows="3"
           :placeholder="selTmpl?.context || 'Staging env. Focus on auth & access control. In-scope: app.example.com'"></textarea>

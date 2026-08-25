@@ -267,11 +267,14 @@ def make_provider(name, model=None, key=None, base_url=None, reasoning=0):
     every agent and the conductor. An explicit `reasoning` budget wins; otherwise the active context's budget
     applies. The returned instance is pre-attached to the active sink/label/stream."""
     cls = PROVIDERS[name]
-    budget = int(reasoning or 0) or int(_ACTIVE.get("reasoning") or 0)
+    explicit = int(reasoning or 0)
+    budget = explicit or int(_ACTIVE.get("reasoning") or 0)
     p = cls(model or cls.default_model, key, base_url, reasoning=budget)
     p.sink = _ACTIVE.get("sink")
     p.label = _ACTIVE.get("label") or ""
-    p.stream = bool(_ACTIVE.get("stream"))
+    # A standalone agent (no conductor sink) given an explicit --reasoning budget streams its thinking to
+    # stderr, so a live view / the server's job log shows WHY it acts. Under a conductor, the context decides.
+    p.stream = bool(_ACTIVE.get("stream")) or (explicit > 0 and _ACTIVE.get("sink") is None)
     return p
 
 
@@ -308,5 +311,9 @@ def add_agent_args(parser, *, max_steps: int, context: bool = True) -> None:
                         help="Hard cap on agent steps (the agent usually stops earlier when it is done)")
     parser.add_argument("--report", default=None, metavar="FILE",
                         help="Also write the human-readable markdown report to FILE")
+    parser.add_argument("--reasoning", dest="reasoning", type=int, default=0, metavar="TOKENS",
+                        help="Stream the agent's thinking/reasoning (WHY it picks each tool) to stderr. A "
+                             "token budget; 0 = off. Native thinking needs a reasoning-capable model "
+                             "(gpt-5 / o-series / Claude); the narration streams regardless.")
     add_header_arg(parser)
     add_common_args(parser)

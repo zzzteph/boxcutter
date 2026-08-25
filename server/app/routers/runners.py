@@ -54,7 +54,9 @@ def _spec_params_to_argv(spec: dict) -> list:
 
 
 # per-kind flags that make boxcutter narrate live progress to stderr (see each subcommand's --help)
-_PROGRESS_FLAGS = {"tool": ("--debug",), "workflow": ("--steps", "--show-findings")}
+# Flags that make the engine narrate to stderr so the live-steps view fills in AS the scan runs. AI agents get
+# --debug too, so their tool-by-tool progress (not just their own phase lines) streams into the live log.
+_PROGRESS_FLAGS = {"tool": ("--debug",), "workflow": ("--steps", "--show-findings"), "ai_agent": ("--debug",)}
 
 
 def build_argv(session: Session, tmpl: Template, target: str, scan: Scan | None = None):
@@ -79,8 +81,10 @@ def build_argv(session: Session, tmpl: Template, target: str, scan: Scan | None 
         except Exception:
             vars_ = {}
     if tmpl.kind == "ai_agent":
-        if tmpl.llm_profile_id:
-            p = session.get(LLMProfile, tmpl.llm_profile_id)
+        # a scan may OVERRIDE the template's LLM profile (chosen in New Scan); otherwise use the template's own
+        profile_id = vars_.get("llm_profile_id") or tmpl.llm_profile_id
+        if profile_id:
+            p = session.get(LLMProfile, profile_id)
             if p:
                 argv += ["--provider", p.provider]
                 if p.model:
@@ -96,6 +100,9 @@ def build_argv(session: Session, tmpl: Template, target: str, scan: Scan | None 
         creds = (vars_.get("creds") or "").strip()
         if creds:
             argv += ["--creds", creds]
+        # per-scan "show reasoning": stream WHY the agent picks each tool into the live log
+        if vars_.get("reasoning"):
+            argv += ["--reasoning", str(int(vars_["reasoning"]))]
     argv += _spec_params_to_argv(spec)                       # template-level params
     argv += _kv_to_argv(vars_.get("custom", []))             # scan-specific custom params (any kind)
     # Make the engine narrate its progress to stderr so the live-steps view fills in AS the scan runs. Tools are

@@ -84,11 +84,13 @@ onUnmounted(() => { if (poll) clearInterval(poll) })
   <div v-if="admin" class="card" style="margin:14px 0">
     <h2>Local models (Ollama)</h2>
     <p class="muted" style="font-size:13px">
-      Small models that run on your own hardware — no API key, no per-token cost. One shared Ollama serves
-      everyone: download a model once here and every agent uses it (they all point at the same host).
+      Small models that run on your own hardware — no API key, no per-token cost. This manages the
+      <b>server host's</b> Ollama (used by the built-in agent); every other agent downloads to its own Ollama
+      from its <code>:7070</code> control UI, and only claims jobs whose model it has.
       Host: <code>{{ ollama.base_url || 'localhost:11434' }}</code>
       <span :class="ollama.reachable ? 'ok' : 'bad'"> — {{ ollama.reachable ? 'reachable' : 'unreachable' }}</span>.
-      It must be reachable by the server AND every agent (set a routable address on a multi-host deploy).
+      Ollama is a separate service — run it as a sidecar container or on the host and set
+      <code>OLLAMA_BASE_URL</code> (blank auto-detects <code>host.docker.internal</code>).
     </p>
     <table class="reflow">
       <thead><tr><th>Model</th><th>Size</th><th>Notes</th><th></th></tr></thead>
