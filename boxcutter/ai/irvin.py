@@ -23,9 +23,9 @@ from urllib.parse import urlparse
 from ..core.args import add_common_args
 from ..core.envelope import output_result
 from ..irvin import pipeline
-from ..irvin import provider as _prov
+from . import provider as _prov
 from ..irvin.context import Context
-from ..irvin.provider import PROVIDERS, add_ai_provider_args, make_provider
+from .provider import PROVIDERS, add_ai_provider_args, make_provider
 from ..irvin.runner import Runner
 
 NAME = "irvin"

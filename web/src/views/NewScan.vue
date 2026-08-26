@@ -27,7 +27,11 @@ const profiles = ref([])
 const profileId = ref(null)
 const showReasoning = ref(false)
 const profileOpts = computed(() => profiles.value.map(p => ({ value: p.id, label: `${p.name} (${p.provider})` })))
+const selProfile = computed(() => profiles.value.find(p => p.id === profileId.value) || null)
 watch(templateId, () => { profileId.value = selTmpl.value?.llm_profile_id ?? null })
+
+// progress flags the SERVER adds per kind (must mirror build_argv's _PROGRESS_FLAGS) so the preview is exact
+const PROGRESS = { tool: ['--debug'], workflow: ['--steps', '--show-findings'], ai_agent: ['--debug'] }
 
 function specTokens(spec) {
   const out = []
@@ -44,17 +48,25 @@ const preview = computed(() => {
   const t = selTmpl.value
   if (!t) return ''
   const sub = t.kind === 'workflow' ? ['workflow'] : t.kind === 'ai_agent' ? ['ai'] : []
-  const parts = ['boxcutter', ...sub, t.spec?.name, ...specTokens(t.spec)]
+  const parts = ['boxcutter', ...sub, t.spec?.name, '<target>', ...specTokens(t.spec)]
   if (isAgent.value) {
+    const p = selProfile.value
+    if (p) {
+      parts.push('--provider', p.provider)
+      if (p.model) parts.push('--model', p.model)
+      if (p.proxy_url) parts.push('--llm-proxy-url', p.proxy_url)
+    }
     const ctx = vars.context.trim() || t.context || ''
     if (ctx) parts.push('--context', q(ctx))
     if (vars.creds.trim()) parts.push('--creds', q(vars.creds.trim()))
+    if (showReasoning.value) parts.push('--reasoning', '8000')
   }
   for (const c of vars.custom) {
     if (!c.key.trim()) continue
     parts.push(c.key.startsWith('-') ? c.key.trim() : '--' + c.key.trim())
     if (c.value !== '' && c.value != null) parts.push(q(String(c.value)))
   }
+  for (const f of (PROGRESS[t.kind] || [])) parts.push(f)
   return parts.filter(Boolean).join(' ')
 })
 function q(s) { return /\s/.test(s) ? `"${s}"` : s }
@@ -157,6 +169,10 @@ onMounted(load)
 
       <label style="margin-top:14px">Command preview</label>
       <pre class="cmd">{{ preview || 'Pick a template…' }}</pre>
+      <p v-if="isAgent && selProfile" class="muted" style="font-size:12px">
+        The API key for <b>{{ selProfile.name }}</b> is delivered as an env var at run time (never shown or logged).
+        <span v-if="!selProfile.has_key" style="color:var(--bad)"> — ⚠ this profile has NO key set; the scan will fail with “an LLM is required”.</span>
+      </p>
     </div>
   </div>
 </template>

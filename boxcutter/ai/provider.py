@@ -37,9 +37,22 @@ def _post(url, *, json, headers, timeout, attempts=4):
             retry_after = r.headers.get("retry-after", "")
             time.sleep(float(retry_after) if retry_after.replace(".", "", 1).isdigit() else min(2 ** i, 8))
             continue
-        r.raise_for_status()
+        if not r.ok:                                   # surface the provider's OWN error body (it says WHY: an
+            detail = ""                                # unsupported param, a bad model id, a quota problem, ...)
+            try:
+                detail = r.text[:800]
+            except Exception:  # noqa: BLE001
+                pass
+            raise requests.HTTPError(f"{r.status_code} {r.reason}: {detail}", response=r)
         return r
     raise RuntimeError("unreachable")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """OpenAI reasoning models (o-series, gpt-5) accept a REDUCED param set - no temperature/seed/top_p, and
+    they use max_completion_tokens not max_tokens."""
+    m = (model or "").lower()
+    return m.startswith(("gpt-5", "o1", "o3", "o4", "o5")) or "reason" in m
 
 
 class _Provider:
@@ -160,13 +173,15 @@ class OpenAI(_Provider):
         return {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
 
     def send(self, system, messages, tools):
-        # seed = best-effort reproducibility (cuts run-to-run variance). NOTE: no `temperature` - gpt-5/o-series
-        # reasoning models reject a non-default temperature, so seed is the safe determinism lever for them.
-        body = {"model": self.model, "seed": 1337,
+        body = {"model": self.model,
                 "messages": [{"role": "system", "content": system}] + messages,
                 "tools": [{"type": "function", "function": {
                     "name": t["name"], "description": t["description"], "parameters": t["schema"]}} for t in tools]}
-        if self.reasoning:   # opt-in: needs a reasoning-capable model (o-series / gpt-5); gpt-4o rejects it
+        # No `temperature` anywhere (reasoning models reject a non-default one). `seed` is a determinism lever
+        # for the classic models, but o-series / gpt-5 reasoning models reject it too - so only send it there.
+        if not _is_reasoning_model(self.model):
+            body["seed"] = 1337
+        if self.reasoning:   # opt-in reasoning budget; needs a reasoning-capable model (o-series / gpt-5)
             body["reasoning_effort"] = "high" if self.reasoning >= 8000 else "medium"
         return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
 
@@ -209,7 +224,7 @@ class OpenAI(_Provider):
         if self.reasoning:
             body["reasoning_effort"] = "high" if self.reasoning >= 8000 else "medium"
         if max_tokens:
-            body["max_tokens"] = max_tokens
+            body["max_completion_tokens" if _is_reasoning_model(self.model) else "max_tokens"] = max_tokens
         msg = _post(self.api, json=body, timeout=120, headers=self._headers()).json()["choices"][0]["message"]
         text = msg.get("content") or ""
         self._capture(text, msg.get("reasoning_content") or msg.get("reasoning") or "", [])

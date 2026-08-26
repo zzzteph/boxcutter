@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 from ..core import agentlog
 from ..core.envelope import debug_logger, debug_print, harvest_images, output_result, write_report
 from ..irvin import briefing
-from ..irvin.provider import PROVIDERS, add_agent_args, make_provider
+from .provider import PROVIDERS, add_agent_args, make_provider
 from ..tools import toolschema
 
 NAME = "prawlio"

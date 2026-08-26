@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import bob                                   # stable dependency - IMPORT ONLY, never edit
 from ..core.envelope import debug_print, output_result, set_output_kind
-from ..irvin.provider import PROVIDERS, add_agent_args, make_provider
+from .provider import PROVIDERS, add_agent_args, make_provider
 
 NAME = "caleb"
 KIND = "findings"

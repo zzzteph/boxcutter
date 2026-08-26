@@ -37,7 +37,7 @@ from ..core import agentlog
 from ..core.envelope import debug_print, harvest_images, output_result
 from ..irvin import briefing
 from ..irvin.context import extract_json
-from ..irvin.provider import PROVIDERS, add_agent_args, make_provider
+from .provider import PROVIDERS, add_agent_args, make_provider
 from ..tools import toolschema
 
 NAME = "travis"

@@ -60,7 +60,7 @@ from ..core import agentlog
 from ..core.envelope import debug_logger, debug_print, output_result, write_report
 from ..irvin import briefing
 from ..irvin.context import extract_json
-from ..irvin.provider import PROVIDERS, add_agent_args, make_provider
+from .provider import PROVIDERS, add_agent_args, make_provider
 from ..tools import toolschema
 from ..tools.js_endpoints import PATTERNS as _JS_URL_PATTERNS, _should_skip as _skip_path
 from ..tools.scan_secrets import _COMPILED as _SECRET_PATTERNS

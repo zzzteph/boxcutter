@@ -71,6 +71,16 @@ async function setKey(p) {
   try { await api.patch('/llm-profiles/' + p.id, { api_key: k }); await load() } catch (e) { alert(e.message) }
 }
 
+// Verify a profile without running a scan: pings the provider with a 1-token request (401 = bad key, etc.)
+const testResult = reactive({})
+async function testProfile(p) {
+  testResult[p.id] = { testing: true }
+  try {
+    const r = await api.post('/llm-profiles/' + p.id + '/test')
+    testResult[p.id] = { ok: r.ok, detail: r.error || r.detail || 'ok' }
+  } catch (e) { testResult[p.id] = { ok: false, detail: e.message } }
+}
+
 onMounted(() => { load(); loadCatalog() })
 onUnmounted(() => { if (poll) clearInterval(poll) })
 </script>
@@ -149,8 +159,13 @@ onUnmounted(() => { if (poll) clearInterval(poll) })
         <td data-label="Key"><span :class="p.has_key ? 'ok' : 'muted'">{{ p.has_key ? 'set' : 'none' }}</span></td>
         <td data-label="">
           <div class="row" style="gap:6px">
+            <button @click="testProfile(p)">{{ testResult[p.id]?.testing ? 'Testing…' : 'Test' }}</button>
             <button v-if="admin && p.provider !== 'ollama'" @click="setKey(p)">{{ p.has_key ? 'Replace key' : 'Set key' }}</button>
             <button v-if="admin" class="danger ghost" @click="del(p.id)">Delete</button>
+          </div>
+          <div v-if="testResult[p.id] && !testResult[p.id].testing" style="font-size:12px;margin-top:4px"
+               :class="testResult[p.id].ok ? 'ok' : 'bad'">
+            {{ testResult[p.id].ok ? '✓ works' : '✗ ' + testResult[p.id].detail }}
           </div>
         </td>
       </tr>

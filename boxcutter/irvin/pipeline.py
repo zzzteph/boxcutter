@@ -23,7 +23,7 @@ import json
 import sys
 from urllib.parse import urlparse
 
-from . import provider as _prov
+from ..ai import provider as _prov
 from .agents.control import Consolidator, Reporter, Verifier
 
 _W = 64

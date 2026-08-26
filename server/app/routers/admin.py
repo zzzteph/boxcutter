@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import requests
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -126,6 +127,52 @@ def delete_llm(pid: int, admin: User = Depends(require_admin), session: Session 
         session.delete(p)
         session.commit()
     return {"ok": True}
+
+
+def _test_llm(provider: str, model: str | None, key: str, proxy_url: str | None) -> tuple[bool, str]:
+    """Ping the provider with a 1-token request to prove the key+model actually work (a wrong key returns 401,
+    a bad model 400/404) - so a profile can be verified WITHOUT running a whole scan."""
+    provider = (provider or "").lower()
+    try:
+        if provider == "ollama":
+            base = (proxy_url or "http://localhost:11434").rstrip("/")
+            if base.endswith("/v1"):
+                base = base[:-3]
+            requests.get(base + "/api/tags", timeout=6).raise_for_status()
+            return True, "reachable"
+        if provider == "anthropic":
+            base = (proxy_url or "https://api.anthropic.com").rstrip("/")
+            r = requests.post(base + "/v1/messages", timeout=25,
+                              headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                                       "content-type": "application/json"},
+                              json={"model": model or "claude-sonnet-5", "max_tokens": 1,
+                                    "messages": [{"role": "user", "content": "ping"}]})
+        else:  # openai / litellm (OpenAI-compatible). No seed/temperature so gpt-5/o-series don't 400.
+            base = (proxy_url or "https://api.openai.com").rstrip("/")
+            url = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
+            r = requests.post(url, timeout=25,
+                              headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                              json={"model": model or "gpt-4o", "messages": [{"role": "user", "content": "ping"}]})
+        if r.status_code == 200:
+            return True, "ok"
+        try:
+            detail = (r.json().get("error") or {}).get("message") or r.text[:300]
+        except Exception:  # noqa: BLE001
+            detail = r.text[:300]
+        return False, f"{r.status_code}: {detail}"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)[:300]
+
+
+@router.post("/llm-profiles/{pid}/test")
+def test_llm_profile(pid: int, admin: User = Depends(require_admin), session: Session = Depends(get_session)):
+    p = session.get(LLMProfile, pid)
+    if not p:
+        raise HTTPException(404)
+    if p.provider.lower() != "ollama" and not p.api_key_secret:
+        return {"ok": False, "error": "no API key set on this profile"}
+    ok, detail = _test_llm(p.provider, p.model, p.api_key_secret, p.proxy_url)
+    return {"ok": ok, "error": "" if ok else detail, "detail": detail}
 
 
 # ---- Telegram notifications (admin). Bot token is write-only, never returned to the browser. ----------------
