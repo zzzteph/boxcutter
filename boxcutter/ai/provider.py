@@ -56,20 +56,21 @@ def _is_reasoning_model(model: str) -> bool:
 
 
 class _Provider:
-    """Shared reasoning-capture plumbing every provider inherits, so Travis, Bob, Caleb and the conductor all
-    dump reasoning the SAME way from the ONE place the model actually thinks (send/parse/chat). A provider can
-    be handed a `sink` (a list that collects one record per model turn), a `label` (which agent/phase is
-    thinking right now, for attribution), and `stream=True` (echo the reasoning to stderr live during the run).
-    `reasoning` is the native-thinking token budget (0 = off); when set, each provider enables its model's
-    thinking channel in send()/chat() and parse() keeps the thinking blocks instead of dropping them."""
+    """Shared narration-capture plumbing every provider inherits, so Travis, Bob, Caleb and the conductor all
+    dump the model's narration the SAME way from the ONE place it thinks (send/parse/chat). A provider can be
+    handed a `sink` (a list that collects one record per model turn), a `label` (which agent/phase is thinking
+    right now, for attribution), and `stream=True` (echo it to stderr live during the run). Fully
+    MODEL-AGNOSTIC: no provider sends any model-specific reasoning param (no thinking budget, no
+    reasoning_effort), so no model can reject the request - each just captures whatever narration/reasoning the
+    model returns on its own. `reasoning` is kept only as an on/off switch for that live stream (0 = off)."""
 
     requires_key = True                      # providers with no API key (e.g. local Ollama) override to False
 
     def _init_reasoning(self, reasoning=0):
-        self.reasoning = int(reasoning or 0)   # native-thinking token budget; 0 disables it
+        self.reasoning = int(reasoning or 0)   # on/off switch for the live narration stream; sends NO model param
         self.sink = None                        # optional list: one {agent,narration,reasoning,calls} per turn
         self.label = ""                         # current agent/phase tag, set by the caller before its loop
-        self.stream = False                     # echo captured reasoning to stderr as it happens
+        self.stream = False                     # echo captured narration to stderr as it happens
 
     def _capture(self, narration, reasoning, calls):
         """Record one model turn's reasoning + narration, tagged with the current agent label. Returns the
@@ -104,12 +105,8 @@ class Anthropic(_Provider):
     def send(self, system, messages, tools):
         body = {"model": self.model, "max_tokens": 8192, "system": system, "messages": messages,
                 "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["schema"]} for t in tools]}
-        if self.reasoning:
-            # Extended thinking needs headroom: max_tokens must exceed the thinking budget. We never set
-            # temperature (thinking forbids a non-default one), and the thinking blocks parse() keeps ride
-            # back in history via assistant_msg (which already returns the full content list, signatures intact).
-            body["max_tokens"] = max(body["max_tokens"], self.reasoning + 4096)
-            body["thinking"] = {"type": "enabled", "budget_tokens": self.reasoning}
+        # Model-agnostic: NO native-thinking budget param. The agent's visible narration is captured/streamed
+        # in parse(); we send the SAME request shape to every model, so none can 400 on a reasoning param.
         return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
 
     def parse(self, resp):
@@ -149,9 +146,7 @@ class Anthropic(_Provider):
         # Anthropic requires max_tokens; None means "use a generous budget" (no artificial cap).
         body = {"model": self.model, "max_tokens": max_tokens or 8192, "system": system,
                 "messages": [{"role": "user", "content": user}]}
-        if self.reasoning:
-            body["max_tokens"] = max(body["max_tokens"], self.reasoning + 4096)
-            body["thinking"] = {"type": "enabled", "budget_tokens": self.reasoning}
+        # Model-agnostic: no thinking-budget param (see send()).
         content = _post(self.api, json=body, timeout=120, headers=self._headers()).json().get("content", [])
         text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
         reasoning = "".join(b.get("thinking", "") for b in content if b.get("type") == "thinking")
@@ -181,8 +176,9 @@ class OpenAI(_Provider):
         # for the classic models, but o-series / gpt-5 reasoning models reject it too - so only send it there.
         if not _is_reasoning_model(self.model):
             body["seed"] = 1337
-        if self.reasoning:   # opt-in reasoning budget; needs a reasoning-capable model (o-series / gpt-5)
-            body["reasoning_effort"] = "high" if self.reasoning >= 8000 else "medium"
+        # NB: no `reasoning_effort` here. gpt-5 / o-series reject it together with function tools on
+        # /v1/chat/completions ("use /v1/responses or set reasoning_effort to 'none'"), and the agent loop
+        # always passes tools - so we let the model reason at its own default effort instead.
         return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
 
     def parse(self, resp):
@@ -221,8 +217,7 @@ class OpenAI(_Provider):
         # OpenAI/LiteLLM: max_tokens is optional - omit it so the model uses its full budget (no cap).
         body = {"model": self.model,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
-        if self.reasoning:
-            body["reasoning_effort"] = "high" if self.reasoning >= 8000 else "medium"
+        # No `reasoning_effort` - gpt-5 reasons at its default; forcing an effort 400s once tools are in play.
         if max_tokens:
             body["max_completion_tokens" if _is_reasoning_model(self.model) else "max_tokens"] = max_tokens
         msg = _post(self.api, json=body, timeout=120, headers=self._headers()).json()["choices"][0]["message"]
@@ -262,8 +257,8 @@ _ACTIVE = {"sink": None, "label": "", "stream": False, "reasoning": 0}
 
 def set_reasoning_context(*, sink=None, label="", stream=False, reasoning=0):
     """Turn on capture for every provider built after this call (until cleared). `sink` collects one record per
-    model turn; `label` attributes them to an agent/phase; `stream` echoes to stderr live; `reasoning` is the
-    native-thinking token budget."""
+    model turn; `label` attributes them to an agent/phase; `stream` echoes to stderr live; `reasoning` is just
+    the on/off switch for that stream (no model param is ever sent)."""
     _ACTIVE.update(sink=sink, label=label, stream=bool(stream), reasoning=int(reasoning or 0))
 
 
@@ -278,17 +273,18 @@ def reasoning_label(label):
 
 
 def make_provider(name, model=None, key=None, base_url=None, reasoning=0):
-    """Build a provider by name with reasoning capture wired in, so native-thinking dump works the same for
-    every agent and the conductor. An explicit `reasoning` budget wins; otherwise the active context's budget
-    applies. The returned instance is pre-attached to the active sink/label/stream."""
+    """Build a provider by name with narration capture wired in, so the live reasoning dump works the same for
+    every agent and the conductor. An explicit `reasoning` toggle wins; otherwise the active context's applies.
+    The returned instance is pre-attached to the active sink/label/stream. Model-agnostic: no reasoning param
+    is ever sent to any model."""
     cls = PROVIDERS[name]
     explicit = int(reasoning or 0)
     budget = explicit or int(_ACTIVE.get("reasoning") or 0)
     p = cls(model or cls.default_model, key, base_url, reasoning=budget)
     p.sink = _ACTIVE.get("sink")
     p.label = _ACTIVE.get("label") or ""
-    # A standalone agent (no conductor sink) given an explicit --reasoning budget streams its thinking to
-    # stderr, so a live view / the server's job log shows WHY it acts. Under a conductor, the context decides.
+    # A standalone agent (no conductor sink) given --reasoning streams its narration to stderr, so a live view
+    # / the server's job log shows WHY it acts. Under a conductor, the active context decides.
     p.stream = bool(_ACTIVE.get("stream")) or (explicit > 0 and _ACTIVE.get("sink") is None)
     return p
 
@@ -326,9 +322,9 @@ def add_agent_args(parser, *, max_steps: int, context: bool = True) -> None:
                         help="Hard cap on agent steps (the agent usually stops earlier when it is done)")
     parser.add_argument("--report", default=None, metavar="FILE",
                         help="Also write the human-readable markdown report to FILE")
-    parser.add_argument("--reasoning", dest="reasoning", type=int, default=0, metavar="TOKENS",
-                        help="Stream the agent's thinking/reasoning (WHY it picks each tool) to stderr. A "
-                             "token budget; 0 = off. Native thinking needs a reasoning-capable model "
-                             "(gpt-5 / o-series / Claude); the narration streams regardless.")
+    parser.add_argument("--reasoning", dest="reasoning", type=int, default=0, metavar="N",
+                        help="Stream the agent's narration (WHY it picks each tool) to stderr live; 0 = off, "
+                             "any positive N = on. Model-agnostic: sends NO model-specific reasoning param, so "
+                             "it works with any provider/model - it just echoes whatever the model narrates.")
     add_header_arg(parser)
     add_common_args(parser)
