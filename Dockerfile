@@ -80,6 +80,7 @@ COPY --from=web /web/dist /opt/boxcutter/server/web_dist
 # DB + JWT secret + built-in-agent config persist here; mount a named volume to keep them across restarts.
 ENV DATA_DIR=/data \
     DATABASE_URL=sqlite:////data/boxcutter_ui.db \
+    RUNNER_CONFIG=/data/runner-config.json \
     PYTHONUNBUFFERED=1
 VOLUME ["/data"]
 # 8000 = web UI/API (`boxcutter serve`); 7070 = a scanner's local control UI (`boxcutter agent`)

@@ -31,9 +31,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from boxcutter import __version__ as _ENGINE_VERSION
 
-CONFIG_PATH = os.environ.get("RUNNER_CONFIG", os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                           ".runner-config.json"))
+# Where the agent persists its config. NEVER inside the package dir - a config written there gets baked into
+# the image (which shipped a stale ui_port/server once). Prefer $RUNNER_CONFIG, else the working directory.
+CONFIG_PATH = os.environ.get("RUNNER_CONFIG") or os.path.join(os.getcwd(), ".runner-config.json")
 MAX_SLOTS = 32
+# Local control-UI bind port. Comes from env / --ui-port only, defaulting to 7070 - deliberately NOT read from
+# the persisted config, so a stale/baked config can never move it (it used to hijack this to 17070).
+UI_PORT = int(os.environ.get("RUNNER_UI_PORT", "7070") or 7070)
 # The agent re-invokes THIS boxcutter to run each job (same image, same version), so there is no separate
 # "engine" to probe and no version skew: the engine version an agent reports is simply boxcutter's own
 # __version__. Override BOXCUTTER_CMD only if the engine binary lives elsewhere.
@@ -869,7 +873,7 @@ def _run_supervisor() -> int:
     _spawn(watchdog, (registry,))
     if CFG.get("server_url") and (CFG.get("enroll_token") or CFG.get("api_key") or CFG.get("username")):
         enroll()
-    port = int(CFG.get("ui_port") or os.environ.get("RUNNER_UI_PORT", "7070"))
+    port = UI_PORT
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"boxcutter agent {VERSION} - control UI on http://127.0.0.1:{port}  "
           f"(server={CFG.get('server_url') or 'unset'}, connected={STATE['connected']})", flush=True)
@@ -902,7 +906,7 @@ def main(argv=None) -> int:
     ap.add_argument("--mock", action="store_true", help="run the pipeline WITHOUT the engine (offline demo)")
     a = ap.parse_args([] if argv is None else list(argv))
 
-    global CONFIG_PATH, MOCK
+    global CONFIG_PATH, MOCK, UI_PORT
     if a.config:
         CONFIG_PATH = a.config
         CFG.clear()
@@ -916,7 +920,7 @@ def main(argv=None) -> int:
     if a.concurrency is not None:
         CFG["concurrency"] = max(0, min(a.concurrency, MAX_SLOTS))
     if a.ui_port is not None:
-        CFG["ui_port"] = a.ui_port
+        UI_PORT = a.ui_port            # flag override for THIS run; never written to the persisted config
     save_config(CFG)
     return _run_supervisor()
 

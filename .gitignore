@@ -27,6 +27,10 @@ web/.vite/
 # Server runtime data (SQLite DB + generated secret; not source)
 server/data/
 
+# Runner/agent local config (written at runtime; must NEVER be baked into the package/image)
+.runner-config.json
+**/.runner-config.json
+
 # caleb coverage working area (harness, ground-truth keys, handoff docs, run artifacts) - kept on disk, not tracked
 opt/
 

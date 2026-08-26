@@ -8,6 +8,7 @@ venv
 **/node_modules
 web/dist
 server/data
+**/.runner-config.json
 .idea
 .vscode
 *.md
