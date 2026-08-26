@@ -55,14 +55,35 @@ def _is_reasoning_model(model: str) -> bool:
     return m.startswith(("gpt-5", "o1", "o3", "o4", "o5")) or "reason" in m
 
 
+def _wants_reasoning_none(exc) -> bool:
+    """True when the API 4xx's SPECIFICALLY because the model's default reasoning is on and /v1/chat/completions
+    won't allow that alongside function tools - the error literally says to set reasoning_effort to 'none' (the
+    newest gpt-5.x, e.g. gpt-5.6). Only then do we resend with reasoning off. Reacting to the API this way keeps
+    us model-agnostic: a bare body for every model, the one extra param added ONLY when the API demands it - so
+    gpt-4o/gpt-5/o-series (which reject 'none') stay bare and new models just work. Works through a LiteLLM
+    gateway too: LiteLLM forwards the upstream OpenAI message (usually a 400, sometimes 422) even though it wraps
+    the JSON envelope, so the substring match still catches it."""
+    r = getattr(exc, "response", None)
+    code = getattr(r, "status_code", None) if r is not None else None
+    if not isinstance(code, int) or not (400 <= code <= 422):
+        return False
+    try:
+        t = r.text.lower()
+    except Exception:  # noqa: BLE001
+        return False
+    return "reasoning_effort" in t and "none" in t
+
+
 class _Provider:
     """Shared narration-capture plumbing every provider inherits, so Travis, Bob, Caleb and the conductor all
     dump the model's narration the SAME way from the ONE place it thinks (send/parse/chat). A provider can be
     handed a `sink` (a list that collects one record per model turn), a `label` (which agent/phase is thinking
-    right now, for attribution), and `stream=True` (echo it to stderr live during the run). Fully
-    MODEL-AGNOSTIC: no provider sends any model-specific reasoning param (no thinking budget, no
-    reasoning_effort), so no model can reject the request - each just captures whatever narration/reasoning the
-    model returns on its own. `reasoning` is kept only as an on/off switch for that live stream (0 = off)."""
+    right now, for attribution), and `stream=True` (echo it to stderr live during the run). Reasoning is kept
+    OFF and the wire body stays MINIMAL: providers send a bare request (no thinking budget, no seed, no
+    reasoning_effort) that every model accepts, and the OpenAI provider adds reasoning_effort='none' ONLY
+    reactively - after the API 400s a request for having default reasoning on together with function tools (the
+    newest gpt-5.x) - then remembers it for the run. `reasoning` is kept only as an on/off switch for the live
+    narration stream (0 = off); it never turns model reasoning back on."""
 
     requires_key = True                      # providers with no API key (e.g. local Ollama) override to False
 
@@ -71,6 +92,7 @@ class _Provider:
         self.sink = None                        # optional list: one {agent,narration,reasoning,calls} per turn
         self.label = ""                         # current agent/phase tag, set by the caller before its loop
         self.stream = False                     # echo captured narration to stderr as it happens
+        self._force_reasoning_none = False      # set once the API tells us THIS model needs reasoning_effort='none'
 
     def _capture(self, narration, reasoning, calls):
         """Record one model turn's reasoning + narration, tagged with the current agent label. Returns the
@@ -172,14 +194,22 @@ class OpenAI(_Provider):
                 "messages": [{"role": "system", "content": system}] + messages,
                 "tools": [{"type": "function", "function": {
                     "name": t["name"], "description": t["description"], "parameters": t["schema"]}} for t in tools]}
-        # No `temperature` anywhere (reasoning models reject a non-default one). `seed` is a determinism lever
-        # for the classic models, but o-series / gpt-5 reasoning models reject it too - so only send it there.
-        if not _is_reasoning_model(self.model):
-            body["seed"] = 1337
-        # NB: no `reasoning_effort` here. gpt-5 / o-series reject it together with function tools on
-        # /v1/chat/completions ("use /v1/responses or set reasoning_effort to 'none'"), and the agent loop
-        # always passes tools - so we let the model reason at its own default effort instead.
-        return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
+        # Bare body - NO seed, NO reasoning_effort, NO temperature. That works for EVERY current model (gpt-4o,
+        # gpt-5, o-series, local): none of them NEED an extra param. The lone exception is the newest gpt-5.x
+        # (e.g. gpt-5.6): it defaults reasoning ON and then 400s because /v1/chat/completions forbids reasoning
+        # together with function tools, its error asking for reasoning_effort='none'. We retry once with that and
+        # remember it for the rest of the run. No per-model list - we react to what the API demands, so a bare
+        # body stays the default and any new model just works (gpt-5/o-series would REJECT a blanket 'none').
+        if self._force_reasoning_none:
+            body["reasoning_effort"] = "none"
+        try:
+            return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
+        except requests.HTTPError as e:
+            if self._force_reasoning_none or not _wants_reasoning_none(e):
+                raise
+            self._force_reasoning_none = True
+            body["reasoning_effort"] = "none"
+            return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
 
     def parse(self, resp):
         msg = resp["choices"][0]["message"]
@@ -214,13 +244,26 @@ class OpenAI(_Provider):
         return msgs
 
     def chat(self, system, user, max_tokens=None):
-        # OpenAI/LiteLLM: max_tokens is optional - omit it so the model uses its full budget (no cap).
+        # OpenAI/LiteLLM: max_tokens is optional - omit it so the model uses its full budget (no cap). Reasoning
+        # models want it as `max_completion_tokens`. Body is otherwise bare; the reasoning_effort='none' retry
+        # works exactly as in send() (only the newest gpt-5.x ever needs it).
         body = {"model": self.model,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
-        # No `reasoning_effort` - gpt-5 reasons at its default; forcing an effort 400s once tools are in play.
+        if self._force_reasoning_none:
+            body["reasoning_effort"] = "none"
         if max_tokens:
             body["max_completion_tokens" if _is_reasoning_model(self.model) else "max_tokens"] = max_tokens
-        msg = _post(self.api, json=body, timeout=120, headers=self._headers()).json()["choices"][0]["message"]
+
+        def _call():
+            return _post(self.api, json=body, timeout=120, headers=self._headers()).json()["choices"][0]["message"]
+        try:
+            msg = _call()
+        except requests.HTTPError as e:
+            if self._force_reasoning_none or not _wants_reasoning_none(e):
+                raise
+            self._force_reasoning_none = True
+            body["reasoning_effort"] = "none"
+            msg = _call()
         text = msg.get("content") or ""
         self._capture(text, msg.get("reasoning_content") or msg.get("reasoning") or "", [])
         return text
@@ -258,7 +301,7 @@ _ACTIVE = {"sink": None, "label": "", "stream": False, "reasoning": 0}
 def set_reasoning_context(*, sink=None, label="", stream=False, reasoning=0):
     """Turn on capture for every provider built after this call (until cleared). `sink` collects one record per
     model turn; `label` attributes them to an agent/phase; `stream` echoes to stderr live; `reasoning` is just
-    the on/off switch for that stream (no model param is ever sent)."""
+    the on/off switch for that stream (it never turns the model's own reasoning on)."""
     _ACTIVE.update(sink=sink, label=label, stream=bool(stream), reasoning=int(reasoning or 0))
 
 
@@ -275,8 +318,8 @@ def reasoning_label(label):
 def make_provider(name, model=None, key=None, base_url=None, reasoning=0):
     """Build a provider by name with narration capture wired in, so the live reasoning dump works the same for
     every agent and the conductor. An explicit `reasoning` toggle wins; otherwise the active context's applies.
-    The returned instance is pre-attached to the active sink/label/stream. Model-agnostic: no reasoning param
-    is ever sent to any model."""
+    The returned instance is pre-attached to the active sink/label/stream. The `reasoning` value only gates the
+    live narration stream - model reasoning itself stays off (see the provider classes)."""
     cls = PROVIDERS[name]
     explicit = int(reasoning or 0)
     budget = explicit or int(_ACTIVE.get("reasoning") or 0)
