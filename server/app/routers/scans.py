@@ -324,24 +324,41 @@ _EXPORT_COLS = ["severity", "title", "target", "url", "cls", "state", "first_see
 def findings_export(scan_id: int, format: str = "csv", state: str | None = None, severity: str | None = None,
                     target: str | None = None, q: str | None = None, sort: str = "severity", dir: str = "asc",
                     user: User = Depends(current_user), session: Session = Depends(get_session)):
-    """Download the filtered findings as CSV or JSON (honours the same filters/sort as the table; up to 10k)."""
+    """Download the filtered findings as CSV or JSON (honours the same filters/sort as the table). No row cap:
+    the CSV streams in batches so an export of ANY size works without a server-memory spike."""
     scan = session.get(Scan, scan_id)
     if not scan or not _perm(session, scan, user):
         raise HTTPException(404)
     conds = _finding_conds(scan_id, state, severity, target, q)
-    rows = session.exec(select(Finding).where(*conds)
-                        .order_by(_finding_order(sort, dir), Finding.id.desc()).limit(10000)).all()
+    order = (_finding_order(sort, dir), Finding.id.desc())
     if format == "json":
+        rows = session.exec(select(Finding).where(*conds).order_by(*order)).all()
         payload = json.dumps([{c: getattr(f, c) for c in _EXPORT_COLS} for f in rows], default=str, indent=2)
         return Response(payload, media_type="application/json",
                         headers={"Content-Disposition": f'attachment; filename="scan-{scan_id}-findings.json"'})
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(_EXPORT_COLS)
-    for f in rows:
-        w.writerow([getattr(f, c) for c in _EXPORT_COLS])
-    return Response(buf.getvalue(), media_type="text/csv",
-                    headers={"Content-Disposition": f'attachment; filename="scan-{scan_id}-findings.csv"'})
+    # CSV: page through the findings and yield a chunk at a time - only one batch is ever held in memory, so the
+    # whole result set exports regardless of size. get_session is a yield-dependency, so the session stays open
+    # for the life of the stream.
+    def _csv_rows():
+        head = io.StringIO()
+        csv.writer(head).writerow(_EXPORT_COLS)
+        yield head.getvalue()
+        offset, batch = 0, 5000
+        while True:
+            chunk = session.exec(select(Finding).where(*conds).order_by(*order)
+                                 .offset(offset).limit(batch)).all()
+            if not chunk:
+                break
+            buf = io.StringIO()
+            w = csv.writer(buf)
+            for f in chunk:
+                w.writerow([getattr(f, c) for c in _EXPORT_COLS])
+            yield buf.getvalue()
+            if len(chunk) < batch:
+                break
+            offset += batch
+    return StreamingResponse(_csv_rows(), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="scan-{scan_id}-findings.csv"'})
 
 
 @router.get("/{scan_id}/findings/{finding_id}")

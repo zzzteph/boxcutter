@@ -12,4 +12,5 @@ steps:
     do:
       - tool: httpx
         target: ${hosts.item}
-        save: live
+        pick: url            # keep only the live URL string (like web-full / env-nuclei), so the
+        save: live           # output is a clean one-per-line URL list (kind=urls), not httpx objects

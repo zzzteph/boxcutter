@@ -157,9 +157,32 @@ docker run -d --name boxcutter-agent \
 ```
 
 The agent enrolls, heartbeats, and runs N `boxcutter` jobs in parallel (`--concurrency N`, or
-change it live from the Scanners page). It also serves a small local control UI on `:7070`
-(login `root` / `root`) to set the server URL and token without redeploying. Put TLS (a reverse
-proxy) in front of the server for remote agents and browsers.
+change it live from the Scanners page). Put TLS (a reverse proxy) in front of the *server* for
+remote agents and browsers.
+
+### The agent control UI (`:7070`)
+
+Each agent also serves a small control UI (login `root` / `root`) to set its server URL, token,
+and concurrency without redeploying. It is optional: the agent runs headless with only `--server`
+and `--token`. The UI binds to port `7070` inside the container; change the bind port with
+`--ui-port PORT` (or the `RUNNER_UI_PORT` env var).
+
+Docker does not publish that port unless you ask it to, and the UI can change where the agent
+sends its results, so do not expose it on a public interface. Bind it to loopback only and reach
+it through an SSH tunnel or a reverse proxy you control:
+
+```bash
+# publish the control UI to localhost ONLY (note the 127.0.0.1 prefix), not 0.0.0.0
+docker run -d --name boxcutter-agent -p 127.0.0.1:7070:7070 \
+  ghcr.io/zzzteph/boxcutter agent --server https://scanner.example.com --token <ENROLL_TOKEN>
+
+# reach it from your own machine over SSH, then open http://localhost:7070
+ssh -L 7070:127.0.0.1:7070 user@agent-host
+```
+
+For a permanent endpoint, put nginx (with TLS and auth) in front of `127.0.0.1:7070` instead of
+publishing `7070` on a public interface. The agent never needs its port reachable from the server;
+only the agent needs to reach the server.
 
 From a source checkout (no Docker): `pip install -r server/requirements.txt` then
 `boxcutter serve`. Agents need no extra dependencies: `boxcutter agent --server ... --token ...`.
@@ -178,6 +201,27 @@ host with `OLLAMA_BASE_URL=http://host.docker.internal:11434` (on Linux also add
 `--add-host=host.docker.internal:host-gateway`); left blank, the server auto-detects that case. Small local
 models are weaker at multi-step agent reasoning than the hosted providers - good for cheap/offline passes, not
 a like-for-like swap for a deep scan.
+
+### Quick reference
+
+| mode | command | port | notes |
+|------|---------|------|-------|
+| engine | `boxcutter <tool> <target>` | - | one scan, JSON envelope on stdout |
+| server | `boxcutter serve` | `8000` (UI/API) | built-in agent; persist with `-v boxcutter-data:/data` |
+| agent | `boxcutter agent --server <URL> --token <T>` | `7070` (control UI) | scale-out scanner; publish `7070` to loopback only |
+
+Agent flags and env vars:
+
+| flag / env | default | purpose |
+|------------|---------|---------|
+| `--server <URL>` | - | server base URL the agent pulls jobs from |
+| `--token <TOKEN>` | - | enroll token (copy from the server's Scanners page) |
+| `--concurrency <N>` | `1` | parallel jobs (also settable live from the Scanners page) |
+| `--ui-port <PORT>` / `RUNNER_UI_PORT` | `7070` | control-UI bind port |
+| `RUNNER_CONFIG` | `/data/runner-config.json` | file the agent persists its server URL / token / concurrency to |
+| `OLLAMA_BASE_URL` | auto | point the agent at its Ollama for local models (e.g. `http://host.docker.internal:11434`) |
+
+The agent only needs to reach the server; the server never connects back to the agent.
 
 ## Output
 

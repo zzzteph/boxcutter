@@ -81,7 +81,7 @@ function setISort(col) {
   else { iSort.value = col; iDir.value = col === 'last_seen' ? 'desc' : 'asc' }
   iOffset.value = 0; loadItems()
 }
-function iSortInd(col) { return iSort.value === col ? (iDir.value === 'asc' ? ' \u25b2' : ' \u25bc') : '' }
+function iSortInd(col) { return iSort.value === col ? (iDir.value === 'asc' ? ' ▲' : ' ▼') : '' }
 function iPage(d) { iOffset.value = Math.max(0, iOffset.value + d * ILIMIT); loadItems() }
 function applyItemFilters() { iOffset.value = 0; loadItems() }
 async function exportItems() {
@@ -319,15 +319,15 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
     <template v-if="hasItems()">
       <div class="row" style="justify-content:space-between;align-items:flex-end;margin-top:20px;gap:8px">
         <h2 style="margin:0">Items <span class="muted" style="font-weight:400">({{ iTotal }})</span>
-          <span v-if="selJob" class="chip">{{ selJob.target }} <a @click.prevent="selectAsset(selJob)" href="#">\u2715</a></span>
+          <span v-if="selJob" class="chip">{{ selJob.target }} <a @click.prevent="selectAsset(selJob)" href="#">✕</a></span>
         </h2>
         <div class="row" style="gap:8px">
-          <input v-model="iq" placeholder="search\u2026" style="width:auto;max-width:150px" @keyup.enter="applyItemFilters" @input="applyItemFilters" />
-          <button class="ghost" title="Download as a .txt file, one entry per line" @click="exportItems">\u2b07 TXT</button>
+          <input v-model="iq" placeholder="search…" style="width:auto;max-width:150px" @keyup.enter="applyItemFilters" @input="applyItemFilters" />
+          <button class="ghost" title="Download as a .txt file, one entry per line" @click="exportItems">⬇ TXT</button>
         </div>
       </div>
       <div class="muted" style="font-size:12px;margin-bottom:4px">
-        Results this scan produced that aren't findings \u2014 domains, hosts, URLs. TXT gives you one per line.
+        Results this scan produced that aren't findings — domains, hosts, URLs. TXT gives you one per line.
       </div>
       <div class="card tablecard">
         <table class="reflow rows">
@@ -341,7 +341,7 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
               <td data-label="Value" style="word-break:break-all">
                 <a v-if="/^https?:\/\//.test(it.value)" :href="it.value" target="_blank" rel="noopener">{{ it.value }}</a>
                 <code v-else>{{ it.value }}</code>
-                <span v-if="it.label && it.label !== it.value" class="muted" style="font-size:12px"> \u00b7 {{ it.label }}</span>
+                <span v-if="it.label && it.label !== it.value" class="muted" style="font-size:12px"> · {{ it.label }}</span>
               </td>
               <td data-label="Asset">{{ it.target }}</td>
               <td data-label="Seen" class="muted" style="white-space:nowrap" :title="it.last_seen">{{ timeAgo(it.last_seen) }}</td>
@@ -351,9 +351,9 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
         </table>
       </div>
       <div v-if="iTotal > ILIMIT" class="row pager">
-        <button class="ghost" :disabled="iOffset === 0" @click="iPage(-1)">\u2190 Prev</button>
-        <span class="muted">{{ iOffset + 1 }}\u2013{{ Math.min(iOffset + ILIMIT, iTotal) }} of {{ iTotal }}</span>
-        <button class="ghost" :disabled="iOffset + ILIMIT >= iTotal" @click="iPage(1)">Next \u2192</button>
+        <button class="ghost" :disabled="iOffset === 0" @click="iPage(-1)">← Prev</button>
+        <span class="muted">{{ iOffset + 1 }}–{{ Math.min(iOffset + ILIMIT, iTotal) }} of {{ iTotal }}</span>
+        <button class="ghost" :disabled="iOffset + ILIMIT >= iTotal" @click="iPage(1)">Next →</button>
       </div>
     </template>
 
