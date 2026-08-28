@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from urllib.parse import urlparse
 
-from ..core import fsutil
 from ..core.args import add_common_args
-from ..core.envelope import debug_logger, output_result, read_envelope
+from ..core.envelope import debug_logger, output_result
+from ..core.runner import run_tool
 from . import wayback
 
 NAME = "wayback-domains"
@@ -30,15 +29,14 @@ def run(args) -> int:
         output_result([], args.output, "Empty domain.")
         return 1
 
-    tmp = fsutil.temp_file("wayback_domains_")
-    wayback.run(
-        SimpleNamespace(
-            domain=domain, timeout=timeout, inc_subdomains=True,
-            js=False, params=False, output=tmp, debug=args.debug,
-        )
-    )
-    envelope = read_envelope(tmp)
-    fsutil.remove(tmp)
+    # Drive wayback in-process via run_tool: it parses wayback's OWN argparse (so every flag/default is set -
+    # no hand-built namespace to drift out of sync with wayback's arguments) and returns a JSON envelope
+    # regardless of the outer --output/--table. --inc-subdomains widens to subdomains; --all keeps static-asset
+    # URLs so a host that only ever served a .css is still discovered as a subdomain.
+    argv = [domain, "--inc-subdomains", "--all", "--timeout", str(timeout)]
+    if args.debug:
+        argv.append("--debug")
+    envelope = run_tool(wayback, argv)
 
     if not envelope.get("success", False):
         output_result([], args.output, envelope.get("error") or "wayback failed")

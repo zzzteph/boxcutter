@@ -71,7 +71,7 @@ def run(args) -> int:
 
     providers = {
         "wayback": lambda: _fetch_wayback(domain, timeout, dbg),
-        "commoncrawl": lambda: _fetch_commoncrawl(domain, timeout, dbg, args.cc_indexes),
+        "commoncrawl": lambda: _fetch_commoncrawl(domain, timeout, dbg, getattr(args, "cc_indexes", 3)),
         "otx": lambda: _fetch_otx(domain, timeout, dbg),
         "urlscan": lambda: _fetch_urlscan(domain, timeout, dbg),
     }
@@ -96,7 +96,7 @@ def run(args) -> int:
 
     urls = list(seen.keys())
 
-    if not args.include_all:
+    if not getattr(args, "include_all", False):    # optional flag - default off for in-process callers too
         before = len(urls)
         urls = [u for u in urls if not _is_noise(u)]
         dbg(f"noise filter: dropped {before - len(urls)} static/vendor URLs (--all to keep)")
