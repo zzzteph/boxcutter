@@ -65,9 +65,13 @@ _ID_HEX = re.compile(r"^[0-9a-f]{20,}$", re.I)  # MongoDB ObjectID etc.
 
 # Inject-mode reliability / timing tunables ------------------------------------
 RELIABILITY_MIN = 4          # of 5 shots when shot 1 misses
-TIME_VALUES = [1, 3, 5]      # injected sleep seconds, in order
-TIME_MIN_SCALING = 3.0       # delta(last) - delta(first) must reach this many seconds
-TIME_MIN_TRANSITIONS = 2     # how many of the deltas must increase step-to-step
+TIME_VALUES = [1, 3, 5, 10, 15]   # injected sleep seconds, ascending - the long sleeps make a real blind-SQLi
+                                  # delay unmistakable (a merely slow page cannot fake a ~15s response that also
+                                  # scales cleanly down to ~10s, ~5s, ...)
+TIME_TOLERANCE = 2.5         # per-measurement slack for network jitter / baseline drift (seconds)
+TIME_CONFIRM_FROM = 5        # gate the induced delay against the injected sleep only from this level up; the
+                             # 1s/3s probes are noise-dominated, so they inform monotonicity but aren't gated
+TIME_TIMEOUT_BUFFER = 10     # per-probe HTTP timeout = injected sleep + this, so a SLEEP(15) has room to return
 
 
 def add_arguments(parser) -> None:
@@ -287,9 +291,10 @@ def _needs_reliability(payload_raw: str) -> bool:
 _FUZZ_SAFE = "%"
 
 
-def _substitute(method, url, body, param, payload, sess):
+def _substitute(method, url, body, param, payload, sess, timeout=15):
     """Place ``payload`` at ``param`` (URL marker, body marker, or a query param)
-    and send. Returns the normalized response dict with the request URL added."""
+    and send. Returns the normalized response dict with the request URL added.
+    ``timeout`` is widened for time-based probes so a long SLEEP has room to return."""
     new_url, new_body = url, body
     if param == "__URL_FUZZ__":
         new_url = url.replace("{FUZZ}", quote(payload, safe=_FUZZ_SAFE))
@@ -302,7 +307,7 @@ def _substitute(method, url, body, param, payload, sess):
         qs = parse_qsl(parsed.query, keep_blank_values=True)
         new_url = urlunparse(parsed._replace(query=urlencode(
             [(k, payload if k == param else v) for k, v in qs])))
-    resp = http.send(method, new_url, sess=sess, data=new_body, timeout=15, allow_redirects=False)
+    resp = http.send(method, new_url, sess=sess, data=new_body, timeout=timeout, allow_redirects=False)
     resp["_url"] = new_url
     return resp
 
@@ -525,21 +530,37 @@ def _check_signal_reliable(method, url, body, param, payload_raw, pattern_raw, s
     return (ok, state["signal"], state["evidence"], state["payload"], state["url"], state["status"])
 
 
+def _time_tracks(levels: list, deltas: list, tol: float = TIME_TOLERANCE) -> bool:
+    """True while the induced delay TRACKS the injected sleep: it rises monotonically (within jitter) and, at
+    every sleep long enough to clear the noise (>= TIME_CONFIRM_FROM), REACHES that sleep (delta >= sleep - tol).
+    A genuine SLEEP(N) makes the response take ~N seconds at EVERY level, so delta_N ~= N; a merely slow or
+    variable endpoint may lift the tail a little but cannot reproduce a ~10-15s delay that also scales down
+    cleanly. Used to abort early (partial sequence) AND to confirm (full sequence)."""
+    if any(deltas[i] < deltas[i - 1] - tol for i in range(1, len(deltas))):
+        return False                                       # went backwards by more than jitter -> not scaling
+    return all(d >= t - tol for t, d in zip(levels, deltas) if t >= TIME_CONFIRM_FROM)
+
+
 def _check_time_reliable(method, url, body, param, payload_template, baseline_time, sess):
-    """Fire one shot per TIME value; confirm only if response time scales with TIME."""
+    """Confirm blind time-based injection: the response time must scale with the injected SLEEP across ALL of
+    TIME_VALUES (1..15s), i.e. the delay REACHES each sleep. Escalates - a level that already breaks the scaling
+    aborts before the long sleeps fire, so only genuine candidates pay the 10s/15s probes."""
     deltas: list[float] = []
     last_url, last_status = url, None
-    for t in TIME_VALUES:
+    for i, t in enumerate(TIME_VALUES):
         payload = payload_template.replace("{TIME}", str(t))
-        resp = _substitute(method, url, body, param, payload, sess)
+        resp = _substitute(method, url, body, param, payload, sess, timeout=t + TIME_TIMEOUT_BUFFER)
         if resp["error"] is not None or resp["status"] is None:
             return False, None, None, last_url, last_status
         last_url, last_status = resp["_url"], resp["status"]
         deltas.append(resp["time_ms"] / 1000.0 - baseline_time)
+        if not _time_tracks(TIME_VALUES[: i + 1], deltas):     # stop the moment the pattern breaks
+            return False, None, None, last_url, last_status
 
-    scaling = deltas[-1] - deltas[0]
-    transitions = sum(1 for i in range(1, len(deltas)) if deltas[i] > deltas[i - 1])
-    if scaling >= TIME_MIN_SCALING and transitions >= TIME_MIN_TRANSITIONS:
+    # Full-range confirmation: tracks every long sleep AND spans the whole injected range (15s->1s ~= 14s), so a
+    # uniform constant offset (slow but non-scaling) is rejected too.
+    span_ok = (deltas[-1] - deltas[0]) >= (TIME_VALUES[-1] - TIME_VALUES[0]) - TIME_TOLERANCE
+    if _time_tracks(TIME_VALUES, deltas) and span_ok:
         evidence = ", ".join(f"T={t}s->{d:+.1f}s" for t, d in zip(TIME_VALUES, deltas))
         return True, "time_scaling", evidence, last_url, last_status
     return False, None, None, last_url, last_status
