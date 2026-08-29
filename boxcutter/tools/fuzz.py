@@ -501,10 +501,31 @@ def _is_html_response(resp) -> bool:
     return ct in ("", "text/html", "application/xhtml+xml")
 
 
-def _check_signal_reliable(method, url, body, param, payload_raw, pattern_raw, sess, html_only=False):
+def _is_json_response(resp) -> bool:
+    """True when the response is JSON - the only shape a real GraphQL endpoint answers a ``{__typename}`` probe
+    with (``{"data":{"__typename":"Query"}}``). A reflected ``{__typename}`` echoed into an HTML page - a normal
+    query param on a normal page - is NOT GraphQL, so it must not confirm the graphql class. A missing/blank
+    Content-Type is treated as NOT JSON: a real GraphQL server sets application/json, so blank almost always
+    means an HTML page that merely reflected the payload."""
+    ct = (resp.get("headers") or {}).get("Content-Type", "").split(";")[0].strip().lower()
+    return ct.endswith("/json") or ct.endswith("+json")
+
+
+def _content_gate_ok(cls: str, resp) -> bool:
+    """Content-type gate per injection class: a reflected pattern match only counts in a response of the right
+    shape. XSS needs HTML (a JS/JSON echo of ``<script>`` is not XSS); GraphQL needs JSON (an HTML echo of
+    ``__typename`` is not GraphQL). Every other class is unrestricted."""
+    if cls == "xss":
+        return _is_html_response(resp)
+    if cls == "graphql":
+        return _is_json_response(resp)
+    return True
+
+
+def _check_signal_reliable(method, url, body, param, payload_raw, pattern_raw, sess, cls=None):
     """Re-fire a dynamic payload to confirm. Shot 1 hit -> 2 more, need >=2/3;
     shot 1 miss -> 4 more, need >=4/5. Returns (ok, signal, evidence, payload, url, status).
-    ``html_only`` (used for XSS) requires the reflecting response to be HTML."""
+    ``cls`` applies that class's content-type gate (XSS->HTML, GraphQL->JSON) to every shot."""
     state = {"signal": None, "evidence": None, "payload": None, "url": url, "status": None}
 
     def _shot() -> bool:
@@ -515,7 +536,7 @@ def _check_signal_reliable(method, url, body, param, payload_raw, pattern_raw, s
         m = _match(pattern, resp["body"])
         if not m:
             return False
-        if html_only and not _is_html_response(resp):     # a reflection in JS/JSON is not XSS
+        if not _content_gate_ok(cls, resp):     # wrong content-type for this class (XSS->HTML, GraphQL->JSON)
             return False
         state.update(signal="pattern_match", evidence=m.group(0)[:200],
                      payload=payload, url=resp["_url"], status=resp["status"])
@@ -597,7 +618,7 @@ def _run_inject_mode(method, target, body, sess, deadline: float, dbg) -> list[d
                     break
                 if _needs_reliability(payload_raw):
                     ok, signal, evidence, payload, url, status = _check_signal_reliable(
-                        method, target, body, param, payload_raw, pattern_raw, sess, html_only=(cls == "xss"))
+                        method, target, body, param, payload_raw, pattern_raw, sess, cls=cls)
                 else:
                     payload, pattern = _resolve_one(payload_raw, pattern_raw)
                     resp = _substitute(method, target, body, param, payload, sess)
@@ -606,8 +627,9 @@ def _run_inject_mode(method, target, body, sess, deadline: float, dbg) -> list[d
                         # Diff against the baseline: only a match the unfuzzed page
                         # did not already have counts as a signal.
                         m = _new_match(pattern, resp["body"], baseline_body, baseline_cache)
-                        # XSS only counts when the reflection lands in an HTML response (a JS/JSON echo is not XSS).
-                        if m and (cls != "xss" or _is_html_response(resp)):
+                        # Per-class content gate: XSS only counts in an HTML response, GraphQL only in a JSON one
+                        # (a reflected {__typename} echoed into an HTML page is not a GraphQL result).
+                        if m and _content_gate_ok(cls, resp):
                             ok, signal, evidence = True, "pattern_match", m.group(0)[:200]
                             url, status = resp["_url"], resp["status"]
                 if ok:
