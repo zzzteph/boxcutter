@@ -23,6 +23,9 @@ COPY --from=projectdiscovery/naabu:v2.5.0      /usr/local/bin/naabu     /usr/loc
 COPY --from=projectdiscovery/katana:v1.5.0     /usr/local/bin/katana    /usr/local/bin/katana
 COPY --from=projectdiscovery/nuclei:v3.7.1     /usr/local/bin/nuclei    /usr/local/bin/nuclei
 COPY --from=projectdiscovery/httpx:v1.9.0      /usr/local/bin/httpx     /usr/local/bin/httpx
+# secrets scanning: trufflehog's curated + verifiable detectors (scan-secrets uses it when present, else falls
+# back to its built-in regex). Pin to a specific release tag (e.g. 3.90.x) for fully reproducible builds.
+COPY --from=trufflesecurity/trufflehog:latest  /usr/bin/trufflehog      /usr/local/bin/trufflehog
 
 RUN nuclei -update-templates || true
 

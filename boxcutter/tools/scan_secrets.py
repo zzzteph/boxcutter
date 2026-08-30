@@ -3,11 +3,14 @@ Port of app:scan-secrets."""
 
 from __future__ import annotations
 
+import argparse
+import json
+import os
 import re
 
-from ..core import http
+from ..core import capability, fsutil, http, process
 from ..core.args import add_common_args
-from ..core.envelope import output_result
+from ..core.envelope import debug_logger, output_result
 from ..core.validators import is_valid_url
 
 NAME = "scan-secrets"
@@ -71,7 +74,7 @@ PATTERNS: list[tuple[str, str]] = [
     # Infrastructure secrets
     ("HashiCorp Vault Token (v1.10+)", r"hvs\.[A-Za-z0-9_\-]{90,}"),
     ("Age Secret Key", r"AGE-SECRET-KEY-1[AC-HJ-NP-Z02-9]{58}"),
-    ("Artifactory Access Token", r"AKC[a-zA-Z0-9]{10,}"),
+    ("Artifactory API Key", r"AKCp[0-9A-Za-z]{64,}"),   # real keys are AKCp + ~69 base62; the old AKC.{10,} matched any base64 blob
     ("Cloudinary URL", r"cloudinary://[0-9]{10,20}:[0-9A-Za-z]+@[a-z]+"),
     ("Typeform API Token", r"tfp_[a-zA-Z0-9_\-]{59}"),
 ]
@@ -84,6 +87,10 @@ def add_arguments(parser) -> None:
     parser.add_argument("-H", "--header", dest="header", action="append", default=[],
                         metavar="NAME: VALUE", help="Request header (repeatable) - e.g. an auth cookie so an "
                                                     "asset behind a login wall is scanned, not the login page")
+    parser.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True,
+                        help="When trufflehog is present, VERIFY each secret live against the provider's API "
+                             "(verified -> high). ON by default. Pass --no-verify to run detectors with NO "
+                             "external calls (still precise, just not confirmed live).")
     add_common_args(parser)
 
 
@@ -109,8 +116,67 @@ def scan_body(body: str, url: str = "") -> list[dict]:
     return findings
 
 
+def _run_trufflehog(body: str, url: str, verify: bool, dbg) -> list[dict] | None:
+    """Scan ``body`` with trufflehog's curated, low-false-positive detectors (far more precise than raw regex -
+    e.g. it will NOT flag an encoded HTML-entity table as an Artifactory token). Returns finding dicts, or None
+    when trufflehog is not installed or errored, so the caller falls back to the built-in regex patterns. With
+    ``verify`` each hit is validated live against the provider's API (verified -> high); otherwise detectors run
+    with NO external calls (still precise, just not confirmed live)."""
+    if not capability.available("trufflehog"):
+        return None
+    work = fsutil.temp_dir("trufflehog_")
+    try:
+        path = os.path.join(work, "body")
+        with open(path, "w", encoding="utf-8", errors="replace") as fh:
+            fh.write(body or "")
+        cmd = ["trufflehog", "filesystem", path, "--json", "--no-update"]
+        if not verify:
+            cmd.append("--no-verification")     # detectors only, no calls out to provider APIs
+        res = process.run(cmd, timeout=120)
+        findings, seen = [], set()
+        for line in (res.stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            det = rec.get("DetectorName") or rec.get("DetectorType") or "secret"
+            raw = (rec.get("Redacted") or rec.get("Raw") or "").strip()
+            is_verified = bool(rec.get("Verified"))
+            key = f"{det}|{raw}"
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append({
+                "severity": "high" if is_verified else "medium",
+                "title": f"{det} secret" + (" (verified)" if is_verified else ""),
+                "info": (f"trufflehog detector: {det}. "
+                         + ("VERIFIED live against the provider - this credential is active."
+                            if is_verified else "Unverified detector match.")
+                         + (f" value: {raw}" if raw else "")),
+                "url": url,
+            })
+        # A failed run (bad flag, crash, timeout) can exit non-zero with no parseable output. Without this,
+        # we'd return [] and suppress the regex fallback - silently reporting zero secrets. Fall back instead.
+        # (trufflehog is not invoked with --fail, so a clean scan with hits still exits 0; non-zero == error.)
+        if not findings and res.returncode != 0:
+            dbg(f"trufflehog exited {res.returncode} with no output; falling back to the built-in regex. "
+                f"stderr: {(res.stderr or '').strip()[:200]}")
+            return None
+        dbg(f"trufflehog: {len(findings)} secret(s) [{'verify' if verify else 'no-verify'}]")
+        return findings
+    except Exception as exc:  # noqa: BLE001
+        dbg(f"trufflehog failed ({exc}); falling back to the built-in regex patterns")
+        return None
+    finally:
+        fsutil.remove_dir(work)
+
+
 def run(args) -> int:
     target = args.target.strip()
+    dbg = debug_logger(args.debug)
 
     if not is_valid_url(target):
         output_result([], args.output, "Invalid URL.")
@@ -130,5 +196,10 @@ def run(args) -> int:
         output_result([], args.output, str(exc))
         return 1
 
-    output_result(scan_body(response.text, target), args.output)
+    # Prefer trufflehog's curated detectors (present in the Docker image); fall back to the built-in regex
+    # patterns when it isn't installed (e.g. a source checkout) or if it errors.
+    findings = _run_trufflehog(response.text, target, getattr(args, "verify", False), dbg)
+    if findings is None:
+        findings = scan_body(response.text, target)
+    output_result(findings, args.output)
     return 0

@@ -58,8 +58,11 @@ ERR_DISCLOSURE = (
 
 # NoSQL (MongoDB et al.) operator-injection error fingerprint.
 NOSQL_ERR = (
+    # SERVER-side MongoDB / NoSQL driver errors only. `TypeError ... is not a function` was REMOVED: it is a
+    # generic client-side JS runtime error present in almost every page's minified bundle, so it fired on normal
+    # page JavaScript (e.g. `TypeError: "+e+" is not a function`) rather than a NoSQL injection.
     r"(?i)MongoError|BSONTypeError|CastError|\$where is not allowed|"
-    r"TypeError.*is not a function|E11000 duplicate|cannot use.*\$"
+    r"E11000 duplicate|cannot use \$\w+"
 )
 
 

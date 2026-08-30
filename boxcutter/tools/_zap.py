@@ -171,6 +171,7 @@ _ZAP_SUPPRESS_IDS = {
     "10035",  # Strict-Transport-Security Header not set
     "10038",  # Content Security Policy (CSP) Header Not Set (+ its sub-alerts)
     "10055",  # CSP (e.g. "Failure to Define Directive with No Fallback")
+    "10062",  # PII Disclosure (credit-card / SSN-shaped digit strings - very FP-prone on ids, prices, hashes)
     "10063",  # Permissions Policy Header Not Set
     "90003",  # Sub Resource Integrity Attribute Missing
 }
@@ -189,6 +190,7 @@ _ZAP_SUPPRESS_NAMES = (
     # other low-value / FP-prone alerts the operator turned off
     "sub resource integrity",
     "vulnerable js library",
+    "pii disclosure",
 )
 
 
@@ -212,6 +214,8 @@ PASSIVE_DISABLE_JOB = (
     "  - type: passiveScan-config\n"
     "    rules:\n"
     "      - id: 10003        # Vulnerable JS Library\n"
+    "        threshold: \"OFF\"\n"
+    "      - id: 10062        # PII Disclosure\n"
     "        threshold: \"OFF\"\n"
 )
 # All of ZAP's TIME-BASED (blind) SQL-injection active-scan rules - the DB-specific scanners, one per engine.

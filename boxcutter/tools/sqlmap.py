@@ -47,6 +47,10 @@ def run(args) -> int:
     cmd = [
         "python3", SQLMAP, "-u", target, "--batch", "--random-agent",
         "--level", "1", "--risk", "1", "--disable-coloring",
+        "--banner",                       # VERIFY: read the DB version/banner through any injection found. A
+                                          # real injection returns it; a coincidental boolean 'hit' cannot -
+                                          # and sqlmap only extracts once it has actually confirmed an injection,
+                                          # so this adds no cost on non-injectable targets.
         f"--output-dir={artifact_dir}",
     ]
     for header in args.header:
@@ -66,7 +70,11 @@ def run(args) -> int:
     fsutil.remove_dir(artifact_dir)
 
     findings = _parse_findings(output, target)
-    dbg(f"Found {len(findings)} injection point(s).")
+    raw_detections = len(_BLOCK.findall(output))
+    if raw_detections and not findings:
+        dbg(f"Discarded {raw_detections} unverified detection(s): sqlmap could not read the DB version/banner "
+            f"back through them, so they are treated as false positives and not reported.")
+    dbg(f"Found {len(findings)} confirmed injection(s).")
 
     # When extra args were passed (enumeration run), attach the tail after the
     # last --- block so the full enumeration output is visible.
@@ -110,10 +118,20 @@ def _parse_findings(output: str, target_url: str) -> list[dict]:
         )
 
     meta = _parse_meta(output)
+    proof = _read_proof(output)
+
+    # POLICY: an injection counts ONLY if sqlmap could READ data back through it - the DB version/banner, the
+    # current user/database, a listed database, or a dumped row. If nothing was read, sqlmap merely detected /
+    # fingerprinted, and a boolean-based blind "detection" can trip on a coincidental page difference - so it is
+    # a FALSE POSITIVE and is not reported at all.
+    if not proof:
+        return []
 
     if findings:
         if meta:
             findings[0]["info"] += "\n\n" + meta
+        for f in findings:
+            f["info"] += f"\n\nVerified: sqlmap read {proof} through the injection - confirmed exploitable."
     elif meta:
         findings.append(
             {
@@ -156,6 +174,25 @@ def _parse_meta(output: str) -> str:
     lines.extend(_parse_dumped_tables(output))
 
     return "\n".join(lines)
+
+
+def _read_proof(output: str) -> str:
+    """The data sqlmap actually READ from the DB through the injection - the proof it is real and exploitable,
+    not a coincidental boolean/page difference. The DBMS *fingerprint* alone is NOT proof (it can come from an
+    error message or timing); a banner/version, current user/db, a listed database or a dumped row are. Returns
+    a short label of the strongest read, or '' if sqlmap only detected/fingerprinted without reading anything."""
+    for rx, label in (
+        (r"banner:\s*'(.+?)'", "the DB banner/version"),
+        (r"current user:\s*'(.+?)'", "the current DB user"),
+        (r"current database:\s*'(.+?)'", "the current database"),
+    ):
+        if m := re.search(rx, output, re.I):
+            return f"{label} ({m.group(1).strip()})"
+    if re.search(r"available databases \[\d+\]:", output, re.I):
+        return "the list of databases"
+    if re.search(r"Database:\s*\S+\s*\nTable:\s*\S+\s*\n\[\d+ entr", output, re.I):
+        return "dumped table rows"
+    return ""
 
 
 def _parse_databases(output: str) -> list[str]:
