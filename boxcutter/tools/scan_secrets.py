@@ -198,7 +198,7 @@ def run(args) -> int:
 
     # Prefer trufflehog's curated detectors (present in the Docker image); fall back to the built-in regex
     # patterns when it isn't installed (e.g. a source checkout) or if it errors.
-    findings = _run_trufflehog(response.text, target, getattr(args, "verify", False), dbg)
+    findings = _run_trufflehog(response.text, target, getattr(args, "verify", True), dbg)
     if findings is None:
         findings = scan_body(response.text, target)
     output_result(findings, args.output)
