@@ -12,6 +12,11 @@ const targets = ref('')
 const templateId = ref(null)
 const err = ref('')
 const busy = ref(false)
+// optional host-list file: for lists too large to paste (hundreds of thousands / millions). When set it is
+// uploaded (streamed server-side) and takes precedence over the textarea.
+const file = ref(null)
+function onFile(e) { file.value = e.target.files?.[0] || null }
+function clearFile() { file.value = null }
 
 // scan-specific inputs (used mainly by AI-agent templates): context, creds, and arbitrary custom params
 const vars = reactive({ context: '', creds: '', custom: [] })
@@ -92,11 +97,22 @@ async function load() {
 async function create() {
   err.value = ''; busy.value = true
   try {
-    const r = await api.post('/scans', {
-      name: name.value, template_id: templateId.value,
-      targets: targets.value.split(/\s+/).filter(Boolean),
-      vars: varsPayload(),
-    })
+    let r
+    if (file.value) {
+      // large host lists: upload the file (server streams it) instead of posting a JSON array
+      const fd = new FormData()
+      fd.append('name', name.value)
+      fd.append('template_id', String(templateId.value))
+      fd.append('vars', JSON.stringify(varsPayload()))
+      fd.append('file', file.value)
+      r = await api.postForm('/scans/upload', fd)
+    } else {
+      r = await api.post('/scans', {
+        name: name.value, template_id: templateId.value,
+        targets: targets.value.split(/\s+/).filter(Boolean),
+        vars: varsPayload(),
+      })
+    }
     router.push('/scans/' + r.id)
   } catch (e) { err.value = e.message } finally { busy.value = false }
 }
@@ -127,13 +143,25 @@ onMounted(load)
 
       <label>Targets (one per line or space separated)
         <span class="muted">— {{ targetCount }} asset(s)</span></label>
-      <textarea v-model="targets" rows="10"
+      <textarea v-model="targets" rows="10" :disabled="!!file"
         placeholder="example.com&#10;https://api.example.com&#10;10.0.0.0/24"></textarea>
+
+      <label style="margin-top:12px">…or upload a host list <span class="muted">— one per line; blank lines and
+        # comments ignored. Use this for very large lists (100k–millions).</span></label>
+      <div v-if="!file" class="row">
+        <input type="file" accept=".txt,.csv,.list,text/plain" @change="onFile" />
+      </div>
+      <div v-else class="row" style="align-items:center;gap:8px">
+        <span class="tag">📄 {{ file.name }}</span>
+        <span class="muted" style="font-size:12px">{{ (file.size / 1048576).toFixed(2) }} MB — streamed on upload</span>
+        <button class="ghost sm" @click="clearFile">Remove</button>
+      </div>
 
       <p v-if="err" class="err">{{ err }}</p>
       <p v-if="!templates.length" class="muted">No templates yet —
         <router-link to="/templates">create one</router-link> first.</p>
-      <button class="primary" style="margin-top:14px" :disabled="busy || !name || !targets || !templateId"
+      <button class="primary" style="margin-top:14px"
+        :disabled="busy || !name || !templateId || (!targets && !file)"
         @click="create">{{ busy ? 'Starting…' : 'Start scan' }}</button>
     </div>
 

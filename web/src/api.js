@@ -29,9 +29,26 @@ async function req(method, path, body) {
   return data
 }
 
+// multipart/form-data POST (file uploads). Do NOT set Content-Type — the browser adds the boundary itself.
+async function postForm(path, formData) {
+  const headers = {}
+  const t = token()
+  if (t) headers.Authorization = 'Bearer ' + t
+  const r = await fetch(BASE + path, { method: 'POST', headers, body: formData })
+  if (r.status === 401) {
+    setToken(''); setUser('')
+    if (location.hash !== '#/login') location.hash = '#/login'
+  }
+  const txt = await r.text()
+  const data = txt ? JSON.parse(txt) : null
+  if (!r.ok) throw new Error((data && (data.detail || data.error)) || r.statusText)
+  return data
+}
+
 export const api = {
   get: (p) => req('GET', p),
   post: (p, b) => req('POST', p, b),
+  postForm,
   patch: (p, b) => req('PATCH', p, b),
   del: (p) => req('DELETE', p),
   login: (username, password, code) => req('POST', '/auth/login', { username, password, code }),

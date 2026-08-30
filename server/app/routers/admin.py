@@ -3,6 +3,7 @@ at job time, and never returned to any client."""
 from __future__ import annotations
 
 import json
+import secrets
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,7 +20,7 @@ router = APIRouter(tags=["admin"])
 
 class UserIn(BaseModel):
     username: str
-    password: str
+    password: str | None = None    # blank -> the server generates a one-time temp password (returned once)
     role: str = "user"
 
 
@@ -36,13 +37,24 @@ def list_users(admin: User = Depends(require_admin), session: Session = Depends(
 
 @router.post("/users")
 def create_user(body: UserIn, admin: User = Depends(require_admin), session: Session = Depends(get_session)):
-    if session.exec(select(User).where(User.username == body.username)).first():
+    username = (body.username or "").strip()
+    if not username:
+        raise HTTPException(400, "username required")
+    if session.exec(select(User).where(User.username == username)).first():
         raise HTTPException(400, "username already exists")
-    u = User(username=body.username, password_hash=hash_password(body.password), role=body.role)
+    # A blank password means "generate a one-time temp password": returned to the admin ONCE (never stored in
+    # plaintext) to hand to the new user. Either way the account must set its own password on first login.
+    given = (body.password or "").strip()
+    temp = given or secrets.token_urlsafe(9)     # ~12-char URL-safe temp password
+    u = User(username=username, password_hash=hash_password(temp), role=body.role,
+             must_change_password=True)
     session.add(u)
     session.commit()
     session.refresh(u)
-    return {"id": u.id, "username": u.username, "role": u.role}
+    out = {"id": u.id, "username": u.username, "role": u.role, "must_change_password": True}
+    if not given:
+        out["temp_password"] = temp              # shown once in the UI so the admin can share it
+    return out
 
 
 @router.patch("/users/{uid}")

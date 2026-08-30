@@ -9,4 +9,5 @@ bcrypt>=4.0.1,<4.1
 pyjwt>=2.8
 python-multipart>=0.0.9
 pymysql>=1.1
+psycopg[binary]>=3.1     # Postgres driver — set DATABASE_URL=postgresql+psycopg://user:pass@host/db to use it
 requests>=2.31

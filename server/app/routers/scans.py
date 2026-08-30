@@ -6,7 +6,7 @@ import io
 import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import case, delete, func, or_, update
@@ -20,7 +20,38 @@ from ..security import current_user, decode_user
 
 router = APIRouter(prefix="/scans", tags=["scans"])
 
-MAX_TARGETS = 100_000        # hard cap on targets per scan (protects the import path and response sizes)
+# No hard cap on targets per scan: imports stream line-by-line and insert in chunks, so a multi-million-host
+# list loads in bounded row-memory. Postgres is recommended at that scale (SQLite serializes writes) - see db.py.
+_INSERT_CHUNK = 1000
+
+
+def _ingest_targets(session: Session, scan_id: int, lines) -> int:
+    """Stream raw target lines into Target rows: strip, skip blanks and ``#`` comments, de-dupe
+    (case-insensitive, trailing ``/.`` ignored), and bulk-insert in chunks. Only the de-dupe key set is
+    held in memory (not the rows), so a huge upload streams through. Returns the count inserted; keeps
+    each target's first-seen original spelling."""
+    seen: set[str] = set()
+    batch: list[dict] = []
+    n = 0
+    for raw in lines:
+        v = raw.strip()[:1024]
+        if not v or v.startswith("#"):
+            continue
+        key = v.lower().rstrip("/.")
+        if key in seen:
+            continue
+        seen.add(key)
+        batch.append({"scan_id": scan_id, "value": v})
+        if len(batch) >= _INSERT_CHUNK:
+            session.bulk_insert_mappings(Target, batch)
+            session.commit()
+            n += len(batch)
+            batch = []
+    if batch:
+        session.bulk_insert_mappings(Target, batch)
+        session.commit()
+        n += len(batch)
+    return n
 
 
 class ScanIn(BaseModel):
@@ -91,27 +122,43 @@ def create_scan(body: ScanIn, user: User = Depends(current_user), session: Sessi
     session.add(scan)
     session.commit()
     session.refresh(scan)
-    # de-dupe the import (case-insensitive, ignoring a trailing slash/dot), cap, and bulk-insert in chunks —
-    # importing 20k+ domains stays fast; keep each target's first-seen original spelling.
-    seen: set[str] = set()
-    values: list[str] = []
-    for t in body.targets:
-        v = t.strip()[:1024]
-        if not v:
-            continue
-        key = v.lower().rstrip("/.")
-        if key in seen:
-            continue
-        seen.add(key)
-        values.append(v)
-        if len(values) >= MAX_TARGETS:
-            break
-    tmaps = [{"scan_id": scan.id, "value": v} for v in values]
-    for i in range(0, len(tmaps), 1000):
-        session.bulk_insert_mappings(Target, tmaps[i:i + 1000])
-    session.commit()
+    _ingest_targets(session, scan.id, body.targets)
     n = enqueue_scan(session, scan)
     log_activity(session, "scan_created", f"Scan '{scan.name}' created — {n} assets", scan_id=scan.id)
+    return {"id": scan.id, "jobs": n}
+
+
+@router.post("/upload")
+def create_scan_upload(
+    name: str = Form(...),
+    template_id: int = Form(...),
+    vars: str | None = Form(None),          # JSON string (scan-specific inputs), same shape as ScanIn.vars
+    authorized: bool = Form(False),
+    file: UploadFile = File(...),
+    user: User = Depends(current_user),
+    session: Session = Depends(get_session),
+):
+    """Create a scan whose targets come from an UPLOADED file (one host/URL per line; blank lines and ``#``
+    comments ignored) instead of an inline JSON array - for host lists too large to POST as JSON (hundreds
+    of thousands / millions). The file is streamed line-by-line and inserted in chunks."""
+    if not session.get(Template, template_id):
+        raise HTTPException(404, "template not found")
+    try:
+        vars_obj = json.loads(vars) if vars else {}
+    except json.JSONDecodeError:
+        raise HTTPException(400, "vars must be valid JSON")
+    now = datetime.now(timezone.utc)
+    scan = Scan(name=name, owner_id=user.id, template_id=template_id, status="running",
+                run_no=1, vars_json=json.dumps(vars_obj or {}), authorized_ack_at=now, last_run_at=now)
+    session.add(scan)
+    session.commit()
+    session.refresh(scan)
+    # UploadFile spools to a temp file on disk past ~1MB, so a huge upload never sits fully in memory; wrap the
+    # raw file in a text decoder and iterate lines lazily so ingestion streams end to end.
+    text = io.TextIOWrapper(file.file, encoding="utf-8", errors="replace")
+    _ingest_targets(session, scan.id, text)
+    n = enqueue_scan(session, scan)
+    log_activity(session, "scan_created", f"Scan '{scan.name}' created — {n} assets (upload)", scan_id=scan.id)
     return {"id": scan.id, "jobs": n}
 
 

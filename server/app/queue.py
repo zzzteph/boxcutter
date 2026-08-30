@@ -41,28 +41,57 @@ def dedup_key(scan_id: int, target_id: int, template_id: int, run_no: int) -> st
     return hashlib.sha256(f"{scan_id}|{target_id}|{template_id}|{run_no}".encode()).hexdigest()
 
 
+_ENQUEUE_CHUNK = 1000        # job rows flushed per bulk-insert
+_TARGET_WINDOW = 5000        # target ids fetched per keyset window
+
+
+def _iter_target_ids(session: Session, scan_id: int):
+    """Yield a scan's target ids in ascending id windows (keyset pagination), so we never materialize the whole
+    id list. Each window is a bounded query that completes before we yield, so committing between windows (as
+    enqueue_scan does) is safe on both SQLite and Postgres."""
+    last = 0
+    while True:
+        ids = list(session.exec(
+            select(Target.id).where(Target.scan_id == scan_id, Target.id > last)
+            .order_by(Target.id).limit(_TARGET_WINDOW)).all())
+        if not ids:
+            return
+        yield from ids
+        last = ids[-1]
+
+
 def enqueue_scan(session: Session, scan: Scan) -> int:
-    """One pending job per target for the scan's current run_no (unique by scan|target|template|run). Fetches
-    existing keys in ONE query and bulk-inserts in chunks — so enqueuing tens of thousands of targets is fast
-    and never wedges the request (no per-target SELECT, no ORM-object churn)."""
+    """One pending job per target for the scan's current run_no (unique by scan|target|template|run). Streams
+    targets in id windows and bulk-inserts jobs in chunks, holding neither the full target-id list nor the full
+    job-row list in memory — so enqueuing millions of targets stays in bounded memory and never wedges the
+    request (no per-target SELECT, no ORM-object churn). Flushing per chunk frees the write lock repeatedly
+    (matters on SQLite) and lets agents start on the first batches while the rest still enqueue."""
+    # Idempotency guard: skip targets already enqueued for THIS run (empty on a fresh run/rerun, which bumps
+    # run_no). Bounded by jobs already created for this exact run, so it does not grow with a fresh import.
     existing = set(session.exec(select(Job.dedup_key).where(
         Job.scan_id == scan.id, Job.run_no == scan.run_no)).all())
-    tids = list(session.exec(select(Target.id).where(Target.scan_id == scan.id)).all())
     created = datetime.now(timezone.utc)
     needs_model = _needs_model(session, scan.template_id)   # gates which agents may claim these jobs
-    rows = []
-    for tid in tids:
+    batch: list[dict] = []
+    n = 0
+    for tid in _iter_target_ids(session, scan.id):
         key = dedup_key(scan.id, tid, scan.template_id, scan.run_no)
         if key in existing:
             continue
-        rows.append({"scan_id": scan.id, "target_id": tid, "template_id": scan.template_id,
-                     "run_no": scan.run_no, "dedup_key": key, "token": uuid.uuid4().hex,
-                     "status": "pending", "attempts": 0, "needs_model": needs_model,
-                     "argv_json": "[]", "output": "", "created_at": created})
-    for i in range(0, len(rows), 1000):
-        session.bulk_insert_mappings(Job, rows[i:i + 1000])
-    session.commit()
-    return len(rows)
+        batch.append({"scan_id": scan.id, "target_id": tid, "template_id": scan.template_id,
+                      "run_no": scan.run_no, "dedup_key": key, "token": uuid.uuid4().hex,
+                      "status": "pending", "attempts": 0, "needs_model": needs_model,
+                      "argv_json": "[]", "output": "", "created_at": created})
+        if len(batch) >= _ENQUEUE_CHUNK:
+            session.bulk_insert_mappings(Job, batch)
+            session.commit()
+            n += len(batch)
+            batch = []
+    if batch:
+        session.bulk_insert_mappings(Job, batch)
+        session.commit()
+        n += len(batch)
+    return n
 
 
 def _next_pending_job_id(session: Session, cap):

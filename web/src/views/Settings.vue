@@ -15,6 +15,7 @@ const admin = isAdmin()
 const pw = reactive({ current: '', next: '', msg: '', err: '' })
 const users = ref([])
 const nu = reactive({ username: '', password: '', role: 'user', err: '' })
+const lastTemp = ref(null)   // {username, password} of the most recently generated temp password, shown once
 
 async function changePw() {
   pw.msg = ''; pw.err = ''
@@ -27,9 +28,14 @@ async function loadUsers() { if (admin) users.value = await api.get('/users') }
 async function createUser() {
   nu.err = ''
   try {
-    await api.post('/users', { username: nu.username.trim(), password: nu.password, role: nu.role })
+    const r = await api.post('/users', { username: nu.username.trim(), password: nu.password || null, role: nu.role })
+    lastTemp.value = r.temp_password ? { username: r.username, password: r.temp_password } : null
     nu.username = ''; nu.password = ''; nu.role = 'user'; await loadUsers()
   } catch (e) { nu.err = e.message }
+}
+async function copyTemp() {
+  if (!lastTemp.value) return
+  try { await navigator.clipboard.writeText(lastTemp.value.password) } catch { /* ignore */ }
 }
 async function setRole(u, role) { try { await api.patch('/users/' + u.id, { role }); await loadUsers() } catch (e) { alert(e.message) } }
 async function resetPw(u) {
@@ -230,13 +236,20 @@ onMounted(() => { loadUsers(); loadKeys(); loadTelegram(); loadTwofa() })
     <div class="card" style="margin:10px 0">
       <div class="row" style="gap:12px;align-items:flex-end">
         <div style="flex:1;min-width:160px"><label>Username</label><input v-model="nu.username" /></div>
-        <div style="flex:1;min-width:160px"><label>Password</label><input v-model="nu.password" type="password" autocomplete="new-password" /></div>
+        <div style="flex:1;min-width:160px"><label>Password <span class="muted">— blank = generate temp</span></label><input v-model="nu.password" type="password" autocomplete="new-password" placeholder="leave blank for a temp password" /></div>
         <div style="min-width:120px"><label>Role</label>
           <Select v-model="nu.role" :options="roleOpts" />
         </div>
-        <button class="primary" :disabled="!nu.username || !nu.password" @click="createUser">Add user</button>
+        <button class="primary" :disabled="!nu.username" @click="createUser">Add user</button>
       </div>
       <p v-if="nu.err" style="color:var(--bad);margin-top:8px">{{ nu.err }}</p>
+      <div v-if="lastTemp" class="row" style="margin-top:10px;align-items:center;gap:10px;flex-wrap:wrap">
+        <span>Temp password for <b>{{ lastTemp.username }}</b>:</span>
+        <code style="padding:2px 8px;background:var(--panel,#0002);border-radius:6px;user-select:all">{{ lastTemp.password }}</code>
+        <button class="ghost sm" @click="copyTemp">Copy</button>
+        <button class="ghost sm" @click="lastTemp = null">Dismiss</button>
+        <span class="muted" style="font-size:12px;width:100%">Shown once — share it now. They must change it on first login.</span>
+      </div>
     </div>
 
     <div class="card tablecard">
