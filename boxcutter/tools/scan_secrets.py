@@ -120,8 +120,8 @@ def _run_trufflehog(body: str, url: str, verify: bool, dbg) -> list[dict] | None
     """Scan ``body`` with trufflehog's curated, low-false-positive detectors (far more precise than raw regex -
     e.g. it will NOT flag an encoded HTML-entity table as an Artifactory token). Returns finding dicts, or None
     when trufflehog is not installed or errored, so the caller falls back to the built-in regex patterns. With
-    ``verify`` each hit is validated live against the provider's API (verified -> high); otherwise detectors run
-    with NO external calls (still precise, just not confirmed live)."""
+    ``verify`` (the default) each hit is validated live against the provider's API (verified -> high); pass
+    ``--no-verify`` to run detectors with NO external calls (still precise, just not confirmed live)."""
     if not capability.available("trufflehog"):
         return None
     work = fsutil.temp_dir("trufflehog_")
