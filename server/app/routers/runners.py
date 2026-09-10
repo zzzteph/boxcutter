@@ -459,15 +459,31 @@ def delete_runner(runner_id: int, admin: User = Depends(require_admin), session:
 _SEV_RANK = ["Critical", "High", "Medium", "Low", "Info"]
 
 
+_GLOBAL_SEV_RANK = ["Critical", "High", "Medium", "Low", "Info"]
+# sortable column -> SQL expression. "severity" sorts by severity rank (not alphabetically); "scan" by scan name.
+_GLOBAL_FINDING_SORTS = {"title": Finding.title, "target": Finding.target, "scan": Scan.name,
+                         "state": Finding.state, "last_seen": Finding.last_seen}
+
+
+def _global_finding_order(sort: str, dir: str):
+    if sort == "severity":
+        col = case(*[(Finding.severity == s, i) for i, s in enumerate(_GLOBAL_SEV_RANK)],
+                   else_=len(_GLOBAL_SEV_RANK))
+    else:
+        col = _GLOBAL_FINDING_SORTS.get(sort, Finding.last_seen)
+    return col.desc() if dir == "desc" else col.asc()
+
+
 @router.get("/findings")
 def global_findings(severity: str | None = None, state: str | None = None, q: str | None = None,
-                    scan_id: int | None = None, before: int | None = None, limit: int = 50,
+                    scan_id: int | None = None, sort: str = "last_seen", dir: str = "desc",
+                    limit: int = 50, offset: int = 0,
                     user: User = Depends(current_user), session: Session = Depends(get_session)):
-    """Findings across ALL scans as a most-recent-first feed with **keyset** pagination (`before` = the last id
-    you've seen), so it stays O(page) at any depth — no deep OFFSET over millions of rows. Filter by severity /
-    state / search / scan; for 'most severe first', pick a severity. Returns {items, next} (next = the cursor to
-    pass as `before` for the following page, or null at the end)."""
+    """Findings across ALL scans, filtered (severity/state/search/scan), sorted by any column, and paginated.
+    `sort` is one of severity|title|target|scan|state|last_seen, `dir` asc|desc (default: last_seen desc — most
+    recent first). Returns {items, total, limit, offset}."""
     limit = max(1, min(limit, 200))
+    offset = max(0, offset)
     conds = []
     if scan_id is not None:
         conds.append(Finding.scan_id == scan_id)
@@ -481,17 +497,19 @@ def global_findings(severity: str | None = None, state: str | None = None, q: st
         like = f"%{q}%"
         conds.append(or_(Finding.title.ilike(like), Finding.target.ilike(like),
                          Finding.url.ilike(like), Finding.cls.ilike(like)))
-    if before is not None:
-        conds.append(Finding.id < before)      # keyset: only rows older than the last one shown
-    stmt = select(Finding, Scan.name).join(Scan, Scan.id == Finding.scan_id)
+    base = select(Finding, Scan.name).join(Scan, Scan.id == Finding.scan_id)
+    count_stmt = select(func.count()).select_from(Finding).join(Scan, Scan.id == Finding.scan_id)
     if conds:
-        stmt = stmt.where(*conds)
-    rows = session.exec(stmt.order_by(Finding.id.desc()).limit(limit)).all()
+        base = base.where(*conds)
+        count_stmt = count_stmt.where(*conds)
+    total = session.exec(count_stmt).one()
+    # id desc as the tiebreaker keeps ordering stable across pages when the sort column has ties
+    rows = session.exec(base.order_by(_global_finding_order(sort, dir), Finding.id.desc())
+                        .offset(offset).limit(limit)).all()
     items = [{"id": f.id, "scan_id": f.scan_id, "scan": name, "severity": f.severity, "title": f.title,
               "target": f.target, "url": f.url, "cls": f.cls, "state": f.state, "last_seen": f.last_seen}
              for f, name in rows]
-    nxt = items[-1]["id"] if len(items) == limit else None
-    return {"items": items, "next": nxt}
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/stats")

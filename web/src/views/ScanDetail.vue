@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, apiBase, token } from '../api'
 import { durationLabel, fmtDuration, timeAgo } from '../util'
@@ -107,6 +107,17 @@ async function toggleFinding(f) {
   selFinding.value = f.id; detail.value = null
   try { detail.value = await api.get(`/scans/${id}/findings/${f.id}`) } catch (e) { /* transient */ }
 }
+// deep-link from the global Findings feed (?finding=<id>): the finding may be on any page/sort of this scan's
+// list, so fetch it directly, put it at the top so its row (and expand panel) renders, open it, and scroll to it.
+async function focusFinding(fid) {
+  try {
+    const d = await api.get(`/scans/${id}/findings/${fid}`)   // now also returns the light row fields
+    findings.value = [d, ...findings.value.filter(f => f.id !== d.id)]
+    selFinding.value = d.id; detail.value = d
+    await nextTick()
+    document.getElementById('finding-' + d.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  } catch (e) { /* finding gone or not visible — leave the list as-is */ }
+}
 async function exportFindings(fmt) {
   let u = `${apiBase()}/scans/${id}/findings/export?format=${fmt}&state=${fState.value}&sort=${fSort.value}&dir=${fDir.value}`
   if (fSev.value) u += `&severity=${fSev.value}`
@@ -180,6 +191,7 @@ onMounted(async () => {
   const seed = await api.get('/scans/' + id + '/events?tail=200').catch(() => [])
   if (seed.length) pushEvents(seed)
   if (isLive()) ensureLive()       // only a running/paused scan needs the live stream + polling
+  if (route.query.finding) await focusFinding(route.query.finding)   // deep-link: open a specific finding
 })
 onUnmounted(() => { clearInterval(timer); if (es) es.close() })
 </script>
@@ -275,7 +287,8 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
       </tr></thead>
       <tbody>
         <template v-for="f in findings" :key="f.id">
-          <tr :class="'sevrow-' + f.severity" style="cursor:pointer" @click="toggleFinding(f)">
+          <tr :id="'finding-' + f.id" :class="['sevrow-' + f.severity, { sel: selFinding === f.id }]"
+            style="cursor:pointer" @click="toggleFinding(f)">
             <td data-label="Sev"><span class="badge" :class="'sev-' + f.severity">{{ f.severity }}</span></td>
             <td data-label="Title">{{ f.title }}</td>
             <td data-label="Asset">{{ f.target }}</td>

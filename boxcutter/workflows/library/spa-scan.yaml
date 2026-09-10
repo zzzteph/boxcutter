@@ -1,5 +1,5 @@
 name: spa-scan
-help: browser-crawl a JS/SPA in real Chromium (clicks, submits, captures every request incl. the cross-origin API), then DAST each endpoint - endpoint-scan (fuzz + nuclei-dast + sqlmap + zap-scan-url) on each param URL, the body of each POST/PUT fuzzed too, plus GraphQL audit and secrets on JS
+help: browser-crawl a JS/SPA in real Chromium (clicks, submits, captures every request incl. the cross-origin API), then DAST each endpoint - endpoint-scan (fuzz + nuclei-dast + sqlmap) on each param URL, the body of each POST/PUT fuzzed too, plus GraphQL audit and secrets on JS
 input: url
 output: findings
 
@@ -17,7 +17,7 @@ steps:
         args: --max-pages 0 --max-time 300 --max-actions 0
         save: corpus
 
-  # GET/query lane: DAST each parameterised URL via endpoint-scan (fuzz + nuclei-dast + sqlmap + zap-scan-url)
+  # GET/query lane: DAST each parameterised URL via endpoint-scan (fuzz + nuclei-dast + sqlmap)
   - select: ${corpus | urls | params | dedup}
     save: params
   - for_each: ${params}

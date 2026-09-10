@@ -1,5 +1,5 @@
 name: endpoint-scan
-help: scan one endpoint with every DAST tool - fuzz + nuclei -dast + sqlmap + zap-scan-url
+help: scan one endpoint with every DAST tool - fuzz + nuclei -dast + sqlmap
 input: endpoint
 output: findings
 
@@ -13,8 +13,5 @@ steps:
     args: --opt-args=-dast
     save: findings
   - tool: sqlmap
-    target: ${endpoint}
-    save: findings
-  - tool: zap-scan-url
     target: ${endpoint}
     save: findings

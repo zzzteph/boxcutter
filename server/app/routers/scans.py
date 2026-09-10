@@ -424,7 +424,11 @@ def scan_finding_detail(scan_id: int, finding_id: int, user: User = Depends(curr
     except Exception:  # noqa: BLE001
         raw = {}
     return {"id": f.id, "evidence": f.evidence, "reproduce": f.reproduce, "raw": raw, "cls": f.cls,
-            "template_kind": f.template_kind, "url": f.url, "first_seen": f.first_seen, "last_seen": f.last_seen}
+            "template_kind": f.template_kind, "url": f.url, "first_seen": f.first_seen, "last_seen": f.last_seen,
+            # light row fields too, so a deep-linked finding (opened from the global feed) can render its list
+            # row without a second request.
+            "severity": f.severity, "title": f.title, "target": f.target, "state": f.state,
+            "fingerprint": f.fingerprint}
 
 
 _SEV_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}

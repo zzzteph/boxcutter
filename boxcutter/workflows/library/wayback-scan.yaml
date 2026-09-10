@@ -1,5 +1,5 @@
 name: wayback-scan
-help: wayback URLs - secrets on JS files, sqlmap/fuzz/zap on param URLs
+help: wayback URLs - secrets on JS files, sqlmap/fuzz on param URLs
 input: target
 output: findings
 
@@ -19,7 +19,7 @@ steps:
         target: ${js.item}
         save: findings
 
-  # DAST each parameterised URL (fuzz + nuclei -dast + sqlmap + zap-scan-url)
+  # DAST each parameterised URL (fuzz + nuclei -dast + sqlmap)
   - for_each: ${params}
     do:
       - workflow: endpoint-scan

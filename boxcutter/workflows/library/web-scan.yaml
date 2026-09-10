@@ -1,5 +1,5 @@
 name: web-scan
-help: full DAST of one known URL (no httpx probe) - crawl -> zap-full -> endpoint-scan per param URL -> swagger -> graphql-scan -> secrets per JS
+help: full DAST of one known URL (no httpx probe) - crawl -> fuzz + nuclei-dast + sqlmap per param URL -> swagger -> graphql-scan -> secrets per JS
 input: url
 output: findings
 
@@ -27,17 +27,19 @@ steps:
   - select: ${urls | params | dedup}
     save: params
 
-  # active-scan the URL itself (nuclei runs separately in web-full)
-  - for_each: ${live}
-    do:
-      - tool: zap-scan-full
-        target: ${live.item}
-        save: findings
-
-  # DAST each parameterised URL via endpoint-scan (fuzz + nuclei-dast + sqlmap + zap-scan-url)
+  # DAST each parameterised URL: fuzz + nuclei-dast + sqlmap. ZAP active scanning was removed - it produced
+  # most of the noise/false positives on web targets. nuclei template passes run separately in web-full.
   - for_each: ${params}
     do:
-      - workflow: endpoint-scan
+      - tool: fuzz
+        target: ${params.item}
+        args: --timeout 120
+        save: findings
+      - tool: nuclei
+        target: ${params.item}
+        args: --opt-args=-dast
+        save: findings
+      - tool: sqlmap
         target: ${params.item}
         save: findings
 
@@ -53,7 +55,7 @@ steps:
         save: findings
 
   # discover + DAST OpenAPI/Swagger endpoints - delegated to swagger-scan (find
-  # specs on the host, then fuzz/nuclei-dast/sqlmap/zap per endpoint + zap-openapi)
+  # specs on the host, then fuzz/nuclei-dast/sqlmap per endpoint)
   - workflow: swagger-scan
     target: ${url}
     save: findings

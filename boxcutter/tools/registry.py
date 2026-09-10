@@ -16,6 +16,7 @@ from ..ai import (
     logio,
     prawlio,
     travis,
+    vera,
 )
 from . import (
     api_map,
@@ -128,6 +129,8 @@ AI = [
     travis,
     # Multi-phase / multi-identity orchestrator: authed deep scan, reauth, two-account BFLA, multi-step chains.
     caleb,
+    # Planning + hypothesis-driven scanner with a validation GATE: proves each finding over HTTP before reporting.
+    vera,
 ]
 
 # Every command resolvable by NAME (tools + ai) - toolschema and the workflow runner look themselves up here.
