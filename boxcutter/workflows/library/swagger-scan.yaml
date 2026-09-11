@@ -1,5 +1,5 @@
 name: swagger-scan
-help: find OpenAPI/Swagger spec(s) on a host (or scan a spec URL directly), then DAST every endpoint - fuzz (fuzzable) + nuclei-dast + sqlmap per endpoint
+help: find OpenAPI/Swagger spec(s) on a host (or scan a spec URL directly), then DAST every endpoint - fuzz (fuzzable) + nuclei-dast, then sqlmap ONLY if fuzz flags SQL (double-confirmed)
 input: target
 output: findings
 
@@ -19,13 +19,17 @@ steps:
         save: fuzzable
 
   # fuzz gets the {FUZZ}-marked variants (marker mode); the non-fuzz tools get the
-  # concrete URLs - they have no concept of {FUZZ} and would send the literal marker
+  # concrete URLs - they have no concept of {FUZZ} and would send the literal marker.
+  # fuzz is the PROBE here: its hits accumulate into a scratch var and every finding
+  # EXCEPT sqli is kept - a fuzz sqli is only a lead, confirmed by sqlmap below.
   - for_each: ${fuzzable}
     do:
       - tool: fuzz
         target: ${fuzzable.item}
         args: --timeout 120
-        save: findings
+        save: probe
+  - select: ${probe | not-class:sql}
+    save: findings
 
   - for_each: ${concrete}
     do:
@@ -33,6 +37,8 @@ steps:
         target: ${concrete.item}
         args: --opt-args=-dast
         save: findings
+      # double-confirm SQLi: only spawn sqlmap when fuzz flagged SQL on this API's endpoints
       - tool: sqlmap
         target: ${concrete.item}
+        when: ${probe | class:sql}
         save: findings

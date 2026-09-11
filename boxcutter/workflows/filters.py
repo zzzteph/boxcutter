@@ -1,11 +1,18 @@
 """List filters usable in YAML workflows via ``${name | filter | filter}``.
 
-Each filter takes a list and returns a list. They are thin wrappers over the
-existing url helpers, so a YAML workflow can shape a URL set without any Python.
+Two kinds of filter:
+
+* **Plain filters** take a list and return a list (``FILTERS``). They are thin
+  wrappers over the url helpers, so a workflow can shape a URL set with no Python.
+* **Parametric filters** take an argument and a list (``PARAM_FILTERS``), written
+  ``name:arg`` in a ref, e.g. ``${findings | class:sql}``. They select findings by
+  a property (vulnerability class) so a step's ``when:``/``unless:`` guard can key
+  on what an earlier step found.
 """
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse
 
 from ..core.envelope import dedupe
@@ -81,4 +88,55 @@ FILTERS = {
     "url": _url,
     "urls": _urls,
     "writes": _writes,
+}
+
+
+# --- parametric filters: select findings by vulnerability class ---------------
+#
+# A finding's class is read from (in order) its explicit ``class`` field, the
+# bracketed tags in its ``title`` (fuzz emits ``[GET] [sqli] in 'id' (...)``), and
+# a ``Class: <c>`` line in its ``info``. Matching is exact per token (so ``sql``
+# does NOT match ``nosql``), with a small alias table folding common synonyms -
+# ``sql`` -> ``sqli`` - so a workflow can write the class the way a human says it.
+
+_CLASS_ALIASES = {"sql": "sqli", "sqlinjection": "sqli", "injection": "sqli"}
+_TAG_RE = re.compile(r"\[([A-Za-z0-9_.-]+)\]")
+_INFO_CLASS_RE = re.compile(r"class:\s*([A-Za-z0-9_.-]+)", re.I)
+
+
+def _class_tokens(f: dict) -> set:
+    """Every class token a finding carries, lower-cased."""
+    toks: set[str] = set()
+    if not isinstance(f, dict):
+        return toks
+    cls = f.get("class")
+    if isinstance(cls, str) and cls:
+        toks.add(cls.lower())
+    for tag in _TAG_RE.findall(str(f.get("title", ""))):
+        toks.add(tag.lower())
+    m = _INFO_CLASS_RE.search(str(f.get("info", "")))
+    if m:
+        toks.add(m.group(1).lower())
+    return toks
+
+
+def _class_matches(arg: str, f: dict) -> bool:
+    want = arg.strip().lower()
+    want = _CLASS_ALIASES.get(want, want)
+    return want in _class_tokens(f)
+
+
+def _class(arg: str, items: list) -> list:
+    """Keep only findings of vulnerability class ``arg`` (e.g. ``class:sql``)."""
+    return [f for f in items if _class_matches(arg, f)]
+
+
+def _not_class(arg: str, items: list) -> list:
+    """Drop findings of vulnerability class ``arg``; keep everything else."""
+    return [f for f in items if not _class_matches(arg, f)]
+
+
+PARAM_FILTERS = {
+    "class": _class,
+    "not-class": _not_class,
 }

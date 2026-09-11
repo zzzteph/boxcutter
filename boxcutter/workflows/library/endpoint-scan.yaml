@@ -1,17 +1,23 @@
 name: endpoint-scan
-help: scan one endpoint with every DAST tool - fuzz + nuclei -dast + sqlmap
+help: scan one endpoint - fuzz + nuclei -dast, then sqlmap ONLY if fuzz flags SQL (double-confirmed)
 input: endpoint
 output: findings
 
 steps:
+  # fuzz is the cheap PROBE: capture everything into a scratch var, keep every finding
+  # EXCEPT sqli (a fuzz sqli is only a lead - sqlmap re-tests below and its verdict is kept)
   - tool: fuzz
     target: ${endpoint}
     args: --timeout 120
+    set: probe
+  - select: ${probe | not-class:sql}
     save: findings
   - tool: nuclei
     target: ${endpoint}
     args: --opt-args=-dast
     save: findings
+  # double-confirm SQLi: only spawn sqlmap when fuzz flagged SQL on this endpoint
   - tool: sqlmap
     target: ${endpoint}
+    when: ${probe | class:sql}
     save: findings

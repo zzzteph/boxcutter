@@ -27,13 +27,20 @@ steps:
   - select: ${urls | params | dedup}
     save: params
 
-  # DAST each parameterised URL: fuzz + nuclei-dast + sqlmap. ZAP active scanning was removed - it produced
-  # most of the noise/false positives on web targets. nuclei template passes run separately in web-full.
+  # DAST each parameterised URL. ZAP active scanning was removed - it produced most
+  # of the noise/false positives on web targets. nuclei template passes run in web-full.
+  #
+  # SQLi is double-confirmed: fuzz is a cheap PROBE (set: overwrites the scratch var
+  # each iteration, so the guard below only sees THIS param's hits). Every fuzz finding
+  # is kept EXCEPT sqli - a fuzz sqli is only a lead, so sqlmap re-tests the same param
+  # and ITS verdict is what lands in findings. No fuzz-sqli => no sqlmap run, no report.
   - for_each: ${params}
     do:
       - tool: fuzz
         target: ${params.item}
         args: --timeout 120
+        set: probe
+      - select: ${probe | not-class:sql}
         save: findings
       - tool: nuclei
         target: ${params.item}
@@ -41,6 +48,7 @@ steps:
         save: findings
       - tool: sqlmap
         target: ${params.item}
+        when: ${probe | class:sql}
         save: findings
 
   # POST/PUT lane: fuzz the captured body of each state-changing endpoint (empty on a non-SPA target)

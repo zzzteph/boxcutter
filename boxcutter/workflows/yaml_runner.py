@@ -16,6 +16,10 @@ Step keys:
   target:   <ref|literal>         what to run on, e.g. ${target} or ${item}
   args:     "<extra cli flags>"   appended to the tool invocation
   save:     <var>                 capture this step's output into <var> (merges)
+  set:      <var>                 like save, but OVERWRITES <var> - use for a
+                                  per-iteration scratch/probe var inside a for_each
+  when:     <ref>                 run this step only if <ref> resolves non-empty
+  unless:   <ref>                 run this step only if <ref> resolves empty
   pick:     <field[.field]>       extract a field from object output before saving
   select:   <ref>                 save a list produced purely by filtering
   alive:    <ref>                 save the hosts that resolve (dnsx)
@@ -24,7 +28,10 @@ Step keys:
                                   ${<list>.item}, e.g. for_each ${live} -> ${live.item}
 Top-level ``output: <var>`` names the variable to emit (default: nothing).
 
-Filters (piped with ``|`` inside ``${...}``): see ``filters.FILTERS``.
+Filters (piped with ``|`` inside ``${...}``): plain ``name`` filters (see
+``filters.FILTERS``) and parametric ``name:arg`` filters (``filters.PARAM_FILTERS``,
+e.g. ``${findings | class:sql}`` / ``${findings | not-class:sql}``) that select
+findings by vulnerability class - handy in a ``when:``/``unless:`` guard.
 """
 
 from __future__ import annotations
@@ -44,7 +51,7 @@ from ..core.envelope import (
 )
 from ..tools.registry import BY_NAME
 from ._common import call, finding, run_workflow
-from .filters import FILTERS
+from .filters import FILTERS, PARAM_FILTERS
 
 
 class YamlWorkflow:
@@ -107,7 +114,36 @@ def run_spec(spec: dict, args) -> int:
     return 0
 
 
+def _truthy(ref, variables: dict) -> bool:
+    """A ``when:``/``unless:`` guard passes when ``ref`` resolves to something
+    non-empty: a non-empty list, or a single non-empty/non-zero scalar. An unset
+    variable or an empty list is false."""
+    items = _resolve_list(ref, variables)
+    if not items:
+        return False
+    if len(items) == 1:
+        v = items[0]
+        return v.strip() != "" if isinstance(v, str) else bool(v)
+    return True
+
+
+def _guard_label(step: dict) -> str:
+    return str(step.get("tool") or step.get("workflow") or step.get("select") or "step")
+
+
+def _passes_guard(step: dict, variables: dict, dbg) -> bool:
+    if "when" in step and not _truthy(step["when"], variables):
+        dbg(f"skip (when not met): {_guard_label(step)}")
+        return False
+    if "unless" in step and _truthy(step["unless"], variables):
+        dbg(f"skip (unless met): {_guard_label(step)}")
+        return False
+    return True
+
+
 def _run_step(step: dict, variables: dict, args, dbg) -> None:
+    if not _passes_guard(step, variables, dbg):
+        return
     if "for_each" in step:
         # Run the nested do: steps once per item. The current item is exposed as
         # ${<list>.item} - named after the list being iterated, so it's clear
@@ -125,7 +161,7 @@ def _run_step(step: dict, variables: dict, args, dbg) -> None:
         return
 
     if "select" in step:
-        _save(step, variables, _resolve_list(step["select"], variables))
+        _store(step, variables, _resolve_list(step["select"], variables))
         return
 
     if "alive" in step:
@@ -167,10 +203,10 @@ def _run_step(step: dict, variables: dict, args, dbg) -> None:
     if kind == "findings" and collected and getattr(args, "show_findings", False):
         print_live_findings(collected)
 
-    if "save" in step:
+    if "save" in step or "set" in step:
         if kind != "findings" and step.get("pick"):
             collected = _pick(collected, step["pick"])
-        _save(step, variables, collected)
+        _store(step, variables, collected)
 
 
 def _run_alive(step: dict, variables: dict, args, dbg) -> None:
@@ -182,7 +218,7 @@ def _run_alive(step: dict, variables: dict, args, dbg) -> None:
         lines = call(dnsx, [host], args) if dnsx else []
         if any(isinstance(line, str) and line.startswith(host) for line in lines):
             keep.append(host)
-    _save(step, variables, keep)
+    _store(step, variables, keep)
 
 
 def _run_subworkflow(step: dict, variables: dict, args, dbg) -> None:
@@ -198,10 +234,10 @@ def _run_subworkflow(step: dict, variables: dict, args, dbg) -> None:
         dbg(f"workflow {step['workflow']} {target}")
         collected.extend(run_workflow(sub, target, args))  # already source-tagged
 
-    if "save" in step:
+    if "save" in step or "set" in step:
         if step.get("pick"):
             collected = _pick(collected, step["pick"])
-        _save(step, variables, collected)
+        _store(step, variables, collected)
 
 
 def _targets(step: dict, variables: dict) -> list:
@@ -234,6 +270,12 @@ def _resolve_list(ref, variables: dict) -> list:
     value = variables.get(parts[0], [])
     items = list(value) if isinstance(value, list) else [value]
     for name in parts[1:]:
+        if ":" in name:                         # parametric filter, e.g. class:sql
+            fname, arg = name.split(":", 1)
+            pf = PARAM_FILTERS.get(fname.strip())
+            if pf is not None:
+                items = pf(arg.strip(), items)
+            continue
         f = FILTERS.get(name)
         if f is not None:
             items = f(items)
@@ -293,13 +335,19 @@ def _in_scope_item(item, bases: list) -> bool:
     return True
 
 
-def _save(step: dict, variables: dict, result: list) -> None:
-    name = step["save"]
+def _store(step: dict, variables: dict, result: list) -> None:
+    """Persist a step's output. ``set:`` OVERWRITES the target var; ``save:``
+    MERGES into it (the default). A step with neither stores nothing."""
+    key = "set" if "set" in step else "save"
+    if key not in step:
+        return
+    name = step[key]
     bases = variables.get("_scope") or []
     if bases:
         result = [x for x in result if _in_scope_item(x, bases)]
-    combined = list(variables.get(name, [])) + list(result)
-    if all(isinstance(x, str) for x in combined):
+    prev = [] if key == "set" else list(variables.get(name, []))
+    combined = prev + list(result)
+    if combined and all(isinstance(x, str) for x in combined):
         combined = dedupe(combined)
     variables[name] = combined
 
