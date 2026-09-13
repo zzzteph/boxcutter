@@ -25,12 +25,13 @@ router = APIRouter(prefix="/scans", tags=["scans"])
 _INSERT_CHUNK = 1000
 
 
-def _ingest_targets(session: Session, scan_id: int, lines) -> int:
+def _ingest_targets(session: Session, scan_id: int, lines, seen: set | None = None) -> int:
     """Stream raw target lines into Target rows: strip, skip blanks and ``#`` comments, de-dupe
     (case-insensitive, trailing ``/.`` ignored), and bulk-insert in chunks. Only the de-dupe key set is
     held in memory (not the rows), so a huge upload streams through. Returns the count inserted; keeps
-    each target's first-seen original spelling."""
-    seen: set[str] = set()
+    each target's first-seen original spelling. Pass ``seen`` preloaded with the scan's EXISTING target keys
+    to append without creating duplicates (used when adding targets to a running scan)."""
+    seen = seen if seen is not None else set()
     batch: list[dict] = []
     n = 0
     for raw in lines:
@@ -164,6 +165,107 @@ def create_scan_upload(
     return {"id": scan.id, "jobs": n}
 
 
+# ---- targets: list / search / add (batch or upload) / remove on an EXISTING scan -------------------------
+_MAX_ADD = 50000        # per-call cap; the client chunks a larger list into several calls
+
+
+def _existing_target_keys(session: Session, scan_id: int) -> set:
+    """The scan's current target de-dupe keys, so an append doesn't re-create a target it already has (which
+    would spawn a duplicate job)."""
+    return {v.lower().rstrip("/.") for v in
+            session.exec(select(Target.value).where(Target.scan_id == scan_id)).all() if v}
+
+
+class TargetsIn(BaseModel):
+    targets: list[str] = []
+
+
+class TargetIds(BaseModel):
+    ids: list[int] = []
+
+
+@router.get("/{scan_id}/targets")
+def list_targets(scan_id: int, q: str | None = None, limit: int = 100, offset: int = 0,
+                 user: User = Depends(current_user), session: Session = Depends(get_session)):
+    """List/search the scan's targets, paginated. `q` filters by value (substring)."""
+    scan = session.get(Scan, scan_id)
+    if not scan or not _perm(session, scan, user):
+        raise HTTPException(404, "not found")
+    limit, offset = _clamp(limit, offset)
+    conds = [Target.scan_id == scan_id]
+    if q:
+        conds.append(Target.value.ilike(f"%{q}%"))
+    total = session.exec(select(func.count()).select_from(Target).where(*conds)).one()
+    rows = session.exec(select(Target).where(*conds).order_by(Target.id.asc())
+                        .offset(offset).limit(limit)).all()
+    return {"items": [{"id": t.id, "value": t.value} for t in rows],
+            "total": total, "limit": limit, "offset": offset}
+
+
+def _add_and_enqueue(session: Session, scan: Scan, lines) -> dict:
+    added = _ingest_targets(session, scan.id, lines, seen=_existing_target_keys(session, scan.id))
+    jobs = enqueue_scan(session, scan) if added else 0     # idempotent: only the new targets get jobs
+    if added:
+        log_activity(session, "targets_added", f"Added {added} targets to '{scan.name}' ({jobs} jobs)",
+                     scan_id=scan.id)
+    return {"added": added, "jobs": jobs}
+
+
+@router.post("/{scan_id}/targets")
+def add_targets(scan_id: int, body: TargetsIn, user: User = Depends(current_user),
+                session: Session = Depends(get_session)):
+    """Add a batch of targets to a running scan (dedup vs. existing) and enqueue jobs for the new ones. Cap is
+    50000 per call — the client chunks a bigger list (e.g. 200k) into several calls."""
+    scan = session.get(Scan, scan_id)
+    if not scan or not _perm(session, scan, user):
+        raise HTTPException(404, "not found")
+    if len(body.targets) > _MAX_ADD:
+        raise HTTPException(413, f"too many targets in one call (max {_MAX_ADD}); upload in batches")
+    return _add_and_enqueue(session, scan, body.targets)
+
+
+@router.post("/{scan_id}/targets/upload")
+def add_targets_upload(scan_id: int, file: UploadFile = File(...), user: User = Depends(current_user),
+                       session: Session = Depends(get_session)):
+    """Append targets from an uploaded file (one per line) — for lists too large to chunk over JSON."""
+    scan = session.get(Scan, scan_id)
+    if not scan or not _perm(session, scan, user):
+        raise HTTPException(404, "not found")
+    text = io.TextIOWrapper(file.file, encoding="utf-8", errors="replace")
+    return _add_and_enqueue(session, scan, text)
+
+
+@router.delete("/{scan_id}/targets/{target_id}")
+def remove_target(scan_id: int, target_id: int, user: User = Depends(current_user),
+                  session: Session = Depends(get_session)):
+    """Remove one target and its jobs from the scan (its past findings/items stay, keyed by value)."""
+    scan = session.get(Scan, scan_id)
+    if not scan or not _perm(session, scan, user):
+        raise HTTPException(404, "not found")
+    t = session.get(Target, target_id)
+    if not t or t.scan_id != scan_id:
+        raise HTTPException(404, "target not found")
+    session.execute(delete(Job).where(Job.scan_id == scan_id, Job.target_id == target_id))
+    session.delete(t)
+    session.commit()
+    return {"ok": True}
+
+
+@router.post("/{scan_id}/targets/delete")
+def remove_targets(scan_id: int, body: TargetIds, user: User = Depends(current_user),
+                   session: Session = Depends(get_session)):
+    """Bulk-remove targets by id (and their jobs)."""
+    scan = session.get(Scan, scan_id)
+    if not scan or not _perm(session, scan, user):
+        raise HTTPException(404, "not found")
+    ids = body.ids[:10000]
+    if ids:
+        session.execute(delete(Job).where(Job.scan_id == scan_id, Job.target_id.in_(ids)))
+        session.execute(delete(Target).where(Target.scan_id == scan_id, Target.id.in_(ids)))
+        session.commit()
+    return {"removed": len(ids)}
+
+
 @router.get("")
 def list_scans(q: str | None = None, limit: int = 50, offset: int = 0,
                user: User = Depends(current_user), session: Session = Depends(get_session)):
@@ -244,6 +346,34 @@ def delete_scan(scan_id: int, user: User = Depends(current_user), session: Sessi
     session.commit()
     log_activity(session, "scan_deleted", f"Scan '{name}' deleted")     # scan_id omitted — the row is gone
     return {"ok": True}
+
+
+_TRUNCATE_SCOPES = {
+    "findings": [Finding],
+    "items": [ScanItem],
+    "screenshots": [Screenshot],
+    "all": [Finding, ScanItem, Screenshot],
+}
+
+
+@router.post("/{scan_id}/truncate")
+def truncate_scan(scan_id: int, scope: str = "findings", user: User = Depends(current_user),
+                  session: Session = Depends(get_session)):
+    """Clear a scan's RESULTS without deleting the scan (keeps its jobs/targets/config). `scope` is one of
+    findings (default) | items | screenshots | all. Batched like delete so it never stalls the server."""
+    scan = session.get(Scan, scan_id)
+    if not scan or not _perm(session, scan, user):
+        raise HTTPException(404, "not found")
+    models = _TRUNCATE_SCOPES.get(scope)
+    if not models:
+        raise HTTPException(400, f"scope must be one of: {', '.join(_TRUNCATE_SCOPES)}")
+    cleared: dict = {}
+    for m in models:
+        cleared[m.__name__.lower()] = session.exec(
+            select(func.count()).select_from(m).where(m.scan_id == scan_id)).one()
+        _delete_scan_rows(session, m, scan_id)
+    log_activity(session, "scan_truncated", f"Cleared {scope} on '{scan.name}' ({cleared})", scan_id=scan_id)
+    return {"ok": True, "cleared": cleared}
 
 
 _SEV_RANK = ["Critical", "High", "Medium", "Low", "Info"]

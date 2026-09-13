@@ -46,6 +46,10 @@ const hasItems = () => !!(scan.value && scan.value.items_total > 0)
 const shots = ref([]); const shTotal = ref(0); const shotFull = ref(null)
 const hasShots = () => !!(scan.value && scan.value.screenshots_total > 0)
 
+// targets — search / add (huge lists go up in 20k client-side batches) / remove
+const targets = ref([]); const tTotal = ref(0); const tOffset = ref(0); const tq = ref(''); const adding = ref(false)
+const addText = ref(''); const TLIMIT = 100; const CHUNK = 20000
+
 let timer = null, es = null
 
 const progress = computed(() => {
@@ -122,6 +126,11 @@ async function focusFinding(fid) {
     document.getElementById('finding-' + d.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   } catch (e) { /* finding gone or not visible — leave the list as-is */ }
 }
+async function truncateFindings() {
+  if (!confirm(`Delete all ${fTotal.value} findings for this scan? The scan, its assets and screenshots stay. This can't be undone.`)) return
+  try { await api.post(`/scans/${id}/truncate?scope=findings`); fOffset.value = 0; await refresh() }
+  catch (e) { alert(e.message) }
+}
 async function exportFindings(fmt) {
   let u = `${apiBase()}/scans/${id}/findings/export?format=${fmt}&state=${fState.value}&sort=${fSort.value}&dir=${fDir.value}`
   if (fSev.value) u += `&severity=${fSev.value}`
@@ -145,6 +154,40 @@ async function loadShots() {
 }
 async function openShot(s) { try { shotFull.value = await api.get(`/scans/${id}/screenshots/${s.id}`) } catch (e) { /* transient */ } }
 function closeShot() { shotFull.value = null }
+async function loadTargets() {
+  let u = `/scans/${id}/targets?limit=${TLIMIT}&offset=${tOffset.value}`
+  if (tq.value) u += `&q=${encodeURIComponent(tq.value)}`
+  const r = await api.get(u); targets.value = r.items; tTotal.value = r.total
+}
+function tPage(d) { tOffset.value = Math.max(0, tOffset.value + d * TLIMIT); loadTargets() }
+function applyTargetSearch() { tOffset.value = 0; loadTargets() }
+async function afterTargetChange() { tOffset.value = 0; await Promise.all([loadTargets(), loadScan(), loadJobs()]) }
+async function addTargets() {
+  const lines = addText.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
+  if (!lines.length) return
+  adding.value = true
+  try {
+    let added = 0
+    for (let i = 0; i < lines.length; i += CHUNK) {   // batch so a 200k paste isn't one giant request
+      const r = await api.post(`/scans/${id}/targets`, { targets: lines.slice(i, i + CHUNK) })
+      added += r.added
+    }
+    addText.value = ''; alert(`Added ${added} new target(s).`); await afterTargetChange()
+  } catch (e) { alert(e.message) } finally { adding.value = false }
+}
+async function uploadTargets(ev) {
+  const f = ev.target.files && ev.target.files[0]; if (!f) return
+  adding.value = true
+  try {
+    const fd = new FormData(); fd.append('file', f)
+    const r = await api.postForm(`/scans/${id}/targets/upload`, fd)
+    alert(`Added ${r.added} new target(s).`); await afterTargetChange()
+  } catch (e) { alert(e.message) } finally { adding.value = false; ev.target.value = '' }
+}
+async function removeTarget(t) {
+  if (!confirm(`Remove target ${t.value}?`)) return
+  try { await api.del(`/scans/${id}/targets/${t.id}`); await afterTargetChange() } catch (e) { alert(e.message) }
+}
 const isLive = () => scan.value && !['done', 'stopped'].includes(scan.value.status)
 function stopLive() { if (timer) { clearInterval(timer); timer = null } if (es) { es.close(); es = null } }
 function ensureLive() { if (!timer) timer = setInterval(refresh, 2500); if (!es) startStream() }
@@ -201,6 +244,7 @@ onMounted(async () => {
   await Promise.all([loadScan(), loadJobs(), loadFindings()]).catch(() => {})
   if (hasItems()) await loadItems().catch(() => {})
   if (hasShots()) await loadShots().catch(() => {})
+  loadTargets().catch(() => {})
   // seed only the MOST RECENT events (not the whole history) so opening a big scan doesn't replay thousands
   const seed = await api.get('/scans/' + id + '/events?tail=200').catch(() => [])
   if (seed.length) pushEvents(seed)
@@ -276,6 +320,40 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
       <button class="ghost" :disabled="jobOffset + JLIMIT >= jobsTotal" @click="jobPage(1)">Next →</button>
     </div>
 
+    <!-- targets: search / add (batched) / remove -->
+    <div class="row" style="justify-content:space-between;align-items:flex-end;margin-top:20px;gap:8px">
+      <h2 style="margin:0">Targets <span class="muted" style="font-weight:400">({{ scan.assets }})</span></h2>
+      <input v-model="tq" placeholder="search targets…" style="width:auto;max-width:180px"
+             @keyup.enter="applyTargetSearch" @input="applyTargetSearch" />
+    </div>
+    <div class="muted" style="font-size:12px;margin:4px 0">Add one host/URL per line. Large lists upload in 20k batches; use ⬆ File for very large lists.</div>
+    <div class="row" style="gap:8px;align-items:flex-start;margin-bottom:6px">
+      <textarea v-model="addText" rows="3" placeholder="host or URL per line…" style="flex:1;min-width:220px"></textarea>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="ghost" :disabled="adding || !addText.trim()" @click="addTargets">➕ Add</button>
+        <label class="ghost" style="cursor:pointer;text-align:center;padding:6px 10px">⬆ File
+          <input type="file" accept=".txt,text/plain" style="display:none" @change="uploadTargets" />
+        </label>
+      </div>
+    </div>
+    <div class="card tablecard">
+      <table class="reflow rows">
+        <thead><tr><th>Target</th><th style="width:1%"></th></tr></thead>
+        <tbody>
+          <tr v-for="t in targets" :key="t.id">
+            <td data-label="Target" style="word-break:break-all">{{ t.value }}</td>
+            <td><button class="ghost danger" title="Remove target" @click="removeTarget(t)">✕</button></td>
+          </tr>
+          <tr v-if="!targets.length"><td colspan="2" class="muted">No targets match.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div v-if="tTotal > TLIMIT" class="row pager">
+      <button class="ghost" :disabled="tOffset === 0" @click="tPage(-1)">← Prev</button>
+      <span class="muted">{{ tOffset + 1 }}–{{ Math.min(tOffset + TLIMIT, tTotal) }} of {{ tTotal }}</span>
+      <button class="ghost" :disabled="tOffset + TLIMIT >= tTotal" @click="tPage(1)">Next →</button>
+    </div>
+
     <!-- findings -->
     <div class="row" style="justify-content:space-between;align-items:flex-end;margin-top:20px;gap:8px">
       <h2 style="margin:0">Findings <span class="muted" style="font-weight:400">({{ fTotal }})</span>
@@ -286,6 +364,8 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
         <input v-model="fq" placeholder="search…" style="width:auto;max-width:150px" @keyup.enter="applyFindingFilters" @input="applyFindingFilters" />
         <button class="ghost" title="Export filtered findings as CSV" @click="exportFindings('csv')">⬇ CSV</button>
         <button class="ghost" title="Export filtered findings as JSON" @click="exportFindings('json')">JSON</button>
+        <button class="ghost danger" title="Delete ALL findings for this scan (keeps the scan)"
+                :disabled="!fTotal" @click="truncateFindings">🗑 Clear</button>
       </div>
     </div>
     <div class="muted" style="font-size:12px;margin-bottom:4px">Click a column to sort · click a finding for full detail.</div>
