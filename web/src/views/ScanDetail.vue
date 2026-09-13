@@ -42,6 +42,10 @@ const items = ref([]); const iTotal = ref(0); const iOffset = ref(0)
 const iq = ref(''); const iSort = ref('value'); const iDir = ref('asc')
 const hasItems = () => !!(scan.value && scan.value.items_total > 0)
 
+// screenshots — captured pages (url + full PNG + thumbnail); panel only for scans that made some
+const shots = ref([]); const shTotal = ref(0); const shotFull = ref(null)
+const hasShots = () => !!(scan.value && scan.value.screenshots_total > 0)
+
 let timer = null, es = null
 
 const progress = computed(() => {
@@ -134,6 +138,13 @@ async function loadScan() { scan.value = await api.get('/scans/' + id) }
 async function loadJobs() { const r = await api.get(jobsUrl()); jobs.value = r.items; jobsTotal.value = r.total; jobCounts.value = r.counts }
 async function loadFindings() { const r = await api.get(findingsUrl()); findings.value = r.items; fTotal.value = r.total }
 async function loadItems() { const r = await api.get(itemsUrl()); items.value = r.items; iTotal.value = r.total }
+async function loadShots() {
+  let u = `/scans/${id}/screenshots?limit=60`
+  if (selJob.value) u += `&target=${encodeURIComponent(selJob.value.target)}`
+  const r = await api.get(u); shots.value = r.items; shTotal.value = r.total
+}
+async function openShot(s) { try { shotFull.value = await api.get(`/scans/${id}/screenshots/${s.id}`) } catch (e) { /* transient */ } }
+function closeShot() { shotFull.value = null }
 const isLive = () => scan.value && !['done', 'stopped'].includes(scan.value.status)
 function stopLive() { if (timer) { clearInterval(timer); timer = null } if (es) { es.close(); es = null } }
 function ensureLive() { if (!timer) timer = setInterval(refresh, 2500); if (!es) startStream() }
@@ -141,6 +152,7 @@ async function refresh() {
   try {
     await Promise.all([loadScan(), loadJobs(), loadFindings()])
     if (hasItems()) await loadItems()          // only once the scan has actually produced some
+    if (hasShots()) await loadShots()
     if (!es) { const ev = await api.get('/scans/' + id + '/events?since=' + cursor.value); if (ev.length) pushEvents(ev) }
     if (!isLive()) stopLive()      // a finished scan is static — stop polling + close the stream
   } catch (e) { /* transient */ }
@@ -178,6 +190,7 @@ function selectAsset(j) {
   selJob.value = (selJob.value && selJob.value.id === j.id) ? null : j
   fOffset.value = 0; loadFindings()
   iOffset.value = 0; if (hasItems()) loadItems()
+  if (hasShots()) loadShots()
 }
 function jobPage(d) { jobOffset.value = Math.max(0, jobOffset.value + d * JLIMIT); loadJobs() }
 function fPage(d) { fOffset.value = Math.max(0, fOffset.value + d * FLIMIT); loadFindings() }
@@ -187,6 +200,7 @@ onMounted(async () => {
   // load the tables WITHOUT events (refresh() would also poll events and race the seed below → duplicates)
   await Promise.all([loadScan(), loadJobs(), loadFindings()]).catch(() => {})
   if (hasItems()) await loadItems().catch(() => {})
+  if (hasShots()) await loadShots().catch(() => {})
   // seed only the MOST RECENT events (not the whole history) so opening a big scan doesn't replay thousands
   const seed = await api.get('/scans/' + id + '/events?tail=200').catch(() => [])
   if (seed.length) pushEvents(seed)
@@ -370,7 +384,45 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
       </div>
     </template>
 
+    <!-- screenshots: captured pages (url + full PNG + thumbnail) — only for scans that made some -->
+    <template v-if="hasShots()">
+      <div class="row" style="justify-content:space-between;align-items:flex-end;margin-top:20px;gap:8px">
+        <h2 style="margin:0">Screenshots <span class="muted" style="font-weight:400">({{ shTotal }})</span>
+          <span v-if="selJob" class="chip">{{ selJob.target }} <a @click.prevent="selectAsset(selJob)" href="#">✕</a></span>
+        </h2>
+      </div>
+      <div class="muted" style="font-size:12px;margin-bottom:6px">Click a thumbnail for the full-size capture.</div>
+      <div class="shots">
+        <figure v-for="s in shots" :key="s.id" class="shot" @click="openShot(s)">
+          <img :src="'data:image/png;base64,' + s.thumbnail" :alt="s.url" loading="lazy" />
+          <figcaption :title="s.url">{{ s.title || s.url }}</figcaption>
+        </figure>
+        <div v-if="!shots.length" class="muted">No screenshots yet.</div>
+      </div>
+    </template>
+
+    <!-- full-size screenshot lightbox -->
+    <div v-if="shotFull" class="lightbox" @click.self="closeShot">
+      <div class="lightbox-inner">
+        <div class="row" style="justify-content:space-between;align-items:center;gap:8px">
+          <a :href="shotFull.url" target="_blank" rel="noopener" style="word-break:break-all">{{ shotFull.url }}</a>
+          <button class="ghost" @click="closeShot">✕ Close</button>
+        </div>
+        <img :src="'data:image/png;base64,' + (shotFull.full || shotFull.thumbnail)" :alt="shotFull.url" />
+      </div>
+    </div>
+
     <h2 style="margin-top:20px">Live log</h2>
     <div class="log">{{ logText || 'waiting for output…' }}</div>
   </div>
 </template>
+
+<style scoped>
+.shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.shot { margin: 0; cursor: pointer; border: 1px solid var(--border, #ddd); border-radius: 6px; overflow: hidden; background: var(--card, #fff); }
+.shot img { display: block; width: 100%; height: 140px; object-fit: cover; object-position: top; }
+.shot figcaption { padding: 6px 8px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
+.lightbox-inner { background: var(--card, #fff); border-radius: 8px; padding: 12px; max-width: 95vw; max-height: 92vh; overflow: auto; }
+.lightbox-inner img { display: block; max-width: 100%; height: auto; margin-top: 8px; }
+</style>

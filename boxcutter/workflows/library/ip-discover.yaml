@@ -1,0 +1,10 @@
+name: ip-discover
+help: host discovery over an IP / CIDR / range - nmap ping sweep (-sn), emit the live hosts
+input: target
+output: hosts
+
+steps:
+  # nmap -sn host discovery: keep only the hosts that answered
+  - tool: ping-scan
+    target: ${target}
+    save: hosts

@@ -17,7 +17,7 @@ from sqlmodel import Session, select
 from ..activity import log_activity
 from ..config import settings
 from ..db import get_session
-from ..diff import is_issue, item_value, reconcile_run, upsert_finding, upsert_item
+from ..diff import is_issue, item_value, reconcile_run, upsert_finding, upsert_item, upsert_screenshot
 from ..notify import notify, notify_findings
 from ..models import (Activity, EnrollToken, Finding, Job, JobEvent, LLMProfile, NotifySettings, Runner, Scan,
                       Target, Template, User)
@@ -243,7 +243,13 @@ def job_result(job_id: int, body: ResultIn, runner: Runner = Depends(current_run
     kind = tmpl.kind if tmpl else ""
     new_crits: list[str] = []
     new_findings: list[dict] = []
+    env_kind = str((body.envelope or {}).get("kind") or "")
     for f in (body.envelope or {}).get("data") or []:
+        # Screenshots carry big base64 PNGs; store them in their own table BEFORE the finding/item split
+        # (an empty class would otherwise read as a finding).
+        if isinstance(f, dict) and (env_kind == "screenshots" or "full" in f or "thumbnail" in f):
+            upsert_screenshot(session, job.scan_id, target.value, f, run_no=job.run_no)
+            continue
         if isinstance(f, dict) and is_issue(f):
             _, created = upsert_finding(session, job.scan_id, kind, target.value, f, run_no=job.run_no)
             if created:

@@ -12,7 +12,7 @@ RUN npm run build
 
 FROM alpine:3.20 AS base
 RUN apk add --no-cache \
-        bash ca-certificates bind-tools wget curl unzip git \
+        bash ca-certificates bind-tools nmap wget curl unzip git \
         python3 py3-pip py3-requests py3-yaml \
         libpcap libstdc++ libgcc \
     && update-ca-certificates

@@ -10,7 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from sqlalchemy import func, update
 from sqlmodel import Session, select
 
-from .models import Finding, ScanItem
+from .models import Finding, ScanItem, Screenshot
 
 # Informational reconnaissance / reachability items (e.g. "host reachable") are not issues and must not render
 # as findings.
@@ -70,6 +70,33 @@ def upsert_item(session: Session, scan_id: int, kind: str, target: str, value: s
     row = ScanItem(scan_id=scan_id, target=target, template_kind=kind, fingerprint=fp,
                    value=value[:2048], label=(label or "")[:400], run_no=run_no, first_seen=at, last_seen=at)
     row.cls = (cls or "")[:120]      # 'cls' can't be a constructor kwarg (shadows __new__), same as Finding
+    session.add(row)
+    return True
+
+
+def upsert_screenshot(session: Session, scan_id: int, target: str, f: dict, run_no: int = 0) -> bool:
+    """Insert a screenshot record (url + full PNG + thumbnail, base64), or refresh it on a rerun. Deduped per
+    (scan, url). Returns True when the row is new. `image` is accepted as an alias for `full`."""
+    url = str(f.get("url", "")).strip()
+    fp = item_fingerprint(target, url or str(f.get("title", "")))
+    full = str(f.get("full") or f.get("image") or "")
+    thumb = str(f.get("thumbnail") or "")
+    at = datetime.now(timezone.utc)
+    row = session.exec(select(Screenshot).where(Screenshot.scan_id == scan_id,
+                                                Screenshot.fingerprint == fp)).first()
+    if row is not None:
+        if full:
+            row.full = full
+        if thumb:
+            row.thumbnail = thumb
+        row.title = str(f.get("title", ""))[:400]
+        row.status = int(f.get("status") or 0)
+        row.last_seen, row.run_no = at, run_no
+        session.add(row)
+        return False
+    row = Screenshot(scan_id=scan_id, target=target, url=url[:2048], title=str(f.get("title", ""))[:400],
+                     status=int(f.get("status") or 0), fingerprint=fp, full=full, thumbnail=thumb,
+                     run_no=run_no, first_seen=at, last_seen=at)
     session.add(row)
     return True
 

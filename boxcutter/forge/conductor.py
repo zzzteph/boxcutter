@@ -62,8 +62,8 @@ HELP = "Web-only bug-bounty conductor: map assets, drive boxcutter's raw tools, 
 # The raw boxcutter tools the orca may plan (web-focused, read-only-ish). Deliberately
 # excludes the agent tools (bob/caleb/travis/irvin/vera) and the ZAP active scanners.
 _DISCOVERY_TOOLS = [
-    "httpx", "katana-crawl", "harvest", "js-endpoints", "wayback", "smart-enum",
-    "swagger-specs", "swagger-endpoints", "graphql-detect", "http-request",
+    "ping-scan", "nmap", "httpx", "katana-crawl", "harvest", "js-endpoints", "wayback",
+    "smart-enum", "swagger-specs", "swagger-endpoints", "graphql-detect", "http-request",
 ]
 _TEST_TOOLS = [
     "fuzz", "sqlmap", "nuclei", "path-fuzz", "path-bust", "dirsearch", "api-map",
@@ -176,11 +176,34 @@ def _alive(hosts: list[str], args) -> list[str]:
     return keep
 
 
-def _map_assets(args, log) -> list[str]:
-    _phase("MAP - discover web assets (raw tools)")
+_IP_RANGE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2}|-\d{1,3}(?:\.\d{1,3}){0,3})?$")
+
+
+def _looks_like_range(target: str) -> bool:
+    """A bare IP, CIDR (10.0.0.0/24), or nmap range (10.0.0.1-50) - an nmap target."""
+    return bool(_IP_RANGE.match(target.strip()))
+
+
+def _map_assets(args, log) -> tuple:
+    """Return (web_asset_urls, endpoints). A domain is enumerated to hosts; a URL is
+    scanned as-is; an IP/CIDR/range is nmap-scanned, its web ports become assets and
+    every open port is recorded as an endpoint (IP/PORT/VERSION)."""
+    _phase("MAP - discover web assets")
     target = args.target.strip()
+    endpoints: list[dict] = []
     if urlparse(target).scheme:                       # a URL/host: scan as-is
         assets = [target]
+    elif _looks_like_range(target):                   # an IP / CIDR / range: nmap it
+        nmap = BY_NAME.get("nmap")
+        endpoints = [e for e in (call(nmap, [target], args) or []) if isinstance(e, dict)] if nmap else []
+        _line(f"nmap: {len(endpoints)} open port(s)")
+        web = [e["url"] for e in endpoints if e.get("url")]
+        if web:
+            assets = web
+        elif "/" not in target and "-" not in target:  # a single IP -> try it as a web asset
+            assets = [_with_scheme(target)]
+        else:
+            assets = []                               # a range with no web port -> report endpoints only
     elif args.no_recon:
         assets = [_with_scheme(target)]
     else:                                             # a bare domain: subfinder -> alive
@@ -191,9 +214,9 @@ def _map_assets(args, log) -> list[str]:
         alive = _alive(hosts, args)
         assets = [_with_scheme(h) for h in alive] or [_with_scheme(target)]
     assets = list(dict.fromkeys(a for a in assets if a))[:500]   # bound; top-N picked after prioritize
-    log.append({"t": time.time(), "kind": "map", "assets": assets})
+    log.append({"t": time.time(), "kind": "map", "assets": assets, "endpoints": len(endpoints)})
     _line(f"{len(assets)} asset(s): " + ", ".join(assets[:6]) + (" ..." if len(assets) > 6 else ""))
-    return assets
+    return assets, endpoints
 
 
 # hostname keyword -> interest weight. A deterministic first estimate of how much a
@@ -232,31 +255,110 @@ def _prioritize(args, orca, log, assets: list[str]) -> tuple[list[str], dict]:
     return order, scores
 
 
+def _probe(url: str, id_headers: list[str], args) -> tuple | None:
+    """GET `url` (optionally as an identity, via -H) and return (status, body_len).
+    None if the http-request tool is missing or the probe failed."""
+    hr = BY_NAME.get("http-request")
+    if hr is None:
+        return None
+    argv = [url]
+    for h in id_headers:
+        argv += ["-H", h]
+    data = call(hr, argv, args) or []
+    it = data[0] if data and isinstance(data[0], dict) else None
+    if not it or it.get("status") is None:
+        return None
+    return int(it["status"]), len(str(it.get("content") or ""))
+
+
+def _differs(anon: tuple | None, authed: tuple | None) -> bool:
+    """True when the authed response materially differs from anon - the proof that a
+    session actually changed access (Vera's differential gate)."""
+    if not anon or not authed:
+        return False
+    a_status, a_len = anon
+    b_status, b_len = authed
+    if a_status != b_status:                          # e.g. anon 401/302 -> authed 200
+        return True
+    return abs(b_len - a_len) > max(256, int(0.05 * max(a_len, 1)))
+
+
+def _prove(ident, args, log) -> bool:
+    """Prove the identity is live by a differential probe: request a page as the
+    identity and as anon and compare. Sets `alive`. If the probe cannot run (no
+    http-request tool / network), fall back to trusting the captured session."""
+    probe_url = getattr(args, "login_url", None) or _with_scheme(args.target)
+    anon = _probe(probe_url, [], args)
+    authed = _probe(probe_url, ident.headers(), args)
+    if anon is None and authed is None:
+        verified = False
+        ident.alive = bool(ident.cookie or ident.token)   # unverifiable -> trust capture
+    else:
+        verified = True
+        ident.alive = _differs(anon, authed)
+    log.append({"t": time.time(), "kind": "auth_proof", "identity": ident.label,
+                "verified": verified, "alive": ident.alive, "anon": anon, "authed": authed})
+    _line(f"  {ident.label} proof: {'verified alive' if (verified and ident.alive) else ('refuted' if verified else 'unverified, trusting capture')}")
+    return ident.alive
+
+
+def _login_identity(login, login_url: str, creds: str, label: str, args, log):
+    if not creds:
+        return None
+    data = call(login, [login_url, "--creds", creds], args) or []
+    item = data[0] if data and isinstance(data[0], dict) else {}
+    ident = _idn.from_login_item(label, item)
+    log.append({"t": time.time(), "kind": "auth", "identity": label,
+                "cookie": bool(ident.cookie), "token": bool(ident.token)})
+    _line(ident.masked())
+    if not (ident.cookie or ident.token):
+        return None
+    return ident if _prove(ident, args, log) else None
+
+
 def _authenticate(args, log) -> tuple:
-    """Acquire session identities via a real browser login (browser-login). Returns
-    (identity_A, identity_B); either may be None. Identity A's headers are threaded
-    into every subsequent tool call so the whole hunt runs authenticated."""
+    """Log in via a real browser (browser-login) and PROVE each session by a
+    differential probe. Returns (identity_A, identity_B); a refuted login is
+    dropped, never assumed. Identity A's headers are threaded into every tool call."""
     if not getattr(args, "creds", None):
         return None, None
     login = BY_NAME.get("browser-login")
     if login is None:
         _line("browser-login unavailable; continuing anonymous")
         return None, None
-    _phase("AUTH - browser login")
+    _phase("AUTH - browser login + differential proof")
     login_url = getattr(args, "login_url", None) or _with_scheme(args.target)
+    return (_login_identity(login, login_url, args.creds, "A", args, log),
+            _login_identity(login, login_url, getattr(args, "creds_b", None), "B", args, log))
 
-    def _one(creds: str, label: str):
-        if not creds:
-            return None
-        data = call(login, [login_url, "--creds", creds], args) or []
-        item = data[0] if data and isinstance(data[0], dict) else {}
-        ident = _idn.from_login_item(label, item)
-        log.append({"t": time.time(), "kind": "auth", "identity": label,
-                    "alive": ident.alive, "cookie": bool(ident.cookie), "token": bool(ident.token)})
-        _line(ident.masked())
-        return ident if ident.alive else None
 
-    return _one(args.creds, "A"), _one(getattr(args, "creds_b", None), "B")
+def _thread_identity(args) -> None:
+    """Set args.header = the user's headers + identity A's session headers, so every
+    header-capable tool call runs authenticated. Idempotent (rebuilt from the stored
+    user headers), so it is safe to call again after a re-auth."""
+    base = list(getattr(args, "_user_headers", None) or [])
+    ida = getattr(args, "_id_a", None)
+    args.header = base + (ida.headers() if ida else [])
+
+
+def _ensure_alive(args, log) -> None:
+    """Re-auth on expiry: if identity A no longer proves alive and a re-auth budget
+    remains, log in once more and re-thread. Bounded by args._reauth_left."""
+    ida = getattr(args, "_id_a", None)
+    if not ida or getattr(args, "_reauth_left", 0) <= 0:
+        return
+    if _prove(ida, args, log):                        # still good
+        return
+    login = BY_NAME.get("browser-login")
+    if login is None or not getattr(args, "creds", None):
+        return
+    args._reauth_left -= 1
+    _line("  identity A went stale - re-authenticating")
+    fresh = _login_identity(login, getattr(args, "login_url", None) or _with_scheme(args.target),
+                            args.creds, "A", args, log)
+    if fresh:
+        args._id_a = fresh
+        _thread_identity(args)
 
 
 # --- the per-asset tool loop --------------------------------------------------
@@ -332,6 +434,15 @@ def _signals(obs: dict) -> list[str]:
     if obs["specs"]:
         want.add("swagger")
     return sorted(s for s in want if any(t in _TOOLS for t in _SKILL_TOOLS.get(s, ())))
+
+
+# a path segment that looks like an object id (numeric or uuid) - a BOLA candidate
+# even without a query param, e.g. /api/orders/1042 or /users/<uuid>.
+_ID_SEG = re.compile(r"/(?:\d{1,12}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:/|$)", re.I)
+
+
+def _id_urls(urls: list[str]) -> list[str]:
+    return [u for u in urls if _ID_SEG.search(urlparse(u).path or "")]
 
 
 def _core_actions(obs: dict) -> list[dict]:
@@ -417,8 +528,9 @@ def _run_asset(args, orca, log, asset: str, bases: list) -> tuple:
         if round_i > 0:                               # CORE floor: always test params + JS secrets
             actions = _merge_actions(actions, _core_actions(obs))
             if getattr(args, "_id_b", None):          # two identities -> differential BOLA/BFLA
+                targets = list(dict.fromkeys(FILTERS["params"](obs["urls"]) + _id_urls(obs["urls"])))
                 actions = _merge_actions(actions, [{"tool": "bola-walk", "target": u}
-                                                    for u in FILTERS["params"](obs["urls"])[:_MAX_TARGETS]])
+                                                    for u in targets[:_MAX_TARGETS]])
         if not actions:
             break
         before_urls = len(obs["urls"])
@@ -535,18 +647,22 @@ def run(args) -> int:
 
     # identity/session layer: log in via a real browser, then thread identity A into
     # every header-capable tool call so the whole hunt runs authenticated.
+    args._user_headers = list(getattr(args, "header", []) or [])
+    args._reauth_left = 1
     id_a, id_b = _authenticate(args, log)
     args._id_a, args._id_b = id_a, id_b
-    if id_a:
-        args.header = list(getattr(args, "header", []) or []) + id_a.headers()
+    _thread_identity(args)                              # hunt authenticated as identity A
 
-    ordered, scores = _prioritize(args, orca, log, _map_assets(args, log))
+    mapped, endpoints = _map_assets(args, log)
+    ordered, scores = _prioritize(args, orca, log, mapped)
     assets = ordered[: max(1, args.max_assets)]         # hunt the top-N most promising
 
     _phase("RUN - drive raw tools per asset")
     findings: list[dict] = []
-    model: dict = {"identities": [i.label for i in (id_a, id_b) if i], "assets": []}
+    model: dict = {"identities": [i.label for i in (id_a, id_b) if i],
+                   "endpoints": endpoints[:200], "assets": []}
     for asset in assets:
+        _ensure_alive(args, log)                        # re-auth if the session expired
         fs, entry = _run_asset(args, orca, log, asset, bases)
         entry["score"] = scores.get(asset)
         findings.extend(fs)

@@ -43,7 +43,7 @@ _JSON_FILE: str | None = None
 # "items". Set by the CLI/runner from the tool's KIND before it runs, so every
 # envelope is self-describing and consumers know the data shape up front.
 _OUTPUT_KIND = "items"
-KINDS = ("findings", "urls", "items")
+KINDS = ("findings", "urls", "items", "endpoints", "screenshots")
 
 
 def set_table_mode(enabled: bool) -> None:

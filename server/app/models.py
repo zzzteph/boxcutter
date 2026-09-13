@@ -165,6 +165,24 @@ class ScanItem(SQLModel, table=True):
     last_seen: datetime = Field(default_factory=now)
 
 
+class Screenshot(SQLModel, table=True):
+    """A captured page: url + full PNG + thumbnail (both base64). Stored apart from ScanItem because a PNG far
+    exceeds a listable value. Deduped per (scan, url) so a rerun refreshes rather than duplicates."""
+    __table_args__ = (Index("ix_screenshot_scan_fp", "scan_id", "fingerprint"),)
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scan_id: int = Field(foreign_key="scan.id", index=True)
+    target: str = Field(default="", max_length=1024)
+    url: str = Field(default="", max_length=2048)
+    title: str = Field(default="", max_length=400)
+    status: int = 0                                           # HTTP status at capture
+    fingerprint: str = Field(default="", max_length=128)      # of (target, url); dedupes across reruns
+    full: str = _text("")                                    # full-page PNG, base64
+    thumbnail: str = _text("")                               # thumbnail PNG, base64
+    run_no: int = 0
+    first_seen: datetime = Field(default_factory=now)
+    last_seen: datetime = Field(default_factory=now)
+
+
 class JobEvent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     job_id: int = Field(foreign_key="job.id", index=True)

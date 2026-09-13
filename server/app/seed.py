@@ -25,7 +25,7 @@ TOOLS = {
     "httpx": "Probe a target with httpx to detect live HTTP services.",
     "api-map": "Method-aware API discovery: enumerate paths x {GET,POST,PUT,PATCH,DELETE,OPTIONS}, diff each vs a per-method catch-all, and report which paths exist for which verbs (write verbs first). Non-destructive.",
     "smart-enum": "Generate a context-aware candidate path list from observed URLs (version pivots, numeric id-walks, singular/plural, high-value siblings under observed prefixes). Non-touching; pipe into path-bust/api-map/ffuf.",
-    "screenshot": "Take a screenshot of a target URL using httpx (headless chromium).",
+    "screenshot": "Capture a URL in a real browser (CDP) - stores {url, full, thumbnail} as screenshots.",
     "wayback": "Pull historical URLs for a domain from 4 public archives (deduped).",
     "wayback-domains": "Run wayback (subdomains on) and extract the unique host list.",
     "katana-crawl": "Crawl a target URL with Katana (supports --js / --params filters).",

@@ -158,6 +158,14 @@ def render(target: str, model: dict, findings: list, chains: list, loaded: list,
         lines.append(f"- playbooks loaded: {', '.join(loaded)}")
     lines.append("")
 
+    eps = model.get("endpoints") or []
+    if eps:
+        lines += ["### Endpoints (nmap)", ""]
+        for e in eps[:100]:
+            svc = " ".join(x for x in (e.get("service", ""), e.get("version", "")) if x)
+            lines.append(f"- {e.get('ip','')}:{e.get('port','')} {svc}".rstrip())
+        lines.append("")
+
     lines += ["## Findings", ""]
     for f in findings:
         lines += _finding_block(f, fmt)

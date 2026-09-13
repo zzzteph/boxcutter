@@ -154,6 +154,7 @@ class Chrome:
         self._profile = fsutil.temp_dir("cdp_")
         cmd = [exe, "--headless", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage",
                "--no-first-run", "--no-default-browser-check", "--disable-extensions",
+               "--ignore-certificate-errors", "--disable-popup-blocking",
                "--remote-allow-origins=*", f"--remote-debugging-port={port}",
                f"--user-data-dir={self._profile}", "about:blank"]
         if self.viewport:
@@ -353,6 +354,30 @@ class Chrome:
     def eval_fn(self, fn_src: str):
         """Evaluate a `() => {...}` / `function(){...}` source by invoking it."""
         return self.eval(f"({fn_src})()")
+
+    def content(self) -> str:
+        """The current page's full HTML source (document.documentElement.outerHTML)."""
+        try:
+            return self.eval("document.documentElement.outerHTML") or ""
+        except CDPError:
+            return ""
+
+    def screenshot(self, full_page: bool = False, scale: float = 1.0) -> str:
+        """Capture the page as a PNG, returned base64-encoded. ``full_page`` grabs the
+        whole scrollable document; otherwise just the viewport. ``scale`` downsamples
+        the capture (e.g. 0.25 for a thumbnail) via the CDP clip - no image library."""
+        params: dict = {"format": "png"}
+        if full_page or scale != 1.0:
+            if full_page:
+                metrics = self._cmd("Page.getLayoutMetrics") or {}
+                size = metrics.get("cssContentSize") or metrics.get("contentSize") or {}
+                w, h = size.get("width"), size.get("height")
+                params["captureBeyondViewport"] = True
+            else:
+                w, h = self.viewport or (1920, 1080)
+            if w and h:
+                params["clip"] = {"x": 0, "y": 0, "width": w, "height": h, "scale": scale}
+        return (self._cmd("Page.captureScreenshot", params) or {}).get("data", "")
 
     def _act(self, find: str, body: str) -> None:
         self.eval(f"(()=>{{const e={find}; if(!e) throw new Error('element not found'); {body}}})()")

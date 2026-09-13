@@ -14,7 +14,7 @@ from sqlmodel import Session, select
 
 from ..activity import log_activity
 from ..db import engine, get_session
-from ..models import (Activity, Finding, Job, JobEvent, Scan, ScanItem, Target, Template, User)
+from ..models import (Activity, Finding, Job, JobEvent, Scan, ScanItem, Screenshot, Target, Template, User)
 from ..queue import enqueue_scan
 from ..security import current_user, decode_user
 
@@ -100,6 +100,7 @@ def _summary(session: Session, s: Scan) -> dict:
     assets = session.exec(select(func.count()).select_from(Target).where(Target.scan_id == s.id)).one()
     # non-finding results (a recon workflow's domain list, a crawl's URLs). 0 hides the Items panel entirely.
     items_total = session.exec(select(func.count()).select_from(ScanItem).where(ScanItem.scan_id == s.id)).one()
+    shots_total = session.exec(select(func.count()).select_from(Screenshot).where(Screenshot.scan_id == s.id)).one()
     return {"id": s.id, "name": s.name, "status": s.status, "run_no": s.run_no,
             "template_id": s.template_id, "owner_id": s.owner_id, "assets": assets,
             "findings_new": counts["new"], "findings_open_state": counts["open"],
@@ -107,6 +108,7 @@ def _summary(session: Session, s: Scan) -> dict:
             "findings_open": counts["new"] + counts["open"],   # "active" = new + open
             "findings_total": total_f,
             "items_total": items_total,
+            "screenshots_total": shots_total,
             "jobs_total": jobs_total, "jobs_done": jobs_done,
             "running": running, "running_targets": running_targets,
             "created_at": s.created_at, "last_run_at": s.last_run_at, "finished_at": s.finished_at}
@@ -236,7 +238,7 @@ def delete_scan(scan_id: int, user: User = Depends(current_user), session: Sessi
     scan.status = "stopped"                    # stop new claims + let agents drop in-flight jobs during delete
     session.add(scan)
     session.commit()
-    for model in (Finding, ScanItem, JobEvent, Job, Target, Activity):
+    for model in (Finding, ScanItem, Screenshot, JobEvent, Job, Target, Activity):
         _delete_scan_rows(session, model, scan_id)
     session.delete(scan)
     session.commit()
@@ -361,6 +363,46 @@ def items_export(scan_id: int, target: str | None = None, q: str | None = None, 
     body = "\n".join(v for v in rows if v)
     return Response(body + ("\n" if body else ""), media_type="text/plain; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="scan-{scan_id}-items.txt"'})
+
+
+# ---- screenshots: captured pages (url + full PNG + thumbnail) ---------------------------------------------
+@router.get("/{scan_id}/screenshots")
+def scan_screenshots(scan_id: int, target: str | None = None, q: str | None = None,
+                     limit: int = 60, offset: int = 0, user: User = Depends(current_user),
+                     session: Session = Depends(get_session)):
+    """The scan's screenshots, newest first. The LIST returns THUMBNAILS only (small); fetch the full PNG on
+    demand via GET .../screenshots/{id}. Shape: {items, total, limit, offset}."""
+    scan = session.get(Scan, scan_id)
+    if not scan or not _perm(session, scan, user):
+        raise HTTPException(404)
+    limit, offset = _clamp(limit, offset)
+    conds = [Screenshot.scan_id == scan_id]
+    if target:
+        conds.append(Screenshot.target == target)
+    if q:
+        like = f"%{q}%"
+        conds.append(or_(Screenshot.url.ilike(like), Screenshot.title.ilike(like), Screenshot.target.ilike(like)))
+    total = session.exec(select(func.count()).select_from(Screenshot).where(*conds)).one()
+    rows = session.exec(select(Screenshot).where(*conds)
+                        .order_by(Screenshot.last_seen.desc(), Screenshot.id.desc())
+                        .offset(offset).limit(limit)).all()
+    items = [{"id": s.id, "url": s.url, "title": s.title, "status": s.status, "target": s.target,
+              "thumbnail": s.thumbnail, "first_seen": s.first_seen, "last_seen": s.last_seen} for s in rows]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/{scan_id}/screenshots/{shot_id}")
+def screenshot_detail(scan_id: int, shot_id: int, user: User = Depends(current_user),
+                      session: Session = Depends(get_session)):
+    """One screenshot with its FULL PNG (base64), for the lightbox / detail view."""
+    scan = session.get(Scan, scan_id)
+    if not scan or not _perm(session, scan, user):
+        raise HTTPException(404)
+    s = session.get(Screenshot, shot_id)
+    if not s or s.scan_id != scan_id:
+        raise HTTPException(404)
+    return {"id": s.id, "url": s.url, "title": s.title, "status": s.status, "target": s.target,
+            "full": s.full, "thumbnail": s.thumbnail, "first_seen": s.first_seen, "last_seen": s.last_seen}
 
 
 _EXPORT_COLS = ["severity", "title", "target", "url", "cls", "state", "first_seen", "last_seen",
