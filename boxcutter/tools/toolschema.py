@@ -62,6 +62,109 @@ _NOTES = {
                      "so only chain actions that stay on the SAME screen - after a click that navigates or "
                      "reflows, stop and read the new screenshot before aiming again. Type __USER_x__/__PASS_x__ "
                      "tokens for credentials (substituted privately); never type a real password.",
+
+    # -- HOW-TO-INVOKE tradecraft for the rest of the registry. The single most common failure is passing the
+    # WRONG SHAPE in the positional (a bare host where a full param-bearing URL is needed, a URL where a bare
+    # domain is needed, or the thing-to-explore left OUT of the URL). Each note below states that shape.
+    "path-bust": "The directory to explore goes INSIDE the target URL - there is NO separate path flag. To bust "
+                 "under /admin pass target='https://host/admin', NOT 'https://host'. Add --depth N to recurse "
+                 "into found dirs, --extensions php,bak,old to append extensions, --codes 200,301,403 to widen "
+                 "what counts as found, --full for the big ~12k wordlist. Omit --wordlist for the curated list.",
+    "path-fuzz": "You place the marker yourself: the target must be a URL TEMPLATE containing FUZZ where each "
+                 "word is substituted, e.g. 'https://host/api/FUZZ' or 'https://host/FUZZ.php'. This is how you "
+                 "fuzz a mid-path or filename segment (path-bust only appends at the end). Omit --wordlist for "
+                 "the built-in list; --full for the big one.",
+    "smart-enum": "There is NO target URL - it DERIVES new candidate paths from ones you've already OBSERVED. "
+                  "Pass real observed URLs/paths via --urls (comma-list or a file). It pivots versions "
+                  "(/v1->/v2), walks numeric ids, flips singular/plural, and adds high-value siblings, then "
+                  "emits a list you feed to path-fuzz / http-request. Seed it with real hits, not guesses.",
+    "api-map": "Point the positional at the API base ('https://host' or 'https://host/api'); it probes a "
+               "built-in API-route wordlist there and reports live endpoints + methods. Seed it with routes you "
+               "already saw via --paths (comma-list or a file). Follow up on hits with http-request.",
+    "http-request": "Your scalpel for ONE exact request - use it to CONFIRM a hypothesis, replay an edited "
+                    "captured request, or fetch a JS bundle as source. Positional is the full URL; --data adds a "
+                    "body (implies POST unless --method set); --method for PUT/PATCH/DELETE/OPTIONS; --header is "
+                    "repeatable ('Name: value'). A body write mutates - only in authorised scope.",
+    "js-endpoints": "Extracts URLs/paths/endpoints from ONE JavaScript file - the positional is the FULL .js URL "
+                    "(not the page). Set --base-url to resolve relative paths; pass an auth --header for bundles "
+                    "behind a login. An SPA's hidden/undocumented API routes hide here - run it on every app-own "
+                    "bundle you find.",
+    "katana-crawl": "Fast link/endpoint crawler of the positional URL. --js for script URLs only, --params for "
+                    "param-bearing URLs only; pass an auth --header to crawl authenticated. Quick surface map; "
+                    "use harvest for a deeper JS-app crawl and zap-crawl when you need ZAP's AJAX spider.",
+    "harvest": "The deepest authenticated recon pass: positional is the start URL; it clicks/fills to reach app "
+               "states and captures every request. Reuse a logged-in browser --session to crawl BEHIND auth; "
+               "bound it with --max-pages / --max-time. Best single map of a JS app's real request surface.",
+    "dirsearch": "Directory/file brute-force against the positional URL - include the subpath you want "
+                 "enumerated (e.g. 'https://host/admin') to bust under it. Pass an auth --header to reach "
+                 "content behind a login.",
+    "screenshot": "Render the positional URL in headless chromium to a PNG (+ optional --source for the rendered "
+                  "HTML). --full-page for the whole scrollable page, --wait ms for JS-heavy apps. Recon/triage "
+                  "only - to PROVE an XSS actually fired use vision-verify, not this.",
+    "vision-verify": "The definitive XSS proof: the positional is a URL carrying your payload and --marker is "
+                     "the UNIQUE string your payload triggers (e.g. a window.__bcvvfire(1) canary). It loads the "
+                     "page in chromium and reports EXECUTED vs merely-reflected. Always confirm a reflected/DOM "
+                     "XSS candidate here before recording it as a finding - reflection alone is not execution.",
+    "blind-oracle": "For BLIND (no visible output) sqli/injection. The positional URL must ALREADY carry the "
+                    "params to test ('https://host/x?id=1&q=a'), or give a base URL + --data for a POST body. It "
+                    "confirms via boolean/time-based differentials, so it needs a real param that reaches a "
+                    "query; narrow with --param when you know the sink.",
+    "bola-walk": "Two-identity IDOR/BOLA walk: positional is a URL with a CONCRETE object id "
+                 "('https://host/api/orders/1042'). Put the owner's auth in --session-a and the attacker's in "
+                 "--session-b (repeatable 'Name: value'), and the id set to walk in --range ('1000-1050' or "
+                 "'1,2,3'). B getting A's object back is the finding.",
+    "mass-assign": "Mass-assignment / privileged-field test: positional is the WRITE endpoint "
+                   "('https://host/api/account'); -D is the baseline JSON body it expects; -X POST|PUT|PATCH. It "
+                   "injects privileged fields (role/is_admin/...) and, with --verify <read endpoint>, CONFIRMS "
+                   "the elevated state persisted. It MUTATES - authorised scope only.",
+    "graphql-detect": "Find the GraphQL endpoint first: positional is a host or URL; it probes the common paths "
+                      "(/graphql, /api/graphql, ...). Feed a confirmed endpoint into graphql-audit.",
+    "graphql-audit": "Audit a KNOWN GraphQL endpoint - the positional is the FULL /graphql URL (run "
+                     "graphql-detect first if you only have a host). Checks introspection, field suggestions, "
+                     "batching and excessive-data exposure; pass an auth --header to audit the authed schema.",
+    "swagger-specs": "Locate OpenAPI/Swagger spec URLs on a host (positional): probes the common spec paths "
+                     "(/openapi.json, /swagger.json, /v2/api-docs, ...). Feed a found spec URL into "
+                     "swagger-endpoints (for {FUZZ}-ready variants) or swagger-parser (for concrete URLs).",
+    "swagger-parser": "Parse a KNOWN spec into concrete request URLs - the positional is the FULL spec URL; "
+                      "--base-url resolves relative server paths. Use swagger-endpoints instead when you want "
+                      "{FUZZ}-marked variants ready to fuzz.",
+    "scan-secrets": "Scan the positional URL's response/asset for leaked keys/tokens/secrets. Pass an auth "
+                    "--header to scan behind a login. Point it at JS bundles and config responses - that is "
+                    "where secrets actually leak.",
+    "git-extract": "Dump an exposed .git repo: positional is the site BASE url ('https://host'). It probes "
+                   "/.git/ and reconstructs source when the repo is served. A hit is source/secret disclosure - "
+                   "grep the recovered tree for creds and hidden endpoints.",
+    "httpx": "Liveness/tech triage of the positional host or URL: status, title, server, tech fingerprint. A "
+             "cheap first look before deeper testing.",
+    "browser-actions": "Scripted headless browser: positional is the start URL; drive it with repeatable "
+                       "--action steps run in order ('fill:#user=admin', 'click:text=Log in'). Attach to a "
+                       "logged-in --session <id> to keep SPA state across calls.",
+    "browser-login": "Log in through a REAL browser (use when a JS form login is required, not a raw API POST): "
+                     "positional is the LOGIN PAGE url, --creds user:password. Returns the authenticated session "
+                     "for reuse by other tools via --session.",
+    "wayback": "Historical URLs for the positional BARE domain ('example.com', not a URL) from public archives. "
+               "--params keeps only param-bearing URLs (best for finding old injectable endpoints), --js only "
+               "scripts, --inc_subdomains widens. A cheap way to surface removed/forgotten endpoints to probe "
+               "live.",
+    "wayback-domains": "Like wayback but returns just the unique HOST list for the positional bare domain - "
+                       "archive-based subdomain discovery.",
+    "subfinder": "Passive subdomain discovery for the positional BARE domain (no scheme). Recon only; stay "
+                 "within authorised scope.",
+    "dns-brute": "Subdomain brute-force: positional is the BARE domain ('example.com', not a URL); uses the "
+                 "bundled subdomains wordlist by default. Off-host recon - use only within authorised scope.",
+    "dnsx": "Resolve or brute-force DNS: give a single name as the positional, OR --list a file of names, OR "
+            "--domain + --wordlist to brute. Bare names, no scheme.",
+    "zap-crawl": "Crawl the positional URL with ZAP's AJAX + traditional spider (needs the ZAP proxy up). "
+                 "--js/--params filter the output. Heavier than katana - reach for it when a JS app needs the "
+                 "AJAX spider to reveal its requests.",
+    "zap-scan-url": "ZAP ACTIVE scan of ONE exact URL (no crawling; needs ZAP up). It sends real attack traffic, "
+                    "so authorised in-scope targets only. Use on a single suspicious endpoint.",
+    "zap-scan-full": "ZAP ACTIVE scan of the whole target - spider + AJAX spider + active attacks (needs ZAP "
+                     "up). Heavy, slow and mutating: authorised in-scope only, and prefer targeted tools first; "
+                     "reserve this for a broad sweep.",
+    "zap-scan-openapi": "ZAP ACTIVE scan driven by an OpenAPI/Swagger spec - positional is the SPEC URL (needs "
+                        "ZAP up). Strong coverage of a documented API's operations; sends attack traffic, so "
+                        "authorised in-scope only.",
 }
 
 _TYPE = {int: "integer", float: "number"}

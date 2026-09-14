@@ -16,11 +16,93 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 
 import requests
 
 _RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+# -- token-usage ledger + cost estimate (process-global, thread-safe) -----------------------------------------
+# Every provider instance records each response's token usage HERE, so an agent that spins up many providers
+# (e.g. joseph's driver + auth + N analyst threads) gets ONE run-wide total for free - no per-provider wiring.
+# Token counts are EXACT (read from the API's own usage block); the dollar figure is an ESTIMATE from a
+# per-model price table (list prices), overridable per run with BOXCUTTER_PRICE_IN / BOXCUTTER_PRICE_OUT
+# (USD per 1M tokens) - a gateway/Bedrock contract rate differs from list, but the tokens don't.
+_USAGE_LOCK = threading.Lock()
+_USAGE: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0, "by_model": {}}
+
+# USD per 1,000,000 tokens, (input, output). Matched by substring against the model id (so
+# 'bedrock/eu.anthropic.claude-opus-4-8' matches 'opus'). Best-effort list prices; override via env.
+_PRICES = {
+    "opus": (15.0, 75.0), "sonnet": (3.0, 15.0), "haiku": (0.80, 4.0),
+    "gpt-5": (1.25, 10.0), "gpt-4o": (2.50, 10.0), "gpt-4": (10.0, 30.0),
+    "o1": (15.0, 60.0), "o3": (2.0, 8.0), "o4": (2.0, 8.0),
+}
+_DEFAULT_PRICE = (3.0, 15.0)
+
+
+def reset_usage() -> None:
+    """Zero the ledger - call once at the start of a run so counts reflect only that run."""
+    with _USAGE_LOCK:
+        _USAGE.update(prompt_tokens=0, completion_tokens=0, total_tokens=0, calls=0)
+        _USAGE["by_model"] = {}
+
+
+def _record_usage(model: str, usage) -> None:
+    """Accumulate one response's token usage (OpenAI shape: prompt/completion_tokens; Anthropic shape:
+    input/output_tokens). Best-effort and never raises - accounting must not break a scan."""
+    if not isinstance(usage, dict):
+        return
+    try:
+        pt = int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0)
+        ct = int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0)
+    except (TypeError, ValueError):
+        return
+    tt = pt + ct
+    with _USAGE_LOCK:
+        _USAGE["prompt_tokens"] += pt
+        _USAGE["completion_tokens"] += ct
+        _USAGE["total_tokens"] += tt
+        _USAGE["calls"] += 1
+        m = _USAGE["by_model"].setdefault(model or "?",
+                                          {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0})
+        m["prompt_tokens"] += pt
+        m["completion_tokens"] += ct
+        m["calls"] += 1
+
+
+def _price_for(model: str) -> tuple[float, float]:
+    env_in, env_out = os.environ.get("BOXCUTTER_PRICE_IN"), os.environ.get("BOXCUTTER_PRICE_OUT")
+    if env_in and env_out:
+        try:
+            return float(env_in), float(env_out)
+        except ValueError:
+            pass
+    m = (model or "").lower()
+    for key, price in _PRICES.items():
+        if key in m:
+            return price
+    return _DEFAULT_PRICE
+
+
+def usage_totals() -> dict:
+    """A snapshot copy of the ledger."""
+    with _USAGE_LOCK:
+        return {**_USAGE, "by_model": {k: dict(v) for k, v in _USAGE["by_model"].items()}}
+
+
+def usage_cost() -> tuple[float, dict]:
+    """(estimated_usd, totals_snapshot). Cost is summed per-model so a run mixing models prices each correctly.
+    Set BOXCUTTER_PRICE_IN/OUT to your gateway's real rate for an exact figure."""
+    tot = usage_totals()
+    cost = 0.0
+    for model, u in tot["by_model"].items():
+        pin, pout = _price_for(model)
+        cost += u["prompt_tokens"] / 1_000_000 * pin + u["completion_tokens"] / 1_000_000 * pout
+    tot["estimated_usd"] = round(cost, 4)
+    return round(cost, 4), tot
 
 
 def _post(url, *, json, headers, timeout, attempts=4):
@@ -129,7 +211,9 @@ class Anthropic(_Provider):
                 "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["schema"]} for t in tools]}
         # Model-agnostic: NO native-thinking budget param. The agent's visible narration is captured/streamed
         # in parse(); we send the SAME request shape to every model, so none can 400 on a reasoning param.
-        return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
+        resp = _post(self.api, json=body, timeout=180, headers=self._headers()).json()
+        _record_usage(self.model, resp.get("usage"))
+        return resp
 
     def parse(self, resp):
         text, reasoning, calls = "", "", []
@@ -169,7 +253,9 @@ class Anthropic(_Provider):
         body = {"model": self.model, "max_tokens": max_tokens or 8192, "system": system,
                 "messages": [{"role": "user", "content": user}]}
         # Model-agnostic: no thinking-budget param (see send()).
-        content = _post(self.api, json=body, timeout=120, headers=self._headers()).json().get("content", [])
+        resp = _post(self.api, json=body, timeout=120, headers=self._headers()).json()
+        _record_usage(self.model, resp.get("usage"))
+        content = resp.get("content", [])
         text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
         reasoning = "".join(b.get("thinking", "") for b in content if b.get("type") == "thinking")
         self._capture(text, reasoning, [])
@@ -203,13 +289,15 @@ class OpenAI(_Provider):
         if self._force_reasoning_none:
             body["reasoning_effort"] = "none"
         try:
-            return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
+            resp = _post(self.api, json=body, timeout=180, headers=self._headers()).json()
         except requests.HTTPError as e:
             if self._force_reasoning_none or not _wants_reasoning_none(e):
                 raise
             self._force_reasoning_none = True
             body["reasoning_effort"] = "none"
-            return _post(self.api, json=body, timeout=180, headers=self._headers()).json()
+            resp = _post(self.api, json=body, timeout=180, headers=self._headers()).json()
+        _record_usage(self.model, resp.get("usage"))
+        return resp
 
     def parse(self, resp):
         msg = resp["choices"][0]["message"]
@@ -255,15 +343,17 @@ class OpenAI(_Provider):
             body["max_completion_tokens" if _is_reasoning_model(self.model) else "max_tokens"] = max_tokens
 
         def _call():
-            return _post(self.api, json=body, timeout=120, headers=self._headers()).json()["choices"][0]["message"]
+            return _post(self.api, json=body, timeout=120, headers=self._headers()).json()
         try:
-            msg = _call()
+            resp = _call()
         except requests.HTTPError as e:
             if self._force_reasoning_none or not _wants_reasoning_none(e):
                 raise
             self._force_reasoning_none = True
             body["reasoning_effort"] = "none"
-            msg = _call()
+            resp = _call()
+        _record_usage(self.model, resp.get("usage"))
+        msg = resp["choices"][0]["message"]
         text = msg.get("content") or ""
         self._capture(text, msg.get("reasoning_content") or msg.get("reasoning") or "", [])
         return text

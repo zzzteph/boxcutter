@@ -72,6 +72,23 @@ RUN apk add --no-cache --virtual .dirb-build gcc make curl-dev musl-dev libcurl 
 COPY boxcutter /opt/boxcutter/boxcutter
 COPY boxcutter.py /opt/boxcutter/boxcutter.py
 
+# Password wordlists for login brute-force / spraying (recovered-hash cracking, credential-reuse chains) ship in
+# boxcutter/data/ (passwords_10k.txt ~10k, passwords.txt ~2.3M) and are copied in by the `COPY boxcutter` above -
+# no build-time download. Documented in the agent wordlist inventory (ai/joseph.py) so a run points a
+# script/--wordlist at a REAL path, never an invented one.
+
+# crack-js (github.com/zzzteph/crack-js) - a pure-JS hashcat-mode hash cracker, wired as a Node LIBRARY plus a
+# thin CLI wrapper (docker/crack.js). It lets an operator crack a RECOVERED hash (a SQLi credential dump, a
+# leaked shadow/htpasswd line, an HS256 JWT secret) against the password wordlists above and feed the plaintext
+# into a credential-reuse chain. node is added only in this full image. NODE_PATH lets any node script (not just
+# the wrapper) `require('crack-js')`. Usage is documented in the agent wordlist inventory (ai/joseph.py).
+RUN apk add --no-cache nodejs npm && \
+    mkdir -p /usr/share/crack-js && cd /usr/share/crack-js && \
+    npm init -y >/dev/null 2>&1 && \
+    npm install --no-audit --no-fund crack-js
+COPY docker/crack.js /usr/share/crack-js/crack.js
+ENV NODE_PATH=/usr/share/crack-js/node_modules
+
 # --- web server mode (`boxcutter serve`): FastAPI API + the built SPA + a built-in agent ---
 # Server deps go in a DEDICATED venv so the lean engine's system-python imports stay untouched (the base marks
 # system python externally-managed, PEP 668). `boxcutter serve` execs this venv for uvicorn; the engine and

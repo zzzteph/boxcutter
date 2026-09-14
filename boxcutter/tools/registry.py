@@ -12,6 +12,7 @@ from ..ai import (
     caleb,
     crawlio,
     irvin,
+    joseph,
     juicy,
     logio,
     prawlio,
@@ -135,6 +136,9 @@ AI = [
     caleb,
     # Planning + hypothesis-driven scanner with a validation GATE: proves each finding over HTTP before reporting.
     vera,
+    # Human-operator agent: live browser + ZAP + full tool registry + in-container scripting; one litellm brain
+    # that THINKS OUT LOUD (a transparent reasoning stream) and acts, with parallel read-only analysts on a shared bus.
+    joseph,
 ]
 
 # Every command resolvable by NAME (tools + ai) - toolschema and the workflow runner look themselves up here.

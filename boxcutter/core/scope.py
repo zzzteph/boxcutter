@@ -1,7 +1,7 @@
 """Scope: keep a workflow's collected URLs/hosts/findings within the target's domain.
 
 A workflow's scope is, by default, the registrable domain (eTLD+1) of its initial target, so scanning
-``skipthedishes.com`` keeps ``api.skipthedishes.com`` / ``android-es.staging.skipthedishes.com`` but drops
+``example.com`` keeps ``api.example.com`` / ``android-es.staging.example.com`` but drops
 third-party hosts a crawl pulls in (``googletagmanager.com``, ``fonts.googleapis.com``, a CDN). This stops
 the scanners from ever touching, and reporting bogus findings on, assets that are not the target.
 
