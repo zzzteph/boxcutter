@@ -59,6 +59,20 @@ def _spec_params_to_argv(spec: dict) -> list:
 _PROGRESS_FLAGS = {"tool": ("--debug",), "workflow": ("--steps", "--show-findings"), "ai_agent": ("--debug",)}
 
 
+def _workflow_files(tmpl: Template | None) -> dict:
+    """For a CUSTOM (UI-authored) workflow template, the workflow file(s) the runner must drop into a
+    BOXCUTTER_WORKFLOWS dir so `boxcutter workflow <name>` resolves. Built-in workflows ship in the image and
+    return {} here. Shape: {"<name>.yaml": "<spec as JSON/YAML text>"}."""
+    if not tmpl or tmpl.kind != "workflow":
+        return {}
+    try:
+        spec = json.loads(tmpl.spec_json or "{}")
+    except Exception:  # noqa: BLE001
+        return {}
+    name, text = spec.get("name"), spec.get("yaml")
+    return {f"{name}.yaml": text} if name and text else {}
+
+
 def build_argv(session: Session, tmpl: Template, target: str, scan: Scan | None = None):
     """Map a template + target (+ the scan's own inputs) to a boxcutter CLI argv and any secret env it needs.
     All kinds run as `boxcutter <argv>` (the CLI desugars agent/tool/workflow names). Template params are the
@@ -187,9 +201,11 @@ def claim(body: ClaimIn = ClaimIn(), runner: Runner = Depends(current_runner),
     session.commit()
     log_activity(session, "job_claimed", f"'{runner.name}' took {target.value}",
                  scan_id=job.scan_id, runner_id=runner.id)
-    return {"job": {"id": job.id, "scan_id": job.scan_id, "target": target.value, "argv": argv,
-                    "token": job.token},
-            "secrets": secrets_env}
+    job_out = {"id": job.id, "scan_id": job.scan_id, "target": target.value, "argv": argv, "token": job.token}
+    wf_files = _workflow_files(tmpl)      # a UI-authored workflow ships its file so the runner can resolve it
+    if wf_files:
+        job_out["workflow_files"] = wf_files
+    return {"job": job_out, "secrets": secrets_env}
 
 
 def _stale(job: Job | None, runner: Runner, token: str) -> bool:
@@ -266,7 +282,7 @@ def job_result(job_id: int, body: ResultIn, runner: Runner = Depends(current_run
             upsert_item(session, job.scan_id, kind, target.value, value,
                         label=str(f.get("title", ""))[:400] if isinstance(f, dict) else "",
                         cls=str(f.get("cls", ""))[:120] if isinstance(f, dict) else "",
-                        run_no=job.run_no)
+                        run_no=job.run_no, stage_no=job.stage_no)
     if body.error:                                # retry a failed job up to the cap, else mark it failed
         job.status = "pending" if job.attempts < settings.job_max_attempts else "failed"
         job.runner_id = None if job.status == "pending" else job.runner_id

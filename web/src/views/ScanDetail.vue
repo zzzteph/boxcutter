@@ -59,6 +59,21 @@ const progress = computed(() => {
   const running = (c.running || 0) + (c.claimed || 0)
   return { done, total, running, pct: total ? Math.round(100 * done / total) : 0 }
 })
+// pipeline: group scan.pipeline (from GET /scans/:id) into levels by stage_no. Branches share a level. Hidden
+// when there's only stage 0 (an ordinary single-template scan looks unchanged).
+const pipelineLevels = computed(() => {
+  const p = (scan.value && scan.value.pipeline) || []
+  if (p.length <= 1) return []
+  const byLevel = new Map()
+  for (const s of p) { if (!byLevel.has(s.stage_no)) byLevel.set(s.stage_no, []); byLevel.get(s.stage_no).push(s) }
+  return [...byLevel.entries()].sort((a, b) => a[0] - b[0]).map(([stage_no, stages]) => ({ stage_no, stages }))
+})
+function stagePct(j) { return j && j.total ? Math.round(100 * j.done / j.total) : 0 }
+function stageState(j) {
+  if (!j || !j.total) return 'idle'
+  if (j.done >= j.total) return 'done'
+  return j.running ? 'running' : 'pending'
+}
 const logText = computed(() => lines(events.value))
 const assetLog = computed(() => selJob.value ? lines(events.value.filter(e => e.job_id === selJob.value.id)) : '')
 function lines(evs) {
@@ -220,6 +235,11 @@ async function act(a) {
   try { await api.post('/scans/' + id + '/' + a); await refresh(); if (isLive()) ensureLive() }  // rerun/resume -> live again
   catch (e) { alert(e.message) }
 }
+async function rerunStage(n) {
+  if (!confirm(`Rerun from stage ${n} onward? Stages before it are left as-is.`)) return
+  try { await api.post('/scans/' + id + '/rerun?stage=' + n); await refresh(); ensureLive() }
+  catch (e) { alert(e.message) }
+}
 async function downloadReport() {
   try {
     const r = await fetch(`${apiBase()}/scans/${id}/report`, { headers: { Authorization: 'Bearer ' + token() } })
@@ -280,6 +300,32 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
       {{ progress.done }}/{{ progress.total }} assets done<span v-if="progress.running"> · {{ progress.running }} in progress</span> ·
       <span class="state-new">{{ scan.findings_new }} new</span> · {{ scan.findings_open_state }} open ·
       <span class="muted">{{ scan.findings_resolved }} resolved</span>
+    </div>
+
+    <!-- pipeline -->
+    <div v-if="pipelineLevels.length" class="card" style="margin-top:16px">
+      <h2 style="margin:0 0 4px">Pipeline</h2>
+      <div class="muted" style="font-size:12px;margin-bottom:10px">Each stage runs on the items the one before it
+        produced, fanning out across the fleet. Stage 0 runs on your targets.</div>
+      <div class="pl">
+        <template v-for="(lvl, li) in pipelineLevels" :key="lvl.stage_no">
+          <div v-if="li > 0" class="pl-edge" aria-hidden="true">↓ feeds its
+            {{ lvl.stages[0].item_filter === 'urls' ? 'URLs' : 'items' }} onward</div>
+          <div class="pl-row">
+            <div v-for="st in lvl.stages" :key="st.stage_no + '-' + st.template_id"
+                 class="pl-box" :class="'pl-' + stageState(st.jobs)">
+              <div class="pl-head"><span class="pl-no">{{ st.stage_no }}</span>
+                <span class="pl-name">{{ st.template || '(unknown)' }}</span>
+                <button v-if="scan.status !== 'running'" class="ghost sm pl-rerun"
+                        title="Rerun from this stage onward" @click="rerunStage(st.stage_no)">⟲</button></div>
+              <div class="pl-bar"><div class="pl-fill" :style="{ width: stagePct(st.jobs) + '%' }"></div></div>
+              <div class="pl-meta">{{ st.jobs.done }}/{{ st.jobs.total || 0 }} assets<span
+                v-if="st.jobs.running"> · {{ st.jobs.running }} running</span><span
+                v-if="st.jobs.failed"> · {{ st.jobs.failed }} failed</span></div>
+            </div>
+          </div>
+        </template>
+      </div>
     </div>
 
     <!-- assets -->
@@ -505,4 +551,27 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
 .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
 .lightbox-inner { background: var(--card, #fff); border-radius: 8px; padding: 12px; max-width: 95vw; max-height: 92vh; overflow: auto; }
 .lightbox-inner img { display: block; max-width: 100%; height: auto; margin-top: 8px; }
+
+/* pipeline */
+.pl { display: flex; flex-direction: column; gap: 6px; }
+.pl-edge { font-size: 11px; color: var(--muted); padding-left: 10px; }
+.pl-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.pl-box {
+  flex: 1 1 220px; min-width: 200px; border: 1px solid var(--line, var(--border, #ddd)); border-radius: 8px;
+  padding: 10px 12px; background: var(--panel-2, var(--card, #fff));
+}
+.pl-box.pl-done { border-color: var(--good, #3ba55d); }
+.pl-box.pl-running { border-color: var(--accent, #5865f2); }
+.pl-box.pl-failed { border-color: var(--bad, #ed4245); }
+.pl-head { display: flex; align-items: center; gap: 8px; }
+.pl-rerun { margin-left: auto; padding: 2px 8px; }
+.pl-no {
+  flex: none; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 11px; font-weight: 700; background: var(--accent, #5865f2); color: #fff;
+}
+.pl-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-bar { height: 6px; border-radius: 4px; background: var(--line, #e5e5e5); overflow: hidden; margin: 8px 0 4px; }
+.pl-fill { height: 100%; background: var(--accent, #5865f2); transition: width .4s ease; }
+.pl-box.pl-done .pl-fill { background: var(--good, #3ba55d); }
+.pl-meta { font-size: 11.5px; color: var(--muted); }
 </style>

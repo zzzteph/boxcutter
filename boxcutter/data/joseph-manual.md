@@ -185,8 +185,11 @@ At the end of every run joseph prints a spend line to stderr and a **Token usage
 joseph :: LLM spend - 812,004 in + 96,430 out = 908,434 tokens over 214 call(s)  ~$14.4571 USD (estimate; …)
 ```
 
-Token counts are **exact** (read from each API response). The dollar figure is an **estimate** from a per-model
-list-price table. For your exact gateway/Bedrock rate, set env vars (USD per 1M tokens):
+Token counts are **exact** (read from each API response). The dollar figure is **exact too when your gateway
+reports it** — a LiteLLM proxy (what SecureForge fronts) returns the real per-call cost on the
+`x-litellm-response-cost` header, and joseph uses that verbatim (the line reads `… USD (gateway-reported)`).
+Only when no gateway cost is present does it fall back to a per-model **list-price** estimate (`… (estimate; …)`).
+To override that fallback with a specific rate, set env vars (USD per 1M tokens):
 
 ```sh
 -e BOXCUTTER_PRICE_IN=5 -e BOXCUTTER_PRICE_OUT=25
@@ -255,4 +258,4 @@ and predicts only, refusing all mutation — use it for a first look on a shared
 | **Workspace is empty after the run** | `--out-dir` was written inside the container and not mounted. Mount a volume and point `--out-dir` at it (§2). The report still comes back on stdout regardless. |
 | **`--out-dir` seems required** | it isn't — it defaults. You only need it (with a `-v` mount) to keep artifacts. |
 | **Too much interleaved output** | `--analysts 3` (top lanes) or `--analysts 0` (driver only); or `--quiet-reasoning`. |
-| **Cost figure looks off** | it's a list-price estimate; set `BOXCUTTER_PRICE_IN/OUT` to your real per-1M rate (§11). Token counts are exact. |
+| **Cost figure looks off** | if the line says `(gateway-reported)` it's your gateway's own exact number; if it says `(estimate; …)` it's a list-price fallback — set `BOXCUTTER_PRICE_IN/OUT` to your real per-1M rate (§11). Token counts are always exact. |

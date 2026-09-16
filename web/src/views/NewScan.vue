@@ -23,6 +23,25 @@ const vars = reactive({ context: '', creds: '', custom: [] })
 function addCustom() { vars.custom.push({ key: '', value: '' }) }
 function rmCustom(i) { vars.custom.splice(i, 1) }
 
+// pipeline: optional downstream stages. Each runs its template on the items the PREVIOUS stage produced
+// (stage 0 = the template above, run on the targets). Turns e.g. recon → web-full into a fan-out chain
+// instead of one long serial scan. See docs/pipelines-design.md.
+const stages = ref([])   // [{ template_id, item_filter, branch }]
+function addStage() { stages.value.push({ template_id: null, item_filter: 'all', branch: false }) }
+function rmStage(i) { stages.value.splice(i, 1) }
+const FILTERS = [{ value: 'all', label: 'all items (hosts & URLs)' }, { value: 'urls', label: 'URLs only' }]
+// mirror the server's _create_stages leveling so the displayed stage numbers match: a branch shares the level
+// of the stage before it (a parallel fan-out); anything else opens the next level. The first stage always
+// opens level 1 (there is nothing before it to run in parallel with).
+const stageLevels = computed(() => {
+  let level = 0
+  return stages.value.map(s => { if (!(s.branch && level >= 1)) level += 1; return level })
+})
+function stagesPayload() {
+  return stages.value.filter(s => s.template_id)
+    .map(s => ({ template_id: s.template_id, item_filter: s.item_filter, branch: !!s.branch }))
+}
+
 const targetCount = computed(() => targets.value.split(/\s+/).filter(Boolean).length)
 const selTmpl = computed(() => templates.value.find(t => t.id === templateId.value) || null)
 const isAgent = computed(() => selTmpl.value?.kind === 'ai_agent')
@@ -104,6 +123,7 @@ async function create() {
       fd.append('name', name.value)
       fd.append('template_id', String(templateId.value))
       fd.append('vars', JSON.stringify(varsPayload()))
+      fd.append('stages', JSON.stringify(stagesPayload()))
       fd.append('file', file.value)
       r = await api.postForm('/scans/upload', fd)
     } else {
@@ -111,6 +131,7 @@ async function create() {
         name: name.value, template_id: templateId.value,
         targets: targets.value.split(/\s+/).filter(Boolean),
         vars: varsPayload(),
+        stages: stagesPayload(),
       })
     }
     router.push('/scans/' + r.id)
@@ -156,6 +177,27 @@ onMounted(load)
         <span class="muted" style="font-size:12px">{{ (file.size / 1048576).toFixed(2) }} MB — streamed on upload</span>
         <button class="ghost sm" @click="clearFile">Remove</button>
       </div>
+
+      <label style="margin-top:16px">Pipeline <span class="muted">— optional: after the template above runs,
+        chain more workflows that consume what it found (each stage fans out across the fleet)</span></label>
+      <div class="pipe">
+        <div class="pipe-stage seed">
+          <span class="pipe-no">0</span>
+          <span class="pipe-name">{{ selTmpl?.name || 'template above' }}</span>
+          <span class="muted" style="font-size:12px">runs on your targets</span>
+        </div>
+        <div v-for="(s, i) in stages" :key="i" class="pipe-stage" :class="{ branch: s.branch && i > 0 }">
+          <span class="pipe-arrow" aria-hidden="true">{{ s.branch && i > 0 ? '∥ parallel' : '↓ feeds' }}</span>
+          <span class="pipe-no">{{ stageLevels[i] }}</span>
+          <div class="pipe-pick"><TemplatePicker v-model="s.template_id" :templates="templates" /></div>
+          <Select v-model="s.item_filter" :options="FILTERS" />
+          <label v-if="i > 0" class="pipe-branch" title="Run in parallel with the stage above (both consume the same items)">
+            <input type="checkbox" v-model="s.branch" /> parallel
+          </label>
+          <button class="danger ghost icon" title="Remove stage" @click="rmStage(i)">✕</button>
+        </div>
+      </div>
+      <button class="tonal sm" style="margin-top:8px" @click="addStage">+ Add stage</button>
 
       <p v-if="err" class="err">{{ err }}</p>
       <p v-if="!templates.length" class="muted">No templates yet —
@@ -204,3 +246,22 @@ onMounted(load)
     </div>
   </div>
 </template>
+
+<style scoped>
+.pipe { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.pipe-stage {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2, var(--panel));
+}
+.pipe-stage.seed { border-style: dashed; }
+.pipe-stage.branch { margin-left: 22px; }
+.pipe-no {
+  flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 12px; font-weight: 700; background: var(--accent); color: #fff;
+}
+.pipe-name { font-weight: 600; }
+.pipe-pick { flex: 1 1 auto; min-width: 0; }
+.pipe-arrow { flex: none; font-size: 11px; color: var(--muted); margin-left: 4px; width: 64px; }
+.pipe-branch { flex: none; display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+.pipe-branch input { width: auto; }
+</style>

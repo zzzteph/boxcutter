@@ -1121,14 +1121,18 @@ def _rich_finding_block(f: dict) -> list[str]:
 
 
 def _usage_report_lines(cost: float, tot: dict) -> list[str]:
-    """The token-spend section of the report: exact token counts + an estimated dollar cost, broken down per
-    model. The tokens are exact (from each response's usage); the cost is a list-price estimate."""
+    """The token-spend section of the report: exact token counts + a dollar cost, broken down per model. The
+    tokens are always exact (from each response's usage). The cost is EXACT too when the gateway reported it
+    (cost_source == 'gateway'); otherwise it's a list-price estimate the reader can override via env."""
+    exact = tot.get("cost_source") == "gateway"
+    cost_note = ("gateway-reported, exact" if exact else
+                 "list-price estimate; set BOXCUTTER_PRICE_IN / BOXCUTTER_PRICE_OUT - USD per 1M tokens - "
+                 "for your exact gateway/Bedrock rate")
     lines = ["## Token usage & cost", "",
              f"- LLM calls: {tot.get('calls', 0)}",
              f"- input: {tot.get('prompt_tokens', 0):,} tok   output: {tot.get('completion_tokens', 0):,} tok   "
              f"total: {tot.get('total_tokens', 0):,} tok",
-             f"- estimated cost: **${cost:,.4f} USD** _(estimate from list prices; set BOXCUTTER_PRICE_IN / "
-             "BOXCUTTER_PRICE_OUT - USD per 1M tokens - for your exact gateway/Bedrock rate)_", ""]
+             f"- {'cost' if exact else 'estimated cost'}: **${cost:,.4f} USD** _({cost_note})_", ""]
     by_model = tot.get("by_model") or {}
     if by_model:
         lines += ["| model | calls | input tok | output tok |", "|---|---:|---:|---:|"]
@@ -1434,10 +1438,13 @@ def run(args) -> int:
     op._save(".", "REPORT.md", report)
     debug_print(f"\njoseph :: {len(findings)} finding(s), {op._script_runs} script(s), "
                 f"{len(op.mutations)} mutation(s)  ({step + 1} steps)")
+    _exact = tot.get("cost_source") == "gateway"
+    _cost_tag = ("gateway-reported" if _exact else
+                 "estimate; set BOXCUTTER_PRICE_IN/OUT for your exact gateway rate")
     sys.stderr.write(
         f"joseph :: LLM spend - {tot['prompt_tokens']:,} in + {tot['completion_tokens']:,} out = "
-        f"{tot['total_tokens']:,} tokens over {tot['calls']} call(s)  ~${cost:,.4f} USD (estimate; set "
-        "BOXCUTTER_PRICE_IN/OUT for your exact gateway rate)\n")
+        f"{tot['total_tokens']:,} tokens over {tot['calls']} call(s)  "
+        f"{'' if _exact else '~'}${cost:,.4f} USD ({_cost_tag})\n")
     if getattr(args, "report", None):
         try:
             with open(args.report, "w", encoding="utf-8") as fh:

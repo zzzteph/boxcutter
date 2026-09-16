@@ -34,6 +34,9 @@ server/data/
 # caleb coverage working area (harness, ground-truth keys, handoff docs, run artifacts) - kept on disk, not tracked
 opt/
 
+# Design docs / working notes - kept on disk, not tracked
+docs/
+
 # Test target runtime DB + request logs + uploads + generated fixtures
 test/store.db
 test/logs/

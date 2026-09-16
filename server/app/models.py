@@ -93,10 +93,24 @@ class ScanShare(SQLModel, table=True):
     perm: str = Field(default="read", max_length=16)
 
 
+class Stage(SQLModel, table=True):
+    """A DOWNSTREAM stage of a pipeline scan. Stage 0 is implicit — it is the scan's own template_id, run on the
+    scan's uploaded targets. Each Stage row (stage_no >= 1) declares a template to run on the items the PREVIOUS
+    stage produced: when a stage drains, its ScanItems are filtered (item_filter) and become this stage's
+    targets, enqueued as their own jobs so the whole runner fleet fans out over them. See docs/pipelines-design.md."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scan_id: int = Field(foreign_key="scan.id", index=True)
+    stage_no: int = Field(default=1)                          # >= 1; stage 0 is the scan's own template
+    template_id: int = Field(foreign_key="template.id")
+    item_filter: str = Field(default="all", max_length=32)    # all | urls  (which upstream items become targets)
+    created_at: datetime = Field(default_factory=now)
+
+
 class Target(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     scan_id: int = Field(foreign_key="scan.id", index=True)
     value: str = Field(max_length=1024)
+    stage_no: int = Field(default=0, index=True)              # which pipeline stage this target belongs to (0 = seed)
 
 
 class Job(SQLModel, table=True):
@@ -107,6 +121,7 @@ class Job(SQLModel, table=True):
     target_id: int = Field(foreign_key="target.id")
     template_id: int = Field(foreign_key="template.id")
     run_no: int = 0
+    stage_no: int = Field(default=0)                          # pipeline stage this job belongs to (0 = seed stage)
     # the local model this job REQUIRES (an ai_agent template on an ollama profile); empty = any agent can run
     # it. An agent only claims a job whose needs_model it has installed - so a model it can't run is never taken.
     needs_model: str = Field(default="", max_length=120)
@@ -160,6 +175,7 @@ class ScanItem(SQLModel, table=True):
     value: str = Field(default="", max_length=2048)           # the URL / host / item itself
     label: str = Field(default="", max_length=400)            # the engine's title for it, when it had one
     cls: str = Field(default="", max_length=120)
+    stage_no: int = Field(default=0, index=True)              # the pipeline stage that produced it (for promotion)
     run_no: int = 0
     first_seen: datetime = Field(default_factory=now)
     last_seen: datetime = Field(default_factory=now)

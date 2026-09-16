@@ -56,9 +56,11 @@ def item_fingerprint(target: str, value: str) -> str:
 
 
 def upsert_item(session: Session, scan_id: int, kind: str, target: str, value: str,
-                label: str = "", cls: str = "", run_no: int = 0) -> bool:
+                label: str = "", cls: str = "", run_no: int = 0, stage_no: int = 0) -> bool:
     """Insert a non-finding item, or bump `last_seen` if this scan already has it (so a rerun refreshes rather
-    than duplicates). Returns True when the row is new."""
+    than duplicates). Returns True when the row is new. `stage_no` records the pipeline stage that produced the
+    item, set only on INSERT — an item keeps its first-seen stage across reruns, so stage promotion selects the
+    right producer's output (see queue.promote_stage)."""
     fp = item_fingerprint(target, value)
     row = session.exec(select(ScanItem).where(ScanItem.scan_id == scan_id,
                                               ScanItem.fingerprint == fp)).first()
@@ -68,7 +70,8 @@ def upsert_item(session: Session, scan_id: int, kind: str, target: str, value: s
         session.add(row)
         return False
     row = ScanItem(scan_id=scan_id, target=target, template_kind=kind, fingerprint=fp,
-                   value=value[:2048], label=(label or "")[:400], run_no=run_no, first_seen=at, last_seen=at)
+                   value=value[:2048], label=(label or "")[:400], run_no=run_no, stage_no=stage_no,
+                   first_seen=at, last_seen=at)
     row.cls = (cls or "")[:120]      # 'cls' can't be a constructor kwarg (shadows __new__), same as Finding
     session.add(row)
     return True

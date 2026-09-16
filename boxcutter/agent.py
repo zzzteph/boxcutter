@@ -19,10 +19,12 @@ import hashlib
 import hmac
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -340,6 +342,25 @@ def engine_version() -> str:
     return _ENGINE_VERSION
 
 
+def _stage_workflow_files(files) -> str | None:
+    """Write the custom-workflow file(s) shipped with a job into a fresh temp dir and return it (for
+    BOXCUTTER_WORKFLOWS), or None if there are none. Names are reduced to a basename so an odd/hostile filename
+    can't escape the dir; a non-YAML extension is coerced to .yaml so load_specs picks it up."""
+    if not files or not isinstance(files, dict):
+        return None
+    try:
+        d = tempfile.mkdtemp(prefix="bxc_wf_")
+        for fname, text in files.items():
+            base = os.path.basename(str(fname)) or "workflow.yaml"
+            if not base.endswith((".yaml", ".yml")):
+                base += ".yaml"
+            with open(os.path.join(d, base), "w", encoding="utf-8") as fh:
+                fh.write(str(text))
+        return d
+    except Exception:  # noqa: BLE001 - a staging failure must not crash the job; it just won't resolve the wf
+        return None
+
+
 def run_job(job: dict, secrets: dict) -> dict:
     """Run `boxcutter <argv>`, streaming stderr as live steps and capturing stdout as the findings envelope /
     raw report. No idle timeout — a deep scan is legitimately silent for long stretches — and the only bound is
@@ -351,6 +372,12 @@ def run_job(job: dict, secrets: dict) -> dict:
         return _mock_run(job)
     env = dict(os.environ)
     env.update({k: str(v) for k, v in (secrets or {}).items()})
+    # A UI-authored (custom) workflow isn't baked into the image — the server ships its file with the job. Write
+    # it to a throwaway dir and point the engine at it via BOXCUTTER_WORKFLOWS so `boxcutter workflow <name>`
+    # resolves it (the engine merges this dir over its built-in library; see workflows.yaml_runner.load_specs).
+    wf_dir = _stage_workflow_files(job.get("workflow_files"))
+    if wf_dir:
+        env["BOXCUTTER_WORKFLOWS"] = wf_dir
     # values to redact from any streamed line or captured output (never leak the LLM key back to the server)
     secret_vals = [str(v) for v in (secrets or {}).values() if v and len(str(v)) >= 6]
     cmd = BOXCUTTER_CMD + [str(a) for a in job["argv"]]
@@ -429,6 +456,18 @@ def run_job(job: dict, secrets: dict) -> dict:
                     _emit(job["id"], killed, phase="run")
                     _kill_tree(proc)
                     break
+        # Tear down the WHOLE process group on EVERY exit, even a clean one: a tool may have left a lingering
+        # child (a headless browser, a ZAP/java daemon, a detached scanner) that keeps the stdout/stderr pipes
+        # open after the engine itself exited. If a pipe never sees EOF the pump thread stays blocked in
+        # readline(), so join(timeout) ABANDONS it — one live thread (and the stray process) leaked per job,
+        # until the agent can no longer fork()/start a thread (EAGAIN / "can't start new thread"). Killing the
+        # group reaps the strays; closing our pipe ends unblocks any stuck pump so it exits instead of leaking.
+        _kill_tree(proc)
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
         te.join(timeout=3)
         to.join(timeout=3)
     except FileNotFoundError:
@@ -438,8 +477,10 @@ def run_job(job: dict, secrets: dict) -> dict:
         _emit(job["id"], f"agent error: {e}", phase="run")
         return {"envelope": {}, "report": None, "error": f"agent error: {e}"}
     finally:
-        if proc is not None and proc.poll() is None:
-            _kill_tree(proc)
+        if proc is not None:
+            _kill_tree(proc)      # backstop: always reap the group (no-op if already gone) so nothing lingers
+        if wf_dir:
+            shutil.rmtree(wf_dir, ignore_errors=True)    # drop the staged custom-workflow file(s)
 
     envelope, error = {}, None
     text = "".join(out_buf).strip()

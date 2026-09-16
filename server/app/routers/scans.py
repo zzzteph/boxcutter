@@ -14,8 +14,8 @@ from sqlmodel import Session, select
 
 from ..activity import log_activity
 from ..db import engine, get_session
-from ..models import (Activity, Finding, Job, JobEvent, Scan, ScanItem, Screenshot, Target, Template, User)
-from ..queue import enqueue_scan
+from ..models import (Activity, Finding, Job, JobEvent, Scan, ScanItem, Screenshot, Stage, Target, Template, User)
+from ..queue import enqueue_scan, maybe_finish_scan
 from ..security import current_user, decode_user
 
 router = APIRouter(prefix="/scans", tags=["scans"])
@@ -55,17 +55,47 @@ def _ingest_targets(session: Session, scan_id: int, lines, seen: set | None = No
     return n
 
 
+class StageIn(BaseModel):
+    """A downstream pipeline stage: run `template_id` on the items the previous stage produced. Order in the
+    request list = stage order (stage 1, 2, ...); stage 0 is the scan's own `template_id`. `branch=True` puts
+    this stage at the SAME level as the one before it (a fan-out: both consume the previous level's items and run
+    in parallel), instead of after it."""
+    template_id: int
+    item_filter: str = "all"          # all | urls
+    branch: bool = False
+
+
 class ScanIn(BaseModel):
     name: str
     template_id: int
     targets: list[str]
     vars: dict | None = None          # scan-specific inputs (esp. for ai_agent): {context, creds, custom:[{key,value}]}
+    stages: list[StageIn] | None = None   # optional pipeline: downstream stages fed by the previous stage's items
     authorized: bool = False
 
 
 class ScanPatch(BaseModel):
     name: str | None = None
     vars: dict | None = None
+
+
+def _create_stages(session: Session, scan_id: int, stages) -> int:
+    """Persist the pipeline's downstream stages. Each entry advances to the next level UNLESS `branch=True`, in
+    which case it shares the previous entry's level (a parallel fan-out consuming the same upstream items). Each
+    stage's template must exist. Returns the number of stages created."""
+    n = 0
+    level = 0
+    for i, st in enumerate(stages or [], start=1):
+        if not session.get(Template, st.template_id):
+            raise HTTPException(404, f"stage {i}: template not found")
+        if not (st.branch and level >= 1):        # first stage, or a non-branch stage, opens a new level
+            level += 1
+        item_filter = st.item_filter if st.item_filter in ("all", "urls") else "all"
+        session.add(Stage(scan_id=scan_id, stage_no=level, template_id=st.template_id, item_filter=item_filter))
+        n += 1
+    if n:
+        session.commit()
+    return n
 
 
 def _perm(session: Session, scan: Scan, user: User):
@@ -119,16 +149,21 @@ def _summary(session: Session, s: Scan) -> dict:
 def create_scan(body: ScanIn, user: User = Depends(current_user), session: Session = Depends(get_session)):
     if not session.get(Template, body.template_id):
         raise HTTPException(404, "template not found")
+    for i, st in enumerate(body.stages or [], start=1):      # validate stage templates BEFORE creating the scan
+        if not session.get(Template, st.template_id):
+            raise HTTPException(404, f"stage {i}: template not found")
     now = datetime.now(timezone.utc)
     scan = Scan(name=body.name, owner_id=user.id, template_id=body.template_id, status="running",
                 run_no=1, vars_json=json.dumps(body.vars or {}), authorized_ack_at=now, last_run_at=now)
     session.add(scan)
     session.commit()
     session.refresh(scan)
-    _ingest_targets(session, scan.id, body.targets)
-    n = enqueue_scan(session, scan)
-    log_activity(session, "scan_created", f"Scan '{scan.name}' created — {n} assets", scan_id=scan.id)
-    return {"id": scan.id, "jobs": n}
+    _ingest_targets(session, scan.id, body.targets)          # stage 0 (Target.stage_no defaults to 0)
+    stages = _create_stages(session, scan.id, body.stages)
+    n = enqueue_scan(session, scan)                          # enqueue stage 0 only; later stages promote on drain
+    suffix = f" ({stages}-stage pipeline)" if stages else ""
+    log_activity(session, "scan_created", f"Scan '{scan.name}' created — {n} assets{suffix}", scan_id=scan.id)
+    return {"id": scan.id, "jobs": n, "stages": stages}
 
 
 @router.post("/upload")
@@ -136,6 +171,7 @@ def create_scan_upload(
     name: str = Form(...),
     template_id: int = Form(...),
     vars: str | None = Form(None),          # JSON string (scan-specific inputs), same shape as ScanIn.vars
+    stages: str | None = Form(None),        # JSON string: [{template_id, item_filter}], same shape as ScanIn.stages
     authorized: bool = Form(False),
     file: UploadFile = File(...),
     user: User = Depends(current_user),
@@ -150,6 +186,13 @@ def create_scan_upload(
         vars_obj = json.loads(vars) if vars else {}
     except json.JSONDecodeError:
         raise HTTPException(400, "vars must be valid JSON")
+    try:
+        stage_specs = [StageIn(**s) for s in (json.loads(stages) if stages else [])]
+    except (json.JSONDecodeError, TypeError, ValueError):
+        raise HTTPException(400, "stages must be valid JSON [{template_id, item_filter}]")
+    for i, st in enumerate(stage_specs, start=1):
+        if not session.get(Template, st.template_id):
+            raise HTTPException(404, f"stage {i}: template not found")
     now = datetime.now(timezone.utc)
     scan = Scan(name=name, owner_id=user.id, template_id=template_id, status="running",
                 run_no=1, vars_json=json.dumps(vars_obj or {}), authorized_ack_at=now, last_run_at=now)
@@ -160,9 +203,12 @@ def create_scan_upload(
     # raw file in a text decoder and iterate lines lazily so ingestion streams end to end.
     text = io.TextIOWrapper(file.file, encoding="utf-8", errors="replace")
     _ingest_targets(session, scan.id, text)
+    nstages = _create_stages(session, scan.id, stage_specs)
     n = enqueue_scan(session, scan)
-    log_activity(session, "scan_created", f"Scan '{scan.name}' created — {n} assets (upload)", scan_id=scan.id)
-    return {"id": scan.id, "jobs": n}
+    suffix = f", {nstages}-stage pipeline" if nstages else ""
+    log_activity(session, "scan_created", f"Scan '{scan.name}' created — {n} assets (upload{suffix})",
+                 scan_id=scan.id)
+    return {"id": scan.id, "jobs": n, "stages": nstages}
 
 
 # ---- targets: list / search / add (batch or upload) / remove on an EXISTING scan -------------------------
@@ -295,9 +341,34 @@ def get_scan(scan_id: int, user: User = Depends(current_user), session: Session 
     except Exception:
         vars_ = {}
     tmpl = session.get(Template, scan.template_id)
+    # pipeline stages (stage 0 = the scan's own template, then each downstream Stage row; branches share a
+    # stage_no), with each stage's template name resolved and its per-stage job progress for the CURRENT run, so
+    # the UI can render the chain + a progress bar per box without extra requests.
+    stage_rows = session.exec(select(Stage).where(Stage.scan_id == scan_id).order_by(Stage.stage_no)).all()
+    tmpl_names = {t.id: t.name for t in session.exec(select(Template)).all()} if stage_rows else {}
+    sjobs: dict = {}
+    for sn, tid, jstatus, c in session.exec(
+            select(Job.stage_no, Job.template_id, Job.status, func.count())
+            .where(Job.scan_id == scan_id, Job.run_no == scan.run_no)
+            .group_by(Job.stage_no, Job.template_id, Job.status)).all():
+        sjobs.setdefault((sn, tid), {})[jstatus] = c
+
+    def _stage_progress(stage_no: int, template_id: int) -> dict:
+        d = sjobs.get((stage_no, template_id), {})
+        return {"total": sum(d.values()),
+                "done": d.get("done", 0) + d.get("failed", 0) + d.get("cancelled", 0),
+                "running": d.get("running", 0) + d.get("claimed", 0),
+                "pending": d.get("pending", 0), "failed": d.get("failed", 0)}
+
+    pipeline = [{"stage_no": 0, "template_id": scan.template_id, "template": tmpl.name if tmpl else "",
+                 "item_filter": None, "jobs": _stage_progress(0, scan.template_id)}]
+    pipeline += [{"stage_no": s.stage_no, "template_id": s.template_id,
+                  "template": tmpl_names.get(s.template_id, ""), "item_filter": s.item_filter,
+                  "jobs": _stage_progress(s.stage_no, s.template_id)} for s in stage_rows]
     out.update({"targets": targets, "jobs": jstat, "vars": vars_,
                 "template": ({"id": tmpl.id, "name": tmpl.name, "kind": tmpl.kind, "context": tmpl.context,
-                              "spec": json.loads(tmpl.spec_json or "{}")} if tmpl else None)})
+                              "spec": json.loads(tmpl.spec_json or "{}")} if tmpl else None),
+                "pipeline": pipeline})
     return out
 
 
@@ -340,7 +411,7 @@ def delete_scan(scan_id: int, user: User = Depends(current_user), session: Sessi
     scan.status = "stopped"                    # stop new claims + let agents drop in-flight jobs during delete
     session.add(scan)
     session.commit()
-    for model in (Finding, ScanItem, Screenshot, JobEvent, Job, Target, Activity):
+    for model in (Finding, ScanItem, Screenshot, JobEvent, Job, Target, Stage, Activity):
         _delete_scan_rows(session, model, scan_id)
     session.delete(scan)
     session.commit()
@@ -762,7 +833,20 @@ async def scan_stream(scan_id: int, since: int = 0, user: User = Depends(_sse_us
                                       "Connection": "keep-alive"})
 
 
-def _set_status(scan_id, new, user, session, cancel_pending=False, bump_run=False):
+def _enqueue_from_stage(session: Session, scan: Scan, from_stage: int) -> int:
+    """Enqueue the jobs for a (re)run that STARTS at ``from_stage``. Stage 0 = the seed template on the scan's
+    targets (the whole pipeline). A later stage re-runs just that level (every branch at it) on the targets it
+    already holds from a previous run, and the promotion cascade carries on to the stages after it."""
+    if from_stage <= 0:
+        return enqueue_scan(session, scan)
+    total = 0
+    for st in session.exec(select(Stage).where(
+            Stage.scan_id == scan.id, Stage.stage_no == from_stage)).all():
+        total += enqueue_scan(session, scan, stage_no=st.stage_no, template_id=st.template_id)
+    return total
+
+
+def _set_status(scan_id, new, user, session, cancel_pending=False, bump_run=False, from_stage=0):
     scan = session.get(Scan, scan_id)
     if not scan:
         raise HTTPException(404)
@@ -780,9 +864,14 @@ def _set_status(scan_id, new, user, session, cancel_pending=False, bump_run=Fals
         session.execute(update(Job).where(
             Job.scan_id == scan_id, Job.status.in_(["pending", "claimed", "running"])).values(status="cancelled"))
     session.commit()
-    jobs = enqueue_scan(session, scan) if bump_run else 0
+    jobs = _enqueue_from_stage(session, scan, from_stage) if bump_run else 0
+    # A stage rerun with no targets at that stage (never reached before) would otherwise leave the scan
+    # "running" with zero jobs — resolve it straight to done/next-stage.
+    if bump_run and jobs == 0:
+        maybe_finish_scan(session, scan_id)
     if bump_run:
-        kind, verb, sev = "scan_rerun", f"rerun (run #{scan.run_no}, {jobs} assets)", "info"
+        stage_note = f" from stage {from_stage}" if from_stage else ""
+        kind, verb, sev = "scan_rerun", f"rerun{stage_note} (run #{scan.run_no}, {jobs} assets)", "info"
     elif new == "paused":
         kind, verb, sev = "scan_paused", "paused", "warn"
     elif new == "stopped":
@@ -809,5 +898,7 @@ def stop(scan_id: int, user=Depends(current_user), session=Depends(get_session))
 
 
 @router.post("/{scan_id}/rerun")
-def rerun(scan_id: int, user=Depends(current_user), session=Depends(get_session)):
-    return _set_status(scan_id, "running", user, session, bump_run=True)
+def rerun(scan_id: int, stage: int = 0, user=Depends(current_user), session=Depends(get_session)):
+    """Rerun the whole pipeline (default), or just from `stage` onward — re-running that stage on the targets it
+    already holds and letting the cascade continue to later stages, without redoing the stages before it."""
+    return _set_status(scan_id, "running", user, session, bump_run=True, from_stage=max(0, stage))

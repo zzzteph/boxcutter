@@ -15,6 +15,7 @@ RUN apk add --no-cache \
         bash ca-certificates bind-tools nmap wget curl unzip git \
         python3 py3-pip py3-requests py3-yaml \
         libpcap libstdc++ libgcc \
+        tini \
     && update-ca-certificates
 
 COPY --from=projectdiscovery/subfinder:v2.12.0 /usr/local/bin/subfinder /usr/local/bin/subfinder
@@ -34,7 +35,13 @@ RUN git clone --depth 1 https://github.com/maurosoria/dirsearch.git /usr/share/d
     pip3 install --no-cache-dir --break-system-packages -r /usr/share/dirsearch/requirements.txt
 
 WORKDIR /work
-ENTRYPOINT ["python3", "/opt/boxcutter/boxcutter.py"]
+# tini as PID 1 = a real init that REAPS orphaned processes. `boxcutter agent` runs as the container's main
+# process and spawns per-job boxcutter subprocesses that themselves spawn tools (chromium, ZAP/java, sqlmap…).
+# A tool that outlives its parent gets reparented to PID 1; with no init to reap it, it lingers as a zombie and
+# eats the process/thread budget until the agent can no longer fork()/start a thread ([Errno 11] / "can't start
+# new thread"). tini reaps those orphans and forwards signals; it only reaps what the app's own subprocess.wait
+# doesn't, so it's safe for every mode (engine/serve/agent).
+ENTRYPOINT ["/sbin/tini", "--", "python3", "/opt/boxcutter/boxcutter.py"]
 CMD ["--help"]
 
 FROM base AS full

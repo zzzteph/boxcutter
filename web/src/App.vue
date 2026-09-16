@@ -37,6 +37,7 @@ onUnmounted(() => { clearInterval(timer); document.removeEventListener('click', 
       <router-link to="/scans" @click="go">Scans</router-link>
       <router-link to="/findings" @click="go">Findings</router-link>
       <router-link to="/templates" @click="go">Templates</router-link>
+      <router-link to="/workflows/new" @click="go">Build workflow</router-link>
       <router-link to="/scanners" @click="go">Scanners</router-link>
       <router-link to="/activity" @click="go">Activity<span v-if="unseen" class="navbadge">{{ unseen > 99 ? '99+' : unseen }}</span></router-link>
       <router-link v-if="isAdmin()" to="/llm-profiles" @click="go">LLM Profiles</router-link>

@@ -31,12 +31,16 @@ _RETRY_STATUS = {429, 500, 502, 503, 504}
 # per-model price table (list prices), overridable per run with BOXCUTTER_PRICE_IN / BOXCUTTER_PRICE_OUT
 # (USD per 1M tokens) - a gateway/Bedrock contract rate differs from list, but the tokens don't.
 _USAGE_LOCK = threading.Lock()
-_USAGE: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0, "by_model": {}}
+_USAGE: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0,
+                "gateway_cost_usd": 0.0, "cost_calls": 0, "by_model": {}}
 
-# USD per 1,000,000 tokens, (input, output). Matched by substring against the model id (so
-# 'bedrock/eu.anthropic.claude-opus-4-8' matches 'opus'). Best-effort list prices; override via env.
+# USD per 1,000,000 tokens, (input, output). This is only a FALLBACK: when the gateway reports the real
+# cost of a call (LiteLLM / SecureForge do - see _extract_cost) we bank that EXACT figure instead, so the
+# table only matters for providers/deployments that don't. Matched by substring against the model id (so
+# 'bedrock/eu.anthropic.claude-opus-4-8' matches 'opus'). Current-generation list prices; override via env.
+# NB: all shipping Claude Opus (4.6/4.7/4.8/5) is $5/$25 - NOT the retired Opus-3 $15/$75.
 _PRICES = {
-    "opus": (15.0, 75.0), "sonnet": (3.0, 15.0), "haiku": (0.80, 4.0),
+    "opus": (5.0, 25.0), "sonnet": (3.0, 15.0), "haiku": (1.0, 5.0),
     "gpt-5": (1.25, 10.0), "gpt-4o": (2.50, 10.0), "gpt-4": (10.0, 30.0),
     "o1": (15.0, 60.0), "o3": (2.0, 8.0), "o4": (2.0, 8.0),
 }
@@ -46,13 +50,16 @@ _DEFAULT_PRICE = (3.0, 15.0)
 def reset_usage() -> None:
     """Zero the ledger - call once at the start of a run so counts reflect only that run."""
     with _USAGE_LOCK:
-        _USAGE.update(prompt_tokens=0, completion_tokens=0, total_tokens=0, calls=0)
+        _USAGE.update(prompt_tokens=0, completion_tokens=0, total_tokens=0, calls=0,
+                      gateway_cost_usd=0.0, cost_calls=0)
         _USAGE["by_model"] = {}
 
 
-def _record_usage(model: str, usage) -> None:
+def _record_usage(model: str, usage, cost=None) -> None:
     """Accumulate one response's token usage (OpenAI shape: prompt/completion_tokens; Anthropic shape:
-    input/output_tokens). Best-effort and never raises - accounting must not break a scan."""
+    input/output_tokens). `cost`, when the gateway reports it (the EXACT USD for this one call - e.g.
+    LiteLLM's x-litellm-response-cost), is summed separately so usage_cost() can report the real figure
+    rather than a list-price estimate. Best-effort and never raises - accounting must not break a scan."""
     if not isinstance(usage, dict):
         return
     try:
@@ -61,16 +68,55 @@ def _record_usage(model: str, usage) -> None:
     except (TypeError, ValueError):
         return
     tt = pt + ct
+    try:
+        c = float(cost) if cost is not None else None
+    except (TypeError, ValueError):
+        c = None
     with _USAGE_LOCK:
         _USAGE["prompt_tokens"] += pt
         _USAGE["completion_tokens"] += ct
         _USAGE["total_tokens"] += tt
         _USAGE["calls"] += 1
+        if c is not None:
+            _USAGE["gateway_cost_usd"] += c
+            _USAGE["cost_calls"] += 1
         m = _USAGE["by_model"].setdefault(model or "?",
-                                          {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0})
+                                          {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0,
+                                           "gateway_cost_usd": 0.0, "cost_calls": 0})
         m["prompt_tokens"] += pt
         m["completion_tokens"] += ct
         m["calls"] += 1
+        if c is not None:
+            m["gateway_cost_usd"] += c
+            m["cost_calls"] += 1
+
+
+def _extract_cost(response, body):
+    """Best-effort EXACT USD cost for one call, as reported by the gateway. A LiteLLM proxy (which is what
+    SecureForge fronts) computes the real cost per request and returns it on the `x-litellm-response-cost`
+    header; some deployments also echo it in the body (`_hidden_params.response_cost`, or `usage.cost`).
+    We read whichever is present so the reported spend is the gateway's own number, not our list-price
+    guess. Returns a float USD, or None when the gateway didn't report one (then usage_cost() falls back
+    to the table). Never raises - a cost read must not break a scan."""
+    try:
+        h = getattr(response, "headers", None)
+        v = h.get("x-litellm-response-cost") if h is not None else None
+        if v not in (None, ""):
+            return float(v)
+    except (TypeError, ValueError, AttributeError):
+        pass
+    try:
+        if isinstance(body, dict):
+            hp = body.get("_hidden_params")
+            v = hp.get("response_cost") if isinstance(hp, dict) else None
+            if v is None:
+                u = body.get("usage")
+                v = u.get("cost") if isinstance(u, dict) else None
+            if v is not None:
+                return float(v)
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return None
 
 
 def _price_for(model: str) -> tuple[float, float]:
@@ -94,13 +140,25 @@ def usage_totals() -> dict:
 
 
 def usage_cost() -> tuple[float, dict]:
-    """(estimated_usd, totals_snapshot). Cost is summed per-model so a run mixing models prices each correctly.
-    Set BOXCUTTER_PRICE_IN/OUT to your gateway's real rate for an exact figure."""
+    """(usd, totals_snapshot). Priced per model: when the gateway reported an exact cost for EVERY call to a
+    model (LiteLLM / SecureForge - see _extract_cost), that model's spend is the gateway's own sum; otherwise
+    it falls back to the list-price table (BOXCUTTER_PRICE_IN/OUT overrides that). A mixed run prices each
+    model by whichever source it has. tot['cost_source'] tells you which won: 'gateway' (the whole figure is
+    exact), 'table' (no gateway cost seen - a list-price estimate), or 'mixed' (some of each)."""
     tot = usage_totals()
     cost = 0.0
+    exact_models = priced_models = 0
     for model, u in tot["by_model"].items():
-        pin, pout = _price_for(model)
-        cost += u["prompt_tokens"] / 1_000_000 * pin + u["completion_tokens"] / 1_000_000 * pout
+        priced_models += 1
+        calls, cost_calls = u.get("calls", 0), u.get("cost_calls", 0)
+        if calls and cost_calls == calls:                       # gateway reported every call - exact
+            cost += u.get("gateway_cost_usd", 0.0)
+            exact_models += 1
+        else:                                                   # list-price fallback
+            pin, pout = _price_for(model)
+            cost += u["prompt_tokens"] / 1_000_000 * pin + u["completion_tokens"] / 1_000_000 * pout
+    tot["cost_source"] = ("gateway" if priced_models and exact_models == priced_models
+                          else "table" if exact_models == 0 else "mixed")
     tot["estimated_usd"] = round(cost, 4)
     return round(cost, 4), tot
 
@@ -211,8 +269,9 @@ class Anthropic(_Provider):
                 "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["schema"]} for t in tools]}
         # Model-agnostic: NO native-thinking budget param. The agent's visible narration is captured/streamed
         # in parse(); we send the SAME request shape to every model, so none can 400 on a reasoning param.
-        resp = _post(self.api, json=body, timeout=180, headers=self._headers()).json()
-        _record_usage(self.model, resp.get("usage"))
+        r = _post(self.api, json=body, timeout=180, headers=self._headers())
+        resp = r.json()
+        _record_usage(self.model, resp.get("usage"), _extract_cost(r, resp))
         return resp
 
     def parse(self, resp):
@@ -289,14 +348,15 @@ class OpenAI(_Provider):
         if self._force_reasoning_none:
             body["reasoning_effort"] = "none"
         try:
-            resp = _post(self.api, json=body, timeout=180, headers=self._headers()).json()
+            r = _post(self.api, json=body, timeout=180, headers=self._headers())
         except requests.HTTPError as e:
             if self._force_reasoning_none or not _wants_reasoning_none(e):
                 raise
             self._force_reasoning_none = True
             body["reasoning_effort"] = "none"
-            resp = _post(self.api, json=body, timeout=180, headers=self._headers()).json()
-        _record_usage(self.model, resp.get("usage"))
+            r = _post(self.api, json=body, timeout=180, headers=self._headers())
+        resp = r.json()
+        _record_usage(self.model, resp.get("usage"), _extract_cost(r, resp))
         return resp
 
     def parse(self, resp):
@@ -343,16 +403,17 @@ class OpenAI(_Provider):
             body["max_completion_tokens" if _is_reasoning_model(self.model) else "max_tokens"] = max_tokens
 
         def _call():
-            return _post(self.api, json=body, timeout=120, headers=self._headers()).json()
+            return _post(self.api, json=body, timeout=120, headers=self._headers())
         try:
-            resp = _call()
+            r = _call()
         except requests.HTTPError as e:
             if self._force_reasoning_none or not _wants_reasoning_none(e):
                 raise
             self._force_reasoning_none = True
             body["reasoning_effort"] = "none"
-            resp = _call()
-        _record_usage(self.model, resp.get("usage"))
+            r = _call()
+        resp = r.json()
+        _record_usage(self.model, resp.get("usage"), _extract_cost(r, resp))
         msg = resp["choices"][0]["message"]
         text = msg.get("content") or ""
         self._capture(text, msg.get("reasoning_content") or msg.get("reasoning") or "", [])

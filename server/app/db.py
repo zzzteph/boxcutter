@@ -28,6 +28,10 @@ _ADDED_COLUMNS = [
     ("runner", "internal", "BOOLEAN", "0"),
     ("runner", "engine_version", "VARCHAR(64)", "''"),
     ("job", "needs_model", "VARCHAR(120)", "''"),
+    # pipelines (staged, fan-out scans) — see docs/pipelines-design.md
+    ("target", "stage_no", "INTEGER", "0"),
+    ("job", "stage_no", "INTEGER", "0"),
+    ("scanitem", "stage_no", "INTEGER", "0"),
 ]
 
 
