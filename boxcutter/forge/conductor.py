@@ -14,9 +14,13 @@ no orca is available (--mock / no key), a deterministic default plan runs instea
 so forge always produces findings.
 
   boxcutter forge example.com                       # console agent, whole domain
+  boxcutter forge example.com --orca claude-code    # internal, authenticated Claude Code CLI (no API key)
   boxcutter forge https://app.example.com --mock    # offline default plan, one site
   boxcutter forge example.com --provider litellm --model openai/gpt-5
   boxcutter forge example.com --orca-cmd "codex exec --model {model} {prompt}"
+
+  export BOXCUTTER_FORGE_ORCA=claude-code           # preconfigure the backend once (then no flag)
+  boxcutter forge example.com
 """
 
 from __future__ import annotations

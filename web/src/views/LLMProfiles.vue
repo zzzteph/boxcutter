@@ -3,7 +3,7 @@ import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { api, isAdmin } from '../api'
 import Select from '../components/Select.vue'
 
-const PROVIDERS = ['anthropic', 'openai', 'litellm', 'ollama']
+const PROVIDERS = ['anthropic', 'openai', 'litellm', 'ollama', 'claude-code']
 const profiles = ref([])
 const admin = isAdmin()
 const err = ref('')
@@ -45,6 +45,10 @@ watch(() => form.provider, (p) => {
     const b = (ollama.value.base_url || 'http://localhost:11434').replace(/\/$/, '')
     form.proxy_url = b + '/v1'
     if (!form.model && installed.value.length) form.model = installed.value[0]
+  } else if (p === 'claude-code') {
+    // No API key: rides the runner's own authenticated Claude Code login (CLAUDE_CODE_OAUTH_TOKEN / `claude`).
+    form.api_key = ''
+    form.proxy_url = ''
   }
 })
 
@@ -136,13 +140,16 @@ onUnmounted(() => { if (poll) clearInterval(poll) })
                :placeholder="form.provider === 'ollama' ? 'download a model above first' : 'claude-sonnet-5'" />
       </div>
     </div>
-    <template v-if="form.provider !== 'ollama'">
+    <template v-if="form.provider !== 'ollama' && form.provider !== 'claude-code'">
       <label>Proxy URL (optional)</label>
       <input v-model="form.proxy_url" placeholder="https://llm-proxy.internal" />
       <label>API key (write-only)</label>
       <input v-model="form.api_key" type="password" placeholder="sk-…" autocomplete="new-password" />
     </template>
-    <p v-else class="muted" style="font-size:13px">Ollama needs no API key. Requests go to <code>{{ form.proxy_url }}</code>.</p>
+    <p v-else-if="form.provider === 'ollama'" class="muted" style="font-size:13px">Ollama needs no API key. Requests go to <code>{{ form.proxy_url }}</code>.</p>
+    <p v-else class="muted" style="font-size:13px">No API key: rides the runner's own authenticated Claude Code login
+      (billed to your Claude subscription). Authorize each runner once — <code>claude setup-token</code> (set
+      <code>CLAUDE_CODE_OAUTH_TOKEN</code>) or <code>claude</code> → <code>/login</code>; it persists on the runner's data volume.</p>
     <p v-if="err" style="color:var(--bad)">{{ err }}</p>
     <button class="primary" style="margin-top:12px" :disabled="!form.name || !form.provider" @click="create">Create profile</button>
   </div>
@@ -160,7 +167,7 @@ onUnmounted(() => { if (poll) clearInterval(poll) })
         <td data-label="">
           <div class="row" style="gap:6px">
             <button @click="testProfile(p)">{{ testResult[p.id]?.testing ? 'Testing…' : 'Test' }}</button>
-            <button v-if="admin && p.provider !== 'ollama'" @click="setKey(p)">{{ p.has_key ? 'Replace key' : 'Set key' }}</button>
+            <button v-if="admin && p.provider !== 'ollama' && p.provider !== 'claude-code'" @click="setKey(p)">{{ p.has_key ? 'Replace key' : 'Set key' }}</button>
             <button v-if="admin" class="danger ghost" @click="del(p.id)">Delete</button>
           </div>
           <div v-if="testResult[p.id] && !testResult[p.id].testing" style="font-size:12px;margin-top:4px"

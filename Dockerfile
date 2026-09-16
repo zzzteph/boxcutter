@@ -96,6 +96,24 @@ RUN apk add --no-cache nodejs npm && \
 COPY docker/crack.js /usr/share/crack-js/crack.js
 ENV NODE_PATH=/usr/share/crack-js/node_modules
 
+# Internal, authenticated Claude Code CLI - the `--orca claude-code` backend for `boxcutter forge` (the same
+# backend security-forge runs by default). node+npm are already present (crack-js above), so this is just a
+# global npm install that puts `claude` on PATH. NO API key is baked in: you AUTHORIZE ONCE inside the running
+# container - `docker exec -it <container> claude` then `/login` - and the session PERSISTS because
+# CLAUDE_CONFIG_DIR lives on the /data volume (mount a named volume to keep it across restarts). This image is
+# Alpine/musl but Claude Code targets glibc, so we add gcompat (glibc shim) + a musl-native ripgrep and set
+# USE_BUILTIN_RIPGREP=0 so it uses that instead of its bundled glibc build. Gate off with
+# `--build-arg INSTALL_CLAUDE_CODE=false` to keep the image lean.
+ARG INSTALL_CLAUDE_CODE=true
+ENV CLAUDE_CONFIG_DIR=/data/.claude \
+    USE_BUILTIN_RIPGREP=0
+RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ]; then \
+        apk add --no-cache ripgrep gcompat && \
+        npm install -g --no-audit --no-fund @anthropic-ai/claude-code && \
+        npm cache clean --force && \
+        claude --version ; \
+    fi
+
 # --- web server mode (`boxcutter serve`): FastAPI API + the built SPA + a built-in agent ---
 # Server deps go in a DEDICATED venv so the lean engine's system-python imports stay untouched (the base marks
 # system python externally-managed, PEP 668). `boxcutter serve` execs this venv for uvicorn; the engine and

@@ -24,8 +24,19 @@ not a byproduct.
 
 This is a FULL-IMAGE tool (needs chromium + ZAP); it degrades gracefully where they are absent.
 
+joseph's ONE brain is a pluggable provider, chosen like security-forge picks a backend and preconfigurable via
+env (BOXCUTTER_AI_PROVIDER / BOXCUTTER_AI_MODEL / BOXCUTTER_AI_LLM_PROXY_URL):
+
+  # via LiteLLM (front any provider through your gateway - security-forge's `litellm` backend):
   boxcutter ai joseph https://app.example.com --provider litellm --model openai/gpt-5 --api-key ... \
       --llm-proxy-url ... --creds admin:pass --max-rounds 4 --out-dir ./joseph_app
+
+  # via your internal, authenticated Claude Code login - NO API key (security-forge's `claude-code` backend):
+  boxcutter ai joseph https://app.example.com --provider claude-code --creds admin:pass
+
+  # preconfigure the backend once, then never pass the flags:
+  export BOXCUTTER_AI_PROVIDER=claude-code
+  boxcutter ai joseph https://app.example.com --creds admin:pass
 """
 
 from __future__ import annotations

@@ -3,6 +3,7 @@ at job time, and never returned to any client."""
 from __future__ import annotations
 
 import json
+import os
 import secrets
 
 import requests
@@ -152,7 +153,23 @@ def _test_llm(provider: str, model: str | None, key: str, proxy_url: str | None)
                 base = base[:-3]
             requests.get(base + "/api/tags", timeout=6).raise_for_status()
             return True, "reachable"
-        if provider == "anthropic":
+        if provider == "claude-code":
+            # No API key: the login lives on the RUNNER (its CLAUDE_CODE_OAUTH_TOKEN / `claude` /login), which
+            # the server usually can't see. Verify only if the SERVER itself has a token in its env; otherwise
+            # say so plainly rather than fail a correctly-configured profile.
+            token = key or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+            if not token:
+                return True, "uses the runner's Claude Code login (not verifiable from the server)"
+            base = (proxy_url or "https://api.anthropic.com").rstrip("/")
+            r = requests.post(base + "/v1/messages", timeout=25,
+                              headers={"Authorization": f"Bearer {token}", "anthropic-version": "2023-06-01",
+                                       "anthropic-beta": os.environ.get("ANTHROPIC_BETA", "oauth-2025-04-20"),
+                                       "content-type": "application/json"},
+                              json={"model": model or "claude-sonnet-4-6", "max_tokens": 1,
+                                    "system": [{"type": "text",
+                                                "text": "You are Claude Code, Anthropic's official CLI for Claude."}],
+                                    "messages": [{"role": "user", "content": "ping"}]})
+        elif provider == "anthropic":
             base = (proxy_url or "https://api.anthropic.com").rstrip("/")
             r = requests.post(base + "/v1/messages", timeout=25,
                               headers={"x-api-key": key, "anthropic-version": "2023-06-01",
@@ -181,7 +198,7 @@ def test_llm_profile(pid: int, admin: User = Depends(require_admin), session: Se
     p = session.get(LLMProfile, pid)
     if not p:
         raise HTTPException(404)
-    if p.provider.lower() != "ollama" and not p.api_key_secret:
+    if p.provider.lower() not in ("ollama", "claude-code") and not p.api_key_secret:
         return {"ok": False, "error": "no API key set on this profile"}
     ok, detail = _test_llm(p.provider, p.model, p.api_key_secret, p.proxy_url)
     return {"ok": ok, "error": "" if ok else detail, "detail": detail}

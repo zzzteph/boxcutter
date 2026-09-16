@@ -15,14 +15,18 @@ forge speaks the same syntax vera does - the difference is only WHO answers.
 Which backend answers is chosen exactly the way security-forge's resolve_backend
 does (precedence high -> low):
 
-  * --mock                         deterministic, offline, no network       [MockJudge]
+  * --mock                         deterministic, offline, no network       [MockOrca]
+  * --orca claude-code             the internal, already-authenticated Claude Code CLI
+                                   (no API key - rides your local `claude` login), the
+                                   same as security-forge's default backend  [ClaudeCodeOrca]
   * --provider litellm|anthropic|openai|ollama  (or --api-key / --llm-proxy-url)
                                    the native provider layer, boxcutter/ai/provider.py;
-                                   litellm fronts any gateway                [ProviderJudge]
-  * --orca-cmd "<template>"       that exact console agent CLI, {model}/{prompt}   [CliJudge]
+                                   litellm fronts any gateway                [ProviderOrca]
+  * --orca-cmd "<template>"       that exact console agent CLI, {model}/{prompt}   [CliOrca]
   * (no backend args)              a console agent CLI already on PATH, tried in
-                                   order: claude, deepseek, codex - one-shot, JSON  [CliJudge]
-  * (nothing available)            falls back to MockJudge with a printed reason
+                                   order: claude, deepseek, codex - one-shot, JSON  [CliOrca]
+                                   (a detected `claude` runs through ClaudeCodeOrca)
+  * (nothing available)            falls back to MockOrca with a printed reason
 
 None of these route to the internal bob/caleb/travis agents.
 """
@@ -74,6 +78,25 @@ def _detect_console_agent(model: str):
         if shutil.which(binary):
             return _console_template(binary, model), output, binary
     return None
+
+
+def _normalize_claude_model(m: str) -> str:
+    """Friendly model name -> the id the Claude Code CLI accepts (mirrors
+    security-forge's normalize_model). Passes through the bare aliases
+    (opus/sonnet/haiku/default) and anything already starting 'claude-'; 'opus4.8'
+    -> 'claude-opus-4-8', 'opus5[1m]' -> 'claude-opus-5[1m]'. Unknown shapes pass
+    through unchanged, so an exact CLI model id is never mangled."""
+    s = (m or "").strip()
+    if not s:
+        return s
+    low = s.lower().replace(" ", "")
+    if low in {"opus", "sonnet", "haiku", "default"} or low.startswith("claude-"):
+        return s
+    mt = re.match(r"^(opus|sonnet|haiku|fable)[-_.]?(\d+(?:\.\d+)?)?(\[1m\])?$", low)
+    if mt:
+        fam, ver, ctx = mt.group(1), mt.group(2), mt.group(3) or ""
+        return fam + ctx if not ver else f"claude-{fam}-{ver.replace('.', '-')}{ctx}"
+    return s
 
 
 def _extract_json(text: str):
@@ -148,6 +171,8 @@ class CliOrca(Orca):
     optional `{model}` placeholders, substituted token-wise (the prompt stays ONE
     argv element - no shell) exactly like security-forge's cli-adapter backend."""
 
+    env: dict | None = None                  # extra subprocess env (a subclass may set it, e.g. IS_SANDBOX)
+
     def __init__(self, template: str, model: str = "", output: str = "text",
                  name: str = "cli", timeout: int = 180) -> None:
         self.template = template
@@ -173,12 +198,38 @@ class CliOrca(Orca):
 
     def decide(self, task: str, context: dict, *, schema_hint: str = "") -> dict:
         prompt = _ORCA_SYSTEM + "\n\n" + _prompt(task, context, schema_hint)
+        env = {**os.environ, **self.env} if self.env else None
         try:
             proc = subprocess.run(self.build_command(prompt), capture_output=True,
-                                  text=True, timeout=self.timeout)
+                                  text=True, timeout=self.timeout, env=env)
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
             return {"_error": f"{self.name} judge failed: {exc}"}
         return _extract_json(proc.stdout or "")
+
+
+class ClaudeCodeOrca(CliOrca):
+    """The internal, already-authenticated Claude Code CLI as the orca. No API key:
+    it rides your local `claude` login/session (the same subscription Claude Code
+    itself runs on), so the forge orchestrator's judgment goes through Claude without
+    any provider credentials. Mirrors security-forge's default `claude-code` backend -
+
+        claude -p <prompt> --dangerously-skip-permissions [--model <id>]
+
+    with IS_SANDBOX=1 so it runs headless as root inside the scan container (Claude
+    Code refuses --dangerously-skip-permissions under root unless it believes it is
+    sandboxed). A judgment call uses no tools; `-p` prints the final text, read as JSON."""
+
+    def __init__(self, claude_bin: str = "claude", model: str = "", timeout: int = 180) -> None:
+        super().__init__("", _normalize_claude_model(model), output="text",
+                         name="claude-code", timeout=timeout)
+        self.claude = claude_bin or "claude"
+        self.env = {"IS_SANDBOX": "1"}
+
+    def build_command(self, prompt: str) -> list[str]:
+        cmd = [self.claude, "-p", prompt, "--dangerously-skip-permissions"]
+        if self.model:
+            cmd += ["--model", self.model]
+        return cmd
 
 
 class MockOrca(Orca):
@@ -206,9 +257,21 @@ def _provider_requested(args) -> bool:
 
 def resolve_orca(args) -> Orca:
     """Pick the judge backend. Precedence mirrors security-forge's resolve_backend:
-    --mock > explicit provider/API > explicit --orca-cmd > a detected console agent
-    (claude/deepseek/codex) > MockJudge fallback."""
+    --mock > explicit --orca <backend> > explicit provider/API > explicit --orca-cmd >
+    a detected console agent (claude/deepseek/codex) > MockOrca fallback.
+
+    An explicit --orca selects a NAMED built-in backend; it can be PRECONFIGURED (so
+    you never type the flag) via BOXCUTTER_FORGE_ORCA, exactly as security-forge's
+    config.yaml `agent.backend` preconfigures its default. `claude-code` runs the
+    internal, already-authenticated Claude Code CLI (no API key)."""
     if getattr(args, "mock", False):
+        return MockOrca()
+
+    model = getattr(args, "model", None) or ""
+    backend = (getattr(args, "orca_backend", None) or "auto").strip().lower()
+    if backend in ("claude-code", "claude", "claude_code"):
+        return ClaudeCodeOrca(getattr(args, "claude_bin", None) or "claude", model)
+    if backend == "mock":
         return MockOrca()
 
     if _provider_requested(args):
@@ -219,7 +282,6 @@ def resolve_orca(args) -> Orca:
                              getattr(args, "base_url", None))
         return ProviderOrca(prov)
 
-    model = getattr(args, "model", None) or ""
     if getattr(args, "orca_cmd", None):
         return CliOrca(args.orca_cmd, model, getattr(args, "orca_output", "text"),
                         name="orca-cmd")
@@ -227,22 +289,44 @@ def resolve_orca(args) -> Orca:
     detected = _detect_console_agent(model)
     if detected:
         template, output, binary = detected
+        if binary == "claude":                    # the detected internal claude: run it robustly
+            return ClaudeCodeOrca(getattr(args, "claude_bin", None) or "claude", model)
         return CliOrca(template, model, output, name=binary)
 
     return MockOrca(reason="no console agent (claude/deepseek/codex) on PATH and no "
-                            "--provider/--orca-cmd given; using the offline mock judge")
+                            "--orca/--provider/--orca-cmd given; using the offline mock judge")
 
 
 def add_orca_args(parser) -> None:
     """The forge's orca-backend flags. `--provider` defaults to None (not anthropic)
-    so 'no backend args' resolves to a console agent, per the spec, not to a provider."""
+    so 'no backend args' resolves to a console agent, per the spec, not to a provider.
+
+    PRECONFIGURATION (security-forge preconfigures its backend in config.yaml's
+    `agent:` block; boxcutter's equivalent is env vars, read here as the flag
+    DEFAULTS so a preconfigured value needs no flag at all):
+      * BOXCUTTER_FORGE_ORCA   -> --orca       (e.g. `claude-code`)
+      * BOXCUTTER_ORCA_MODEL   -> --model
+      * CLAUDE_BIN             -> --claude-bin  (same env name security-forge uses)"""
     from ..ai.provider import PROVIDERS
+    parser.add_argument("--orca", dest="orca_backend",
+                        default=os.environ.get("BOXCUTTER_FORGE_ORCA", "auto"),
+                        choices=["auto", "claude-code", "mock"],
+                        help="Which backend answers the judgment calls: 'claude-code' uses your "
+                             "internal, already-authenticated Claude Code CLI (no API key - it "
+                             "rides your local `claude` login, like security-forge's default "
+                             "backend); 'mock' is the offline judge; 'auto' (default) uses "
+                             "--provider/--orca-cmd if given, else a console agent on PATH. "
+                             "Preconfigure with BOXCUTTER_FORGE_ORCA.")
+    parser.add_argument("--claude-bin", dest="claude_bin",
+                        default=os.environ.get("CLAUDE_BIN") or None, metavar="PATH",
+                        help="Path to the Claude Code CLI for --orca claude-code "
+                             "(default: claude on PATH; env CLAUDE_BIN).")
     parser.add_argument("--provider", default=None, choices=list(PROVIDERS),
                         help="Answer judgment calls with this provider directly "
                              "(litellm fronts any gateway) instead of a console agent CLI.")
-    parser.add_argument("--model", default=None,
+    parser.add_argument("--model", default=os.environ.get("BOXCUTTER_ORCA_MODEL") or None,
                         help="Model id: fills {model} in a console/--orca-cmd template, "
-                             "or the provider's model.")
+                             "or the provider's model (env BOXCUTTER_ORCA_MODEL).")
     parser.add_argument("--api-key", dest="api_key", default=None,
                         help="Provider API key (else the provider's env var).")
     parser.add_argument("--llm-proxy-url", dest="base_url", default=None, metavar="URL",

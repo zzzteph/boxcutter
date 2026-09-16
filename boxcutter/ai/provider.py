@@ -264,8 +264,14 @@ class Anthropic(_Provider):
     def _headers(self):
         return {"x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
 
+    def _prep_system(self, system):
+        """Hook: last chance to transform the system prompt before it goes on the wire. The API-key path sends
+        it unchanged; the Claude Code (OAuth/subscription) subclass overrides this to prepend the identity block
+        the subscription API requires, without touching send()/chat()."""
+        return system
+
     def send(self, system, messages, tools):
-        body = {"model": self.model, "max_tokens": 8192, "system": system, "messages": messages,
+        body = {"model": self.model, "max_tokens": 8192, "system": self._prep_system(system), "messages": messages,
                 "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["schema"]} for t in tools]}
         # Model-agnostic: NO native-thinking budget param. The agent's visible narration is captured/streamed
         # in parse(); we send the SAME request shape to every model, so none can 400 on a reasoning param.
@@ -309,7 +315,7 @@ class Anthropic(_Provider):
 
     def chat(self, system, user, max_tokens=None):
         # Anthropic requires max_tokens; None means "use a generous budget" (no artificial cap).
-        body = {"model": self.model, "max_tokens": max_tokens or 8192, "system": system,
+        body = {"model": self.model, "max_tokens": max_tokens or 8192, "system": self._prep_system(system),
                 "messages": [{"role": "user", "content": user}]}
         # Model-agnostic: no thinking-budget param (see send()).
         resp = _post(self.api, json=body, timeout=120, headers=self._headers()).json()
@@ -319,6 +325,68 @@ class Anthropic(_Provider):
         reasoning = "".join(b.get("thinking", "") for b in content if b.get("type") == "thinking")
         self._capture(text, reasoning, [])
         return text
+
+
+def _discover_claude_code_token() -> str | None:
+    """Find the local Claude Code OAuth token so the `claude-code` provider needs NO API key - it rides the
+    same subscription login `claude` itself uses. Order: the CLAUDE_CODE_OAUTH_TOKEN env (a long-lived token
+    from `claude setup-token`, the supported headless path) > the token `claude` stores after an interactive
+    /login, under CLAUDE_CONFIG_DIR (or ~/.claude, ~/.config/claude) as .credentials.json
+    (claudeAiOauth.accessToken). Returns None if no login is present (then the provider raises a clear hint)."""
+    tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if tok:
+        return tok.strip()
+    home = os.path.expanduser("~")
+    dirs = [os.environ.get("CLAUDE_CONFIG_DIR"), os.path.join(home, ".claude"),
+            os.path.join(home, ".config", "claude")]
+    for d in dirs:
+        if not d:
+            continue
+        try:
+            with open(os.path.join(d, ".credentials.json"), encoding="utf-8") as fh:
+                oa = (json.load(fh) or {}).get("claudeAiOauth") or {}
+            tok = oa.get("accessToken")
+            if tok:
+                return str(tok).strip()
+        except (OSError, ValueError, TypeError):
+            continue
+    return None
+
+
+class ClaudeCode(Anthropic):
+    """Claude via your LOCAL, already-authenticated Claude Code login - NO API key. It calls the SAME Anthropic
+    Messages API as the `anthropic` provider, so an agent's native tool-use loop, analyst lanes and reasoning
+    stream are byte-for-byte unchanged; the ONLY difference is auth: a Bearer OAuth token (from
+    `claude setup-token` / CLAUDE_CODE_OAUTH_TOKEN, or the token `claude` stores after /login) plus the oauth
+    beta header, and the system prompt is prefixed with the Claude Code identity block the subscription API
+    requires. Spend is billed to your Claude subscription, not a metered key. This is boxcutter's native
+    equivalent of security-forge's claude-code backend:  `boxcutter ai joseph <t> --provider claude-code`."""
+
+    default_model, env = "claude-sonnet-4-6", "CLAUDE_CODE_OAUTH_TOKEN"
+    requires_key = False
+    _IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+    _OAUTH_BETA = "oauth-2025-04-20"
+
+    def __init__(self, model, key, base_url=None, reasoning=0):
+        super().__init__(model, key or _discover_claude_code_token(), base_url, reasoning)
+
+    def _headers(self):
+        if not self.key:
+            raise RuntimeError(
+                "provider claude-code: no Claude Code login found. Run `claude` then /login (or "
+                "`claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN). No API key is needed - it uses your "
+                "Claude subscription.")
+        beta = os.environ.get("ANTHROPIC_BETA", self._OAUTH_BETA)
+        return {"Authorization": f"Bearer {self.key}", "anthropic-version": "2023-06-01",
+                "anthropic-beta": beta, "content-type": "application/json"}
+
+    def _prep_system(self, system):
+        # The subscription/OAuth API requires the FIRST system block to be the Claude Code identity; the agent's
+        # own system prompt follows as a second block so its instructions are preserved verbatim.
+        ident = {"type": "text", "text": self._IDENTITY}
+        if isinstance(system, list):
+            return [ident, *system]
+        return [ident, {"type": "text", "text": system or ""}]
 
 
 class OpenAI(_Provider):
@@ -439,7 +507,8 @@ class Ollama(OpenAI):
         super().__init__(model, key or "ollama", base_url, reasoning)   # Ollama ignores the bearer token
 
 
-PROVIDERS = {"anthropic": Anthropic, "openai": OpenAI, "litellm": LiteLLM, "ollama": Ollama}
+PROVIDERS = {"anthropic": Anthropic, "openai": OpenAI, "litellm": LiteLLM, "ollama": Ollama,
+             "claude-code": ClaudeCode}
 
 
 # Reasoning-capture context. Lets a conductor collect reasoning from the agents it drives WITHOUT changing
@@ -489,16 +558,26 @@ def add_ai_provider_args(parser) -> None:
     true argparse group-level flag is clobbered by the subparser's default, and the bare-name sugar
     (`boxcutter logio ...`) puts flags AFTER the agent name - so a shared adder, not a group argument, is the
     correct way to share them."""
-    parser.add_argument("--provider", default="anthropic", choices=list(PROVIDERS),
-                        help="LLM provider (default anthropic; 'ollama' runs a local model with no key; "
-                             "'litellm' fronts any provider via your gateway)")
-    parser.add_argument("--model", default=None, help="Model id (default: the provider's default)")
+    # The backend is PRECONFIGURABLE with env vars (boxcutter's equivalent of security-forge's config.yaml
+    # `agent.backend`/`agent.model`): the env values are the flag DEFAULTS, so a preconfigured provider/model/
+    # gateway needs no flag at all. An explicit flag still wins.
+    parser.add_argument("--provider", default=os.environ.get("BOXCUTTER_AI_PROVIDER", "anthropic"),
+                        choices=list(PROVIDERS),
+                        help="LLM provider (default anthropic; env BOXCUTTER_AI_PROVIDER). 'claude-code' rides "
+                             "your local, authenticated Claude Code login with NO API key (billed to your "
+                             "Claude subscription); 'litellm' fronts any provider via your gateway; 'ollama' "
+                             "runs a local model with no key.")
+    parser.add_argument("--model", default=os.environ.get("BOXCUTTER_AI_MODEL") or None,
+                        help="Model id (default: the provider's default; env BOXCUTTER_AI_MODEL)")
     parser.add_argument("--api-key", dest="api_key", default=None,
-                        help="LLM API key (or set the provider's env var, e.g. ANTHROPIC_API_KEY)")
+                        help="LLM API key (or set the provider's env var, e.g. ANTHROPIC_API_KEY). Not needed "
+                             "for --provider claude-code (uses your Claude Code login) or ollama.")
     # The LLM endpoint (a LiteLLM/OpenAI gateway or a direct API base). Named --llm-proxy-url, not --base-url,
     # so it can't be confused with the TARGET's base URL; the internal attribute stays `base_url` (the SDK term).
-    parser.add_argument("--llm-proxy-url", dest="base_url", default=None, metavar="URL",
-                        help="LLM endpoint / gateway URL (e.g. a LiteLLM or OpenAI-compatible proxy)")
+    parser.add_argument("--llm-proxy-url", dest="base_url",
+                        default=os.environ.get("BOXCUTTER_AI_LLM_PROXY_URL") or None, metavar="URL",
+                        help="LLM endpoint / gateway URL (e.g. a LiteLLM or OpenAI-compatible proxy; "
+                             "env BOXCUTTER_AI_LLM_PROXY_URL)")
 
 
 def add_agent_args(parser, *, max_steps: int, context: bool = True) -> None:

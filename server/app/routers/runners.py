@@ -27,7 +27,11 @@ from ..security import (current_runner, current_user, hash_token, require_admin,
 
 router = APIRouter(tags=["runners"])
 
-_ENV_FOR = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "litellm": "LITELLM_API_KEY"}
+# provider -> the env var its api key/token lands in on the runner. `claude-code` needs NO key by default (each
+# runner uses its own authenticated Claude Code login); this entry only matters if an admin CHOOSES to store the
+# OAuth token as the profile secret, in which case it's delivered as CLAUDE_CODE_OAUTH_TOKEN.
+_ENV_FOR = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "litellm": "LITELLM_API_KEY",
+            "claude-code": "CLAUDE_CODE_OAUTH_TOKEN"}
 
 
 def _kv_to_argv(items, default_prefix="--") -> list:

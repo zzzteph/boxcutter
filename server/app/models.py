@@ -46,7 +46,7 @@ class ApiKey(SQLModel, table=True):
 class LLMProfile(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True, unique=True, max_length=150)
-    provider: str = Field(max_length=40)                      # anthropic | openai | litellm
+    provider: str = Field(max_length=40)                      # anthropic | openai | litellm | ollama | claude-code
     model: Optional[str] = Field(default=None, max_length=120)
     proxy_url: Optional[str] = Field(default=None, max_length=500)
     api_key_secret: str = _text("")                          # server-only, never serialized to the browser
