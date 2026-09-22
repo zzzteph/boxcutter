@@ -56,6 +56,29 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def discover_claude_code_token() -> str | None:
+    """The Claude Code OAuth token this server's claude-code runs actually ride, discovered the SAME way the
+    engine does: CLAUDE_CODE_OAUTH_TOKEN, else the token `claude` /login writes under CLAUDE_CONFIG_DIR as
+    .credentials.json (claudeAiOauth.accessToken). So a profile Test / the login status reflect what a real
+    operator run will use - not a blanket "works". None when there is no login on this server."""
+    tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if tok:
+        return tok.strip()
+    home = os.path.expanduser("~")
+    for d in (os.environ.get("CLAUDE_CONFIG_DIR"), os.path.join(home, ".claude"),
+              os.path.join(home, ".config", "claude")):
+        if not d:
+            continue
+        try:
+            with open(os.path.join(d, ".credentials.json"), encoding="utf-8") as fh:
+                oa = (json.load(fh) or {}).get("claudeAiOauth") or {}
+            if oa.get("accessToken"):
+                return str(oa["accessToken"]).strip()
+        except (OSError, ValueError, TypeError):
+            continue
+    return None
+
+
 def _engine_python() -> str:
     """A python that can run the LEAN engine (requests/pyyaml/websocket-client). NOT the server venv (which has
     the web deps but not the engine's), so we prefer the system python3 - which in the image carries the engine

@@ -154,12 +154,15 @@ def _test_llm(provider: str, model: str | None, key: str, proxy_url: str | None)
             requests.get(base + "/api/tags", timeout=6).raise_for_status()
             return True, "reachable"
         if provider == "claude-code":
-            # No API key: the login lives on the RUNNER (its CLAUDE_CODE_OAUTH_TOKEN / `claude` /login), which
-            # the server usually can't see. Verify only if the SERVER itself has a token in its env; otherwise
-            # say so plainly rather than fail a correctly-configured profile.
-            token = key or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+            # The claude-code login this server rides for operator runs lives HERE - CLAUDE_CODE_OAUTH_TOKEN, or
+            # the token `claude` /login wrote under CLAUDE_CONFIG_DIR. Discover it the SAME way the engine does
+            # and actually ping with it, so Test reflects whether a run will authenticate - not a blanket "works".
+            from .. import operator as _op
+            token = key or _op.discover_claude_code_token()
             if not token:
-                return True, "uses the runner's Claude Code login (not verifiable from the server)"
+                return False, ("not authenticated - no Claude Code login on this server. Click "
+                               "'Authorize in a console' on this profile and run /login (or set "
+                               "CLAUDE_CODE_OAUTH_TOKEN).")
             base = (proxy_url or "https://api.anthropic.com").rstrip("/")
             r = requests.post(base + "/v1/messages", timeout=25,
                               headers={"Authorization": f"Bearer {token}", "anthropic-version": "2023-06-01",

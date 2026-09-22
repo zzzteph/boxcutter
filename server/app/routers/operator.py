@@ -27,16 +27,12 @@ def _claude_code_login() -> dict:
     """Whether THIS container has an authenticated Claude Code login the `claude-code` provider can ride (no API
     key). Mirrors the engine's discovery: the CLAUDE_CODE_OAUTH_TOKEN env, else the token `claude` writes after
     /login under CLAUDE_CONFIG_DIR (which the image points at the /data volume so it survives restarts)."""
-    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        return {"logged_in": True, "source": "env CLAUDE_CODE_OAUTH_TOKEN"}
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
-    try:
-        with open(os.path.join(cfg, ".credentials.json"), encoding="utf-8") as fh:
-            oa = (json.load(fh) or {}).get("claudeAiOauth") or {}
-        if oa.get("accessToken"):
-            return {"logged_in": True, "source": os.path.join(cfg, ".credentials.json")}
-    except (OSError, ValueError, TypeError):
-        pass
+    tok = op.discover_claude_code_token()
+    if tok:
+        src = ("env CLAUDE_CODE_OAUTH_TOKEN" if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+               else os.path.join(cfg, ".credentials.json"))
+        return {"logged_in": True, "source": src}
     return {"logged_in": False, "config_dir": cfg}
 
 
