@@ -8,6 +8,8 @@ const router = useRouter()
 const runners = ref([])
 const newToken = ref('')
 const admin = isAdmin()
+const openId = ref(null)                       // which runner's job list is expanded
+function toggle(r) { openId.value = openId.value === r.id ? null : r.id }
 let timer = null
 
 async function load() { try { runners.value = await api.get('/runners') } catch (e) { /* transient */ } }
@@ -61,8 +63,13 @@ onUnmounted(() => clearInterval(timer))
   <table class="reflow rows">
     <thead><tr><th></th><th>Scanner</th><th>IP</th><th>Status</th><th>Slots</th><th>CPU</th><th>Memory</th><th>Boxcutter</th><th>Agent</th><th>Last beat</th></tr></thead>
     <tbody>
-      <tr v-for="r in runners" :key="r.id" @click="open(r)" style="cursor:pointer">
-        <td data-label=""><span class="dot" :class="r.status === 'disconnected' ? 'bad' : (r.status === 'busy' ? 'busy' : 'ok')"></span></td>
+      <template v-for="r in runners" :key="r.id">
+      <tr @click="open(r)" style="cursor:pointer">
+        <td data-label="">
+          <span class="dot" :class="r.status === 'disconnected' ? 'bad' : (r.status === 'busy' ? 'busy' : 'ok')"></span>
+          <button v-if="r.current && r.current.length" class="ghost sm fl-chev"
+                  :title="r.current.length + ' job(s) running'" @click.stop="toggle(r)">{{ openId === r.id ? '▾' : '▸' }} {{ r.current.length }}</button>
+        </td>
         <td data-label="Scanner"><b>{{ r.name || ('runner #' + r.id) }}</b>
           <span v-if="r.internal" class="tag sm" title="Built-in agent — can't be removed">built-in</span></td>
         <td data-label="IP"><code>{{ r.ip || '—' }}</code></td>
@@ -104,8 +111,31 @@ onUnmounted(() => clearInterval(timer))
           </div>
         </td>
       </tr>
+      <tr v-if="openId === r.id" class="detailrow">
+        <td :colspan="10">
+          <table class="reflow rows" style="margin:0">
+            <thead><tr><th>Scan</th><th>Asset</th><th>Tool</th><th>Status</th><th>Since</th></tr></thead>
+            <tbody>
+              <tr v-for="j in r.current" :key="j.id">
+                <td data-label="Scan"><a href="#" @click.prevent.stop="router.push('/scans/' + j.scan_id)">#{{ j.scan_id }}</a></td>
+                <td data-label="Asset" style="word-break:break-all">{{ j.target }}</td>
+                <td data-label="Tool">{{ j.template }}</td>
+                <td data-label="Status"><span class="state" :class="'st-' + j.status">{{ j.status }}</span></td>
+                <td data-label="Since" style="white-space:nowrap">{{ timeAgo(j.claimed_at) }}</td>
+              </tr>
+              <tr v-if="!r.current.length"><td colspan="5" class="muted">No jobs running.</td></tr>
+            </tbody>
+          </table>
+        </td>
+      </tr>
+      </template>
       <tr v-if="!runners.length"><td colspan="10" class="muted">No scanners connected. Start one and enroll it with a token.</td></tr>
     </tbody>
   </table>
   </div>
 </template>
+
+<style scoped>
+.fl-chev { margin-left: 6px; padding: 0 8px; font-size: 12px; }
+.detailrow > td { background: var(--panel-2, rgba(0,0,0,.03)); padding: 8px 12px; }
+</style>

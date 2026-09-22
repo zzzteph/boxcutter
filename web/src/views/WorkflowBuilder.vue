@@ -88,8 +88,10 @@ onMounted(load)
         <input v-model="help" placeholder="subfinder → httpx → nuclei" />
       </div>
     </div>
-    <p class="muted" style="margin:10px 0 0">Chain tools into a workflow: each box runs on the <b>Target</b>, or
-      on the URLs a box wired into it produced. A <b>findings</b> tool is terminal — it has no output to wire on.</p>
+    <p class="muted" style="margin:10px 0 0">Chain tools into a pipeline: each box runs on the <b>Target</b>, or
+      on the URLs a box wired into it produced. On a wired box, add a <b>condition</b> (contains / excludes a
+      value) to run it only on matching URLs — e.g. <code>subfinder → httpx (contains "admin") → nuclei</code>.
+      A <b>findings</b> tool is terminal — it has no output to wire on.</p>
   </div>
 
   <div class="card">
@@ -98,8 +100,9 @@ onMounted(load)
 
   <div class="split">
     <div class="card">
-      <h2>Compiled workflow</h2>
-      <p class="muted" style="margin-top:0">The exact workflow the engine runs — shipped to the scanner at run time.</p>
+      <h2>Workflow preview</h2>
+      <p class="muted" style="margin-top:0">The actual boxcutter workflow your boxes turn into — the recipe the
+        scanner runs. It updates live as you wire boxes; you don't edit it here.</p>
       <p v-if="previewErr" class="err">{{ previewErr }}</p>
       <pre class="cmd" style="white-space:pre-wrap">{{ preview || (previewErr ? '' : 'Add a box and a name…') }}</pre>
     </div>

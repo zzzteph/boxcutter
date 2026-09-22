@@ -413,7 +413,15 @@ def _job_brief(session: Session, job: Job) -> dict:
 
 @router.get("/runners")
 def fleet(user: User = Depends(current_user), session: Session = Depends(get_session)):
-    return [_runner_row(r) for r in session.exec(select(Runner)).all()]
+    rows = []
+    for r in session.exec(select(Runner)).all():
+        row = _runner_row(r)
+        # enrich with the runner's in-flight jobs (target/tool/scan/elapsed) so the fleet shows what each
+        # agent is doing at a glance, not just a busy count. Capped so a high-concurrency agent stays cheap.
+        row["current"] = [_job_brief(session, j) for j in
+                          (session.get(Job, jid) for jid in row["current_jobs"][:16]) if j]
+        rows.append(row)
+    return rows
 
 
 @router.get("/runners/{runner_id}")

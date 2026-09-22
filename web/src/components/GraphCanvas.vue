@@ -25,12 +25,27 @@ const drag = reactive({ mode: null, id: null, ox: 0, oy: 0, fromId: null, mx: 0,
 
 const kindOf = (tool) => props.catalog.find(t => t.name === tool)?.kind || ''
 const isTerminal = (tool) => !!props.catalog.find(t => t.name === tool)?.terminal
-const toolOpts = computed(() => props.catalog.map(t => ({ value: t.name, label: `${t.name} · ${t.kind}` })))
+const hasInput = (id) => edges.some(e => e.to === id)   // is this box fed by an upstream box?
+// grouped picker: the catalog arrives sorted by pipeline stage, so insert a header when the group changes
+const toolOpts = computed(() => {
+  const out = []; let g = null
+  for (const t of props.catalog) {
+    if (t.group && t.group !== g) { g = t.group; out.push({ header: true, label: g }) }
+    out.push({ value: t.name, label: `${t.name} · ${t.kind}` })
+  }
+  return out
+})
 const addTool = ref('')
+
+// per-box condition (only on a wired box): run it only on the upstream URLs that contain / don't contain a value
+const condOf = (n) => n.when || { mode: 'contains', value: '' }
+function setCondMode(n, mode) { const w = condOf(n); n.when = { mode, value: w.value }; emitChange() }
+function toggleMode(n) { setCondMode(n, condOf(n).mode === 'excludes' ? 'contains' : 'excludes') }
+function setCondVal(n, v) { n.when = { mode: condOf(n).mode, value: v }; emitChange() }
 
 function emitChange() {
   emit('change', {
-    nodes: nodes.map(n => ({ id: n.id, tool: n.tool, args: n.args, x: n.x, y: n.y })),
+    nodes: nodes.map(n => ({ id: n.id, tool: n.tool, args: n.args, x: n.x, y: n.y, when: n.when || null })),
     edges: edges.map(e => ({ from: e.from, to: e.to })),
   })
 }
@@ -39,7 +54,7 @@ function addNode(tool) {
   if (!tool) return
   const id = 'b' + (++seq)
   // stagger new boxes so they don't stack exactly on top of each other
-  nodes.push({ id, tool, args: '', x: 40 + (nodes.length % 4) * 40, y: 40 + (nodes.length % 6) * 30 })
+  nodes.push({ id, tool, args: '', when: null, x: 40 + (nodes.length % 4) * 40, y: 40 + (nodes.length % 6) * 30 })
   addTool.value = ''
   emitChange()
 }
@@ -127,7 +142,7 @@ function connect(from, to) {
 
 onMounted(() => {
   for (const n of (props.initial?.nodes || [])) {
-    nodes.push({ id: n.id, tool: n.tool, args: n.args || '', x: n.x ?? 40, y: n.y ?? 40 })
+    nodes.push({ id: n.id, tool: n.tool, args: n.args || '', when: n.when || null, x: n.x ?? 40, y: n.y ?? 40 })
     const num = parseInt(String(n.id).replace(/\D/g, '')); if (num > seq) seq = num
   }
   for (const e of (props.initial?.edges || [])) edges.push({ from: e.from, to: e.to })
@@ -158,10 +173,19 @@ onBeforeUnmount(() => {
         <div v-if="!isTerminal(n.tool)" class="gc-out" title="drag to wire" @pointerdown="startWire($event, n)"></div>
         <div class="gc-node-head" @pointerdown="startMove($event, n)">
           <span class="gc-tool">{{ n.tool }}</span>
-          <span class="tag sm" :class="isTerminal(n.tool) ? 'kind-ai_agent' : 'kind-workflow'">{{ kindOf(n.tool) }}</span>
+          <span class="gc-kind" :class="isTerminal(n.tool) ? 'terminal' : 'chain'">{{ kindOf(n.tool) || 'items' }}</span>
           <button class="danger ghost icon gc-x" title="Remove" @pointerdown.stop @click="removeNode(n.id)">✕</button>
         </div>
-        <input class="gc-args" :value="n.args" placeholder="args (optional)"
+        <div class="gc-io" :title="'what this box consumes and produces'">
+          in: {{ hasInput(n.id) ? 'wired URLs' : 'the Target' }} →
+          out: {{ isTerminal(n.tool) ? kindOf(n.tool) + ' (terminal)' : (kindOf(n.tool) || 'items') }}
+        </div>
+        <div v-if="hasInput(n.id)" class="gc-cond" @pointerdown.stop title="run this box only on upstream URLs matching">
+          <button class="gc-mode" @click="toggleMode(n)">{{ condOf(n).mode === 'excludes' ? 'excludes' : 'contains' }}</button>
+          <input class="gc-condv" :value="condOf(n).value" placeholder="text (optional)"
+                 @input="setCondVal(n, $event.target.value)" />
+        </div>
+        <input class="gc-args" :value="n.args" placeholder="extra args (optional)"
                @pointerdown.stop @input="setArgs(n, $event.target.value)" />
       </div>
 
@@ -186,13 +210,20 @@ onBeforeUnmount(() => {
 .gc-edge-hit { fill: none; stroke: transparent; stroke-width: 12; pointer-events: stroke; cursor: pointer; }
 .gc-node {
   position: absolute; border: 1px solid var(--line, #ccc); border-radius: 8px; background: var(--panel, #fff);
-  box-shadow: 0 1px 3px rgba(0,0,0,.12); user-select: none;
+  color: var(--text, #16181d); box-shadow: 0 1px 3px rgba(0,0,0,.12); user-select: none;
 }
 .gc-node-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; cursor: grab; }
 .gc-node-head:active { cursor: grabbing; }
-.gc-tool { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gc-tool { font-weight: 700; font-size: 13px; color: var(--text, #16181d); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gc-kind { font-size: 11px; line-height: 1.5; padding: 0 7px; border-radius: 999px; background: var(--accent, #5865f2); color: #fff; }
+.gc-kind.terminal { background: var(--muted-strong, #6b7280); }
+.gc-io { padding: 0 10px 6px; font-size: 11px; color: var(--muted, #5a6172); }
 .gc-x { margin-left: auto; }
-.gc-args { margin: 0 8px 8px; width: calc(100% - 16px); font-size: 12px; }
+.gc-args { margin: 0 8px 8px; width: calc(100% - 16px); font-size: 12px; color: var(--text, #16181d); }
+.gc-cond { display: flex; gap: 4px; margin: 0 8px 6px; align-items: center; }
+.gc-mode { font-size: 11px; padding: 2px 8px; border: 1px solid var(--line, #ccc); border-radius: 6px;
+  background: var(--panel-2, #f3f4f6); color: var(--text, #16181d); cursor: pointer; white-space: nowrap; }
+.gc-condv { flex: 1; min-width: 0; font-size: 12px; color: var(--text, #16181d); }
 .gc-in, .gc-out {
   position: absolute; top: 18px; width: 14px; height: 14px; border-radius: 50%;
   background: var(--panel, #fff); border: 2px solid var(--accent, #5865f2);

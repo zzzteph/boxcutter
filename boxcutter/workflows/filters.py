@@ -136,7 +136,30 @@ def _not_class(arg: str, items: list) -> list:
     return [f for f in items if not _class_matches(arg, f)]
 
 
+def _item_text(it) -> str:
+    """The text a contains/excludes filter matches against: a bare string, or a dict's url/value."""
+    if isinstance(it, str):
+        return it
+    if isinstance(it, dict):
+        return str(it.get("url") or it.get("value") or "")
+    return str(it)
+
+
+def _contains(arg: str, items: list) -> list:
+    """Keep items whose text contains ``arg`` (case-insensitive) - a pipe-stage grep."""
+    a = arg.lower()
+    return [it for it in items if a in _item_text(it).lower()]
+
+
+def _excludes(arg: str, items: list) -> list:
+    """Drop items whose text contains ``arg`` (case-insensitive) - grep -v."""
+    a = arg.lower()
+    return [it for it in items if a not in _item_text(it).lower()]
+
+
 PARAM_FILTERS = {
     "class": _class,
     "not-class": _not_class,
+    "contains": _contains,
+    "excludes": _excludes,
 }

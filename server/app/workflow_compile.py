@@ -35,6 +35,25 @@ TOOL_KIND: dict[str, str] = {
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
 _MAX_NODES = 50
 
+# a per-box CONDITION: run this box only on the upstream URLs that contain / don't contain <value>. Compiles
+# to the engine's ``contains:``/``excludes:`` pipe filter. Value kept to simple chars so it can't break the ref.
+_COND_MODES = {"contains", "excludes"}
+_COND_RE = re.compile(r"^[A-Za-z0-9._/\-]{1,64}$")
+
+
+def _parse_when(raw) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    value = str(raw.get("value", "") or "").strip()
+    if not value:
+        return None
+    mode = str(raw.get("mode", "contains")).strip().lower()
+    if mode not in _COND_MODES:
+        raise WorkflowError(f"condition must be one of {sorted(_COND_MODES)}")
+    if not _COND_RE.match(value):
+        raise WorkflowError("condition value must be 1-64 simple chars (letters, digits, . _ - /)")
+    return {"mode": mode, "value": value}
+
 
 class WorkflowError(ValueError):
     """A graph that can't be compiled (bad name, unknown tool, cycle, illegal wiring, ...)."""
@@ -75,7 +94,7 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None) -> dict:
         if tool not in TOOL_KIND:
             raise WorkflowError(f"unknown tool '{tool}'")
         by_id[nid] = {"id": nid, "tool": tool, "args": str(n.get("args", "") or "").strip(),
-                      "kind": TOOL_KIND[tool]}
+                      "kind": TOOL_KIND[tool], "when": _parse_when(n.get("when"))}
 
     incoming: dict[str, list[str]] = {nid: [] for nid in by_id}
     outgoing: dict[str, list[str]] = {nid: [] for nid in by_id}
@@ -114,7 +133,10 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None) -> dict:
             if node["args"]:
                 inner["args"] = node["args"]
             inner["save"] = save
-            steps.append({"for_each": "${" + pvar + " | urls}", "do": [inner]})
+            proj = pvar + " | urls"
+            if node.get("when"):                       # condition: grep the piped URLs before running
+                proj += f" | {node['when']['mode']}:{node['when']['value']}"
+            steps.append({"for_each": "${" + proj + "}", "do": [inner]})
 
     # emit findings when any box produces them; otherwise emit the last box's collected output (a recon-style
     # chain that only enumerates URLs/hosts still returns something listable).

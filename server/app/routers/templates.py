@@ -70,12 +70,36 @@ class WorkflowGraphIn(BaseModel):
     template_id: int | None = None     # set to UPDATE an existing custom-workflow template
 
 
+# tool -> pipeline stage, so the builder's picker can GROUP the flat tool list (mirrors registry ordering).
+_TOOL_GROUP = {
+    "subfinder": "Recon", "dnsx": "Recon", "dns-brute": "Recon", "ping-scan": "Recon", "nmap": "Recon",
+    "httpx": "Recon", "api-map": "Recon", "smart-enum": "Recon", "screenshot": "Recon",
+    "wayback": "Recon", "wayback-domains": "Recon",
+    "katana-crawl": "Crawl", "zap-crawl": "Crawl", "js-endpoints": "Crawl", "harvest": "Crawl",
+    "browser-login": "Crawl", "browser-actions": "Crawl", "visual-driver": "Crawl", "vision-verify": "Crawl",
+    "nuclei": "Vuln scanners", "sqlmap": "Vuln scanners", "blind-oracle": "Vuln scanners",
+    "bola-walk": "Vuln scanners", "mass-assign": "Vuln scanners", "dirb": "Vuln scanners",
+    "dirsearch": "Vuln scanners", "zap-scan-url": "Vuln scanners", "zap-scan-full": "Vuln scanners",
+    "zap-scan-openapi": "Vuln scanners",
+    "path-fuzz": "Fuzzing", "path-bust": "Fuzzing", "fuzz": "Fuzzing",
+    "scan-secrets": "Secrets", "git-extract": "Secrets",
+    "swagger-parser": "API specs", "swagger-endpoints": "API specs", "swagger-specs": "API specs",
+    "graphql-detect": "GraphQL", "graphql-audit": "GraphQL",
+    "http-request": "Generic",
+}
+_GROUP_ORDER = ["Recon", "Crawl", "Vuln scanners", "Fuzzing", "Secrets", "API specs", "GraphQL", "Generic", "Other"]
+
+
 @router.get("/tool-catalog")
 def tool_catalog(user: User = Depends(current_user)):
-    """The tools a custom workflow can wire together, each with its output KIND so the builder can type its
-    ports (findings = terminal, can't feed a downstream box; urls/items = chainable)."""
-    return [{"name": n, "kind": k, "terminal": k == "findings", "description": TOOL_DESC.get(n, "")}
-            for n, k in sorted(TOOL_KIND.items())]
+    """The tools a custom workflow can wire together, each with its output KIND (findings = terminal, can't feed
+    a downstream box; urls/items = chainable) and its pipeline GROUP so the builder's picker can section them."""
+    def gkey(name: str):
+        g = _TOOL_GROUP.get(name, "Other")
+        return (_GROUP_ORDER.index(g), name)
+    return [{"name": n, "kind": k, "group": _TOOL_GROUP.get(n, "Other"),
+             "terminal": k == "findings", "description": TOOL_DESC.get(n, "")}
+            for n, k in sorted(TOOL_KIND.items(), key=lambda kv: gkey(kv[0]))]
 
 
 @router.post("/workflow/preview")

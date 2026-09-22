@@ -34,11 +34,22 @@ onUnmounted(() => { document.removeEventListener('click', onDoc); document.remov
       <span class="sel-caret" aria-hidden="true"></span>
     </button>
     <div v-if="open" class="menu-panel" :class="{ right }">
-      <button v-for="o in norm" :key="String(o.value)" type="button" class="menu-item"
-        :class="{ on: o.value === modelValue, disabled: o.disabled }" @click.stop="pick(o)">
-        {{ o.label }}
-      </button>
+      <template v-for="(o, i) in norm" :key="i">
+        <div v-if="o.header" class="menu-header">{{ o.label }}</div>
+        <button v-else type="button" class="menu-item"
+          :class="{ on: o.value === modelValue, disabled: o.disabled }" @click.stop="pick(o)">
+          {{ o.label }}
+        </button>
+      </template>
       <div v-if="!norm.length" class="menu-empty">No options</div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.menu-header {
+  padding: 6px 10px 2px; font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--muted, #6b7280); pointer-events: none;
+}
+.menu-header:not(:first-child) { border-top: 1px solid var(--line, #e5e7eb); margin-top: 4px; }
+</style>
