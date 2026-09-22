@@ -133,6 +133,15 @@ def seed() -> None:
             s.commit()
             s.refresh(profile)
 
+        # a ready-to-use Claude Code profile: NO API key - it rides this container's own authenticated Claude
+        # Code login (authorize once with `claude` /login; it persists on /data). Appears in every agent/operator
+        # picker so a subscription login can drive a run out of the box.
+        cc_name = "Claude Code (subscription login)"
+        if not s.exec(select(LLMProfile).where(LLMProfile.name == cc_name)).first():
+            s.add(LLMProfile(name=cc_name, provider="claude-code", model="claude-sonnet-4-6",
+                             api_key_secret="", created_by=admin.id))
+            s.commit()
+
         for name, desc in WORKFLOWS.items():
             _ensure_template(s, name, "workflow", name, admin.id, description=desc)
         for name, desc in TOOLS.items():

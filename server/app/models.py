@@ -199,6 +199,29 @@ class Screenshot(SQLModel, table=True):
     last_seen: datetime = Field(default_factory=now)
 
 
+class OperatorRun(SQLModel, table=True):
+    """A DIRECT, in-container run of an ai operator agent (joseph). Unlike a Scan - which fans jobs out across
+    the runner fleet - an operator run executes the engine as a subprocess on THIS server host: you pick an LLM
+    profile, give a target + brief, and watch the reasoning stream live, then read the report. Holds the run
+    config, the accumulated live log (stderr narration), and the final report/findings."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: int = Field(foreign_key="user.id", index=True)
+    agent: str = Field(default="joseph", max_length=40)
+    target: str = Field(default="", max_length=1024)
+    profile_id: Optional[int] = Field(default=None, foreign_key="llmprofile.id")
+    profile_name: str = Field(default="", max_length=150)     # denormalized for display after a profile is deleted
+    status: str = Field(default="running", index=True, max_length=24)   # running | done | failed | stopped
+    vars_json: str = _text("{}")           # {context, creds: bool, dry_run, analysts, max_steps, provider, model}
+    log: str = _text("")                   # accumulated stderr (the reasoning stream), persisted at finish
+    report: str = _text("")                # final human-readable markdown report
+    findings_json: str = _text("[]")
+    meta_json: str = _text("{}")           # {tokens, cost_usd, steps, mutations, scripts, workspace}
+    error: Optional[str] = Field(default=None, sa_column=Column(Text))
+    exit_code: Optional[int] = None
+    created_at: datetime = Field(default_factory=now, index=True)
+    finished_at: Optional[datetime] = None
+
+
 class JobEvent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     job_id: int = Field(foreign_key="job.id", index=True)

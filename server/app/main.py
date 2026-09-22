@@ -19,7 +19,7 @@ from .activity import cap_job_events, prune_logs
 from .config import settings
 from .db import engine, init_db
 from .queue import requeue_stale
-from .routers import admin, auth, keys, ollama, runners, scans, templates
+from .routers import admin, auth, keys, ollama, operator, runners, scans, templates
 from .seed import seed
 
 
@@ -42,6 +42,8 @@ async def _sweeper() -> None:
 async def lifespan(app: FastAPI):
     init_db()
     seed()
+    from . import operator as _operator
+    _operator.reap_orphans()      # any operator run left 'running' by a dead server -> mark failed
     tasks = [asyncio.create_task(_sweeper())]
     try:
         yield
@@ -66,6 +68,7 @@ _OPENAPI_TAGS = [
     {"name": "scans", "description": "Create/list scans, findings, live log (SSE), per-target debug, report."},
     {"name": "templates", "description": "Scan templates: workflow / tool / ai_agent."},
     {"name": "runners", "description": "Scanner (runner) enrollment, job claim/result/heartbeat, fleet."},
+    {"name": "operator", "description": "Direct in-container operator runs (joseph): run, stream, report."},
     {"name": "admin", "description": "Users and LLM profiles (admin)."},
     {"name": "keys", "description": "Personal API keys and system (API-only) users."},
 ]
@@ -118,6 +121,7 @@ app.include_router(templates.router)
 app.include_router(admin.router)
 app.include_router(keys.router)
 app.include_router(ollama.router)
+app.include_router(operator.router)
 
 # Prod: serve the built SPA if present (web/dist copied to ./web_dist in the image).
 _web = Path(__file__).resolve().parent.parent / "web_dist"
