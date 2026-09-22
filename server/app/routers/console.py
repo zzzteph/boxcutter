@@ -28,6 +28,14 @@ _CMDS = {"claude": ["claude"]}
 _RESIZE = "\x00resize:"
 
 
+@router.get("/console/ping")
+def console_ping():
+    """Reachability probe. If this returns JSON, the console router is loaded and the WebSocket route exists;
+    if you get the SPA's HTML instead, the running server predates this build - restart it. Also reports whether
+    the `claude` CLI is installed and whether a PTY is available (POSIX only)."""
+    return {"ok": True, "claude": bool(shutil.which("claude")), "pty": os.name == "posix"}
+
+
 def _authed_admin(token: str):
     if not token:
         return None
