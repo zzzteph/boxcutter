@@ -1,7 +1,8 @@
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
-import { api } from '../api'
+import { api, isAdmin } from '../api'
 import Select from '../components/Select.vue'
+import ClaudeConsole from '../components/ClaudeConsole.vue'
 import { timeAgo } from '../util'
 
 // A DIRECT operator run: joseph runs on the server itself (not fanned across the fleet). Pick an LLM profile,
@@ -93,6 +94,9 @@ const findings = computed(() => detail.value?.findings || [])
 const meta = computed(() => detail.value?.meta || {})
 function sevClass(s) { return 'sev-' + String(s || 'info').toLowerCase() }
 
+async function refreshCc() {
+  try { cc.value = await api.get('/operator/claude-code') } catch { /* keep prior */ }
+}
 async function load() {
   await loadRuns()
   profiles.value = await api.get('/llm-profiles')
@@ -134,10 +138,14 @@ onUnmounted(() => clearInterval(timer))
       <p v-if="noKey" class="err" style="font-size:12.5px">This profile has no API key — set one on LLM Profiles,
         or pick a Claude Code / Ollama profile.</p>
       <div v-if="isClaudeCode && cc" class="cc" :class="{ warn: ccWarn }">
-        <template v-if="cc.logged_in">✓ Claude Code login found on this server — no API key needed.</template>
-        <template v-else>
-          <b>No Claude Code login on this server.</b> {{ cc.hint }}
-        </template>
+        <div v-if="cc.logged_in">✓ Claude Code login found on this server — no API key needed.</div>
+        <div v-else><b>No Claude Code login on this server.</b> Authorize it once — right here, in a console.</div>
+        <div v-if="isAdmin()" class="ccrow">
+          <ClaudeConsole @closed="refreshCc" />
+          <span class="muted" style="font-size:11.5px">Runs <code>claude</code> in this container; the login
+            persists on /data.</span>
+        </div>
+        <div v-else class="muted" style="font-size:11.5px;margin-top:4px">{{ cc.hint }}</div>
       </div>
 
       <div class="opts">
@@ -227,6 +235,7 @@ onUnmounted(() => clearInterval(timer))
 .cc { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; font-size: 12.5px;
   background: rgba(46, 160, 67, .12); border: 1px solid rgba(46, 160, 67, .35); }
 .cc.warn { background: rgba(253, 176, 34, .14); border-color: rgba(253, 176, 34, .4); }
+.ccrow { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .opts { display: flex; flex-direction: column; gap: 10px; margin: 14px 0; }
 .opt.num { display: flex; flex-direction: column; gap: 4px; }
 .opt.num input { width: 120px; }
