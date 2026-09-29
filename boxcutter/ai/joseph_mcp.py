@@ -27,6 +27,7 @@ import requests
 
 from ..core.envelope import debug_print, output_result
 from ..irvin.context import extract_json
+from . import skills
 from .provider import PROVIDERS, add_agent_args, make_provider, reset_usage, usage_cost
 
 NAME = "joseph-mcp"
@@ -47,7 +48,10 @@ _SYSTEM = (
     "swagger-*, path-*, scan-secrets, ...) - use the one that fits the class you are hunting.\n"
     "  - run_shell / run_python (IF advertised) - run a raw command or a Python snippet in the container "
     "(sandboxed): a bespoke fuzz loop, a UNION-dump loop, a payload generator, an ORDER BY/column probe, a curl "
-    "pipeline. Reach for these the moment the built-in tools don't fit the exact thing you want to try.\n\n"
+    "pipeline. Reach for these the moment the built-in tools don't fit the exact thing you want to try.\n"
+    "  - load_skill(name) - pull the DEEP methodology PLAYBOOK for a vuln class (sqli/idor/xss/ssrf/jwt/graphql/"
+    "swagger/ssti/...) the moment you commit to hunting it, so you probe it the way the playbook says, not from "
+    "memory. This is boxcutter's own knowledge; load the class before you dig into it.\n\n"
 
     "THINK OUT LOUD every turn, BEFORE you act: OBSERVE (the exact value/status you saw) -> INTERPRET (what it "
     "means vs a baseline) -> TRACE (where a value flows) -> HYPOTHESIZE (a checkable claim + the observable you "
@@ -205,8 +209,28 @@ def run(args) -> int:
         return 1
     names = [t["name"] for t in tools]
     has_exec = "run_shell" in names or "run_python" in names
-    debug_print(f"joseph-mcp :: {len(tools)} tools over MCP ({args.mcp_url})"
-                + ("  [+ run_shell/run_python]" if has_exec else "  [no exec tools]"))
+
+    # SKILLS are boxcutter PACKAGE data (ai/skills/*.md), not MCP tools - they ship with joseph-mcp itself, so
+    # the deep vuln-class methodology loads LOCALLY even though every tool runs remotely over MCP. Expose it as a
+    # local `load_skill` action alongside the remote tools; the model calls it the same way, we serve it here.
+    skill_names = [n for n, _ in skills.catalog()]
+    # Add a local load_skill ONLY if the endpoint doesn't already advertise one (newer servers expose it as a
+    # tool). Either way the dispatch below serves it LOCALLY from the package - no MCP round-trip for a playbook.
+    if "load_skill" not in names:
+        tools = tools + [{
+            "name": "load_skill",
+            "description": ("Load a boxcutter vuln-class PLAYBOOK (deep methodology: exact payloads, steps, "
+                            "confirmation markers, gotchas) into your context by name - call it the moment you "
+                            "commit to hunting a class, then probe it the way the playbook says. Available: "
+                            + ", ".join(skill_names) + "."),
+            "schema": {"type": "object", "additionalProperties": False,
+                       "properties": {"name": {"type": "string",
+                                               "description": "skill/class name, e.g. sqli, idor, xss, ssrf, jwt, "
+                                                              "graphql, swagger, ssti"}},
+                       "required": ["name"]}}]
+    debug_print(f"joseph-mcp :: {len(names)} tools over MCP ({args.mcp_url})"
+                + ("  [+ run_shell/run_python]" if has_exec else "  [no exec tools]")
+                + f"  + {len(skill_names)} local skills")
 
     reset_usage()
     provider = make_provider(args.provider, args.model, key, base_url=args.base_url,
@@ -242,7 +266,11 @@ def run(args) -> int:
         for c in calls:
             keyj = json.dumps([c["name"], c.get("args", {})], sort_keys=True, default=str)
             count[keyj] = count.get(keyj, 0) + 1
-            if count[keyj] > 2:
+            if c["name"] == "load_skill":                 # LOCAL: package data, not an MCP call
+                body = skills.load((c.get("args") or {}).get("name", ""))
+                out = body or json.dumps({"success": False, "error": "unknown skill",
+                                          "available": skill_names})
+            elif count[keyj] > 2:
                 out = json.dumps({"success": False, "error": "already ran this exact call - reuse the result"})
             else:
                 try:

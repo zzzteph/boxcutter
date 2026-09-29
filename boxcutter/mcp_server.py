@@ -26,6 +26,11 @@ a stateless MCP endpoint can't carry. Each deterministic tool's name, descriptio
 straight from the tool's own argparse via ``tools.toolschema``, so the advertised contract can never drift from
 what the CLI actually accepts.
 
+boxcutter's vuln-class PLAYBOOKS (``ai/skills/*.md`` - deep methodology per class) are exposed too, so any
+client gets the same knowledge boxcutter's own agents use: a read-only ``load_skill`` TOOL (an autonomous agent
+pulls a playbook by name) AND MCP PROMPTS (a prompt-aware client lists/fetches them). Reference data - they
+run nothing.
+
 The ``mcp`` SDK is an OPTIONAL dependency, kept out of the lean engine exactly like the web server's deps.
 Install it with::
 
@@ -45,6 +50,7 @@ import subprocess
 import sys
 import tempfile
 
+from .ai import skills
 from .core import capability
 from .tools import toolschema
 from .tools.registry import TOOLS
@@ -229,6 +235,36 @@ def _run_exec_sync(name: str, arguments: dict, timeout: int | None) -> tuple[str
     return _exec_env(ok, data=data, error=None if ok else f"exit {p.returncode}")
 
 
+# ---------------------------------------------------------------------------
+# skills: boxcutter's vuln-class PLAYBOOKS (ai/skills/*.md) served over MCP
+# ---------------------------------------------------------------------------
+# Skills are deep methodology (payloads, steps, confirmation markers, gotchas) - boxcutter PACKAGE data, not
+# executables. boxcutter's own joseph loads them locally; over MCP we expose them so ANY client gets them too,
+# two ways: a read-only `load_skill` TOOL (an autonomous agent calls it) AND MCP PROMPTS (an interactive client
+# lists/fetches them). Always on; they carry no target and run nothing.
+def _skill_tool_spec() -> dict:
+    names = ", ".join(n for n, _ in skills.catalog())
+    return {"description": ("Load a boxcutter vuln-class PLAYBOOK by name - deep methodology (exact payloads, "
+                            "steps, confirmation markers, gotchas), returned as markdown - the moment you commit "
+                            "to hunting a class, so you probe it the way the playbook says, not from memory. "
+                            "Available: " + names + "."),
+            "schema": {"type": "object", "additionalProperties": False,
+                       "properties": {"name": {"type": "string", "description": "skill/class name, e.g. sqli, "
+                                               "idor, xss, ssrf, jwt, graphql, swagger, ssti"}},
+                       "required": ["name"]}}
+
+
+def _run_skill(name: str, arguments: dict, timeout: int | None) -> tuple[str, dict | None, bool]:
+    """Serve a vuln-class PLAYBOOK (ai/skills/*.md) as the tool result: the markdown body, so any client can pull
+    the deep methodology on demand. Read-only reference data - it runs nothing."""
+    sk = (arguments.get("name") or "").strip()
+    body = skills.load(sk)
+    if body:
+        return body, {"skill": sk, "chars": len(body)}, False
+    avail = ", ".join(n for n, _ in skills.catalog())
+    return (f"unknown skill '{sk}'. Available: {avail}", {"skill": sk, "loaded": False}, True)
+
+
 def _exposed_names(show_all: bool) -> list[str]:
     """Tool names to advertise: those actually installed in this image (like ``boxcutter --list``), or every
     tool with ``--all-tools`` (like ``--list-all`` - useful for docs or a dev box without the binaries)."""
@@ -390,6 +426,9 @@ def build_server(names: list[str], timeout: int | None):
         _log(f"exec tools run_shell / run_python exposed (sandbox: cwd {cwd}, {drop}). This is code execution "
              "inside the container - keep the API key secret and the endpoint restricted to an authorised scope.")
 
+    # skills: a read-only load_skill tool (autonomous agents) + MCP prompts (interactive clients), always on.
+    specs["load_skill"] = _skill_tool_spec()
+
     async def _keepalive(ctx, token, rid, name: str) -> None:
         """Emit a heartbeat every KEEPALIVE_SECS while a tool runs, on THIS request's stream, so a proxy's read
         timeout (Cloudflare ~100s / nginx 60s) never cuts a long call. A progress notification needs the client's
@@ -412,6 +451,9 @@ def build_server(names: list[str], timeout: int | None):
                     level="info", data=note, logger="boxcutter", related_request_id=rid)
 
     def _annotations(n: str):
+        if n == "load_skill":            # read-only reference data; no target, runs nothing
+            return types.ToolAnnotations(title=n, readOnlyHint=True, destructiveHint=False,
+                                         idempotentHint=True, openWorldHint=False)
         if n in exec_names:              # raw exec: never read-only, always potentially destructive
             return types.ToolAnnotations(title=n, readOnlyHint=False, destructiveHint=True,
                                          idempotentHint=False, openWorldHint=True)
@@ -456,7 +498,8 @@ def build_server(names: list[str], timeout: int | None):
             token = getattr(getattr(ctx, "meta", None), "progressToken", None)
 
         box: dict = {}
-        runner = _run_exec_sync if name in exec_names else _run_tool_sync
+        runner = _run_skill if name == "load_skill" else (
+            _run_exec_sync if name in exec_names else _run_tool_sync)
 
         async def _run() -> None:
             box["res"] = await anyio.to_thread.run_sync(runner, name, arguments, timeout)
@@ -475,6 +518,21 @@ def build_server(names: list[str], timeout: int | None):
             structuredContent=structured,
             isError=is_error,
         )
+
+    # PROMPTS: the same vuln-class playbooks as MCP prompts, so a prompt-aware client (not just an autonomous
+    # agent using the load_skill tool) can list them and inject one. Registering these advertises the capability.
+    @server.list_prompts()
+    async def list_prompts() -> list["types.Prompt"]:
+        return [types.Prompt(name=n, description=d) for n, d in skills.catalog()]
+
+    @server.get_prompt()
+    async def get_prompt(name: str, arguments: dict | None = None) -> "types.GetPromptResult":
+        body = skills.load(name) or (
+            "unknown skill '%s'. Available: %s" % (name, ", ".join(n for n, _ in skills.catalog())))
+        return types.GetPromptResult(
+            description=f"boxcutter vuln-class playbook: {name}",
+            messages=[types.PromptMessage(role="user",
+                                          content=types.TextContent(type="text", text=body))])
 
     return server
 
