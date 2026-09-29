@@ -89,6 +89,24 @@ def extract_json(text: str) -> dict:
     return {}
 
 
+def is_final_report(text: str, keys) -> bool:
+    """True only when `text` carries the agent's TERMINAL structured report - not just any JSON.
+
+    An agent finishes a run by emitting its fenced JSON envelope with no tool call. But a mid-run
+    turn often ALSO contains a ```json block - a captured response body, an example payload, a single
+    hand-drafted finding - while the agent still has moves left. Deciding "done" by looking for the
+    bare "```json" fence (or a lone field-name substring) in that text ends the run early: the agent
+    stops even though it had more to try. So parse the JSON and require one of the ENVELOPE `keys`
+    that only the final report carries (e.g. investigation/coverage/bottom_line for a scan report,
+    the verdict fields for a triage agent). A ```json turn without one is an ordinary, incomplete
+    turn the caller should nudge - not a finish.
+    """
+    if not text or not text.strip():
+        return False
+    obj = extract_json(text)
+    return isinstance(obj, dict) and any(k in obj for k in keys)
+
+
 @dataclass
 class Record:
     """One entry in the audit trail - identical shape for every agent and phase."""

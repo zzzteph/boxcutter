@@ -56,11 +56,12 @@ from urllib.parse import urlparse
 from ..core import agentlog, cdp, scope
 from ..core.envelope import debug_print, output_result
 from ..irvin import briefing
-from ..irvin.context import extract_json
+from ..irvin.context import extract_json, is_final_report
 from ..forge import report as fr
 from ..tools import toolschema
 from . import _zapproxy, skills
-from .provider import PROVIDERS, add_agent_args, make_provider, reset_usage, usage_cost
+from .provider import (PROVIDERS, add_agent_args, bound_tool_history, make_provider, reset_usage,
+                       usage_cost)
 
 NAME = "joseph"
 KIND = "findings"
@@ -455,6 +456,12 @@ _SYSTEM = (
     "nothing survived the gate, give an empty list and say so in bottom_line.")
 
 
+# Envelope keys that ONLY joseph's final report carries - the terminal signal for a no-tool-call turn
+# (a mid-run ```json snippet - a payload, a captured body, a lone finding - has none of these, so it
+# does not end the run; see is_final_report).
+_REPORT_KEYS = ("investigation", "bottom_line", "coverage", "application")
+
+
 def _cap(raw: str, max_chars: int = 60000) -> str:
     """Bound a single tool/action result so one huge body can't blow the context window."""
     s = raw if isinstance(raw, str) else json.dumps(raw, default=str)
@@ -465,6 +472,22 @@ def _digest(raw: str, limit: int = 400) -> str:
     """A short digest of an action result for the run.jsonl trace (the full result lands in tools/ / flows/)."""
     s = " ".join((raw or "").split())
     return s if len(s) <= limit else s[:limit] + " ..."
+
+
+def _arghint(args: dict) -> str:
+    """A short one-line preview of a call's args for the live heartbeat - the url / target / param it hits, so
+    the stream shows WHICH endpoint a slow tool is on without dumping the whole arg blob."""
+    if not isinstance(args, dict):
+        return ""
+    for k in ("url", "target", "what", "name", "steps", "path", "glob", "query", "q"):
+        v = args.get(k)
+        if v:
+            v = v[0] if isinstance(v, (list, tuple)) and v else v
+            return str(v)[:80]
+    for v in args.values():
+        if isinstance(v, (str, int)) and str(v):
+            return str(v)[:80]
+    return ""
 
 
 def _as_list(v) -> list:
@@ -517,6 +540,17 @@ class _Operator:
         self.stop = threading.Event()              # set at end so analyst threads wind down
         for sub in ("sessions", "flows", "scripts", "tools", "findings", "js"):
             os.makedirs(os.path.join(self.workspace, sub), exist_ok=True)
+
+    # -- live heartbeat ------------------------------------------------------
+    def heartbeat(self, who: str, msg: str) -> None:
+        """A one-line stderr pulse the moment an action STARTS - before the (often slow) tool runs - so the live
+        stream keeps moving during a long call instead of going silent between turn-boundary narration (§16).
+        Cheap: stderr only, no tokens. Suppressed under --quiet-reasoning like the rest of the stream."""
+        if getattr(self.args, "quiet_reasoning", False):
+            return
+        with contextlib.suppress(Exception):
+            sys.stderr.write(f"joseph :: [{who}] -> {msg}\n")
+            sys.stderr.flush()
 
     # -- workspace / logging (the shared bus - lock-guarded, §17) ------------
     def _append_log(self, rec: dict) -> None:
@@ -1003,6 +1037,7 @@ def _run_analyst(op: "_Operator", provider, lane: str, brief: str, brief_user: s
     for _ in range(max(1, max_steps)):
         if op.stop.is_set():
             return
+        bound_tool_history(messages)      # keep this lane's re-sent history from growing without bound
         try:
             resp = provider.send(system, messages, specs)
         except Exception:  # noqa: BLE001 - an analyst dying must never take down the run
@@ -1022,11 +1057,14 @@ def _run_analyst(op: "_Operator", provider, lane: str, brief: str, brief_user: s
             if op.stop.is_set():
                 return
             if name == "lead":
+                op.heartbeat(lane, f"lead {targs.get('cls', '')} {targs.get('url', '')}".strip())
                 op.add_lead(lane, targs.get("detail", ""), targs.get("cls", ""), targs.get("url", ""))
                 out = json.dumps({"lead_recorded": True})
             elif name in ("workspace_read", "workspace_list"):
+                op.heartbeat(lane, f"{name} {_arghint(targs)}")
                 out = op.dispatch(name, targs)
             elif name in _ANALYST_TOOLS:
+                op.heartbeat(lane, f"{name} {_arghint(targs)}")
                 out = op._call_tool(name, _readonly_args(name, targs))
             else:
                 out = json.dumps({"error": f"{name} is not allowed for a read-only analyst"})
@@ -1065,6 +1103,7 @@ def _run_auth(op: "_Operator", provider, creds: str, creds_b: str | None, login_
               "authenticated, then stop.")
     messages = [{"role": "user", "content": user}]
     for _ in range(max(1, max_steps)):
+        bound_tool_history(messages)
         try:
             resp = provider.send(_AUTH_SYSTEM, messages, _AUTH_ACTIONS)
         except Exception:  # noqa: BLE001 - a failed login must not crash the run; driver proceeds anon
@@ -1139,11 +1178,18 @@ def _usage_report_lines(cost: float, tot: dict) -> list[str]:
     cost_note = ("gateway-reported, exact" if exact else
                  "list-price estimate; set BOXCUTTER_PRICE_IN / BOXCUTTER_PRICE_OUT - USD per 1M tokens - "
                  "for your exact gateway/Bedrock rate")
+    cr, cw = tot.get("cache_read_tokens", 0), tot.get("cache_write_tokens", 0)
     lines = ["## Token usage & cost", "",
              f"- LLM calls: {tot.get('calls', 0)}",
-             f"- input: {tot.get('prompt_tokens', 0):,} tok   output: {tot.get('completion_tokens', 0):,} tok   "
-             f"total: {tot.get('total_tokens', 0):,} tok",
-             f"- {'cost' if exact else 'estimated cost'}: **${cost:,.4f} USD** _({cost_note})_", ""]
+             f"- fresh input: {tot.get('prompt_tokens', 0):,} tok   output: {tot.get('completion_tokens', 0):,} tok"
+             f"   total (fresh): {tot.get('total_tokens', 0):,} tok"]
+    if cr or cw:
+        served = cr + cw
+        reuse = cr / served * 100 if served else 0
+        lines.append(f"- prompt cache: {cr:,} tok READ (~0.1x price) + {cw:,} tok WRITE (~1.25x) - "
+                     f"{reuse:.0f}% of the re-sent prefix was served from cache instead of paid fresh")
+    lines.append(f"- {'cost' if exact else 'estimated cost'}: **${cost:,.4f} USD** _({cost_note})_")
+    lines.append("")
     by_model = tot.get("by_model") or {}
     if by_model:
         lines += ["| model | calls | input tok | output tok |", "|---|---:|---:|---:|"]
@@ -1373,6 +1419,7 @@ def run(args) -> int:
                     for ld in leads[:20])
                 messages.append({"role": "user", "content": "ANALYSTS POSTED NEW LEADS on the bus - evaluate "
                                  "and lease the promising ones (test them live, in-session):\n" + summary})
+            bound_tool_history(messages)      # keep the driver's re-sent history from growing without bound
             try:
                 resp = provider.send(_SYSTEM, messages, tools_spec)
             except Exception as exc:  # noqa: BLE001
@@ -1386,12 +1433,16 @@ def run(args) -> int:
                 final_text = text
 
             if not calls:
-                if final_text.strip() and ("```json" in final_text or '"findings"' in final_text):
+                if is_final_report(final_text, _REPORT_KEYS):
                     op._append_log({"kind": "turn", "step": step, "reasoning": turn.get("reasoning", ""),
                                     "narration": turn.get("narration", ""), "actions": [], "results": []})
                     break
-                messages.append({"role": "user", "content": "Keep going - act through the tools/session/scripts. "
-                                 "Narrate your observe->interpret->trace->hypothesize->plan first, then act."})
+                messages.append({"role": "user", "content": "Keep going - you took NO action and this is NOT the "
+                                 "final report. A ```json snippet of a payload, a captured response, or a single "
+                                 "finding does NOT end the run. If you are genuinely done, emit ONLY the final "
+                                 "JSON report (application/findings/investigation/coverage/bottom_line). "
+                                 "Otherwise narrate observe->interpret->trace->hypothesize->plan and take the "
+                                 "next concrete action - pursue the ideas you just described."})
                 op._append_log({"kind": "turn", "step": step, "reasoning": turn.get("reasoning", ""),
                                 "narration": turn.get("narration", ""), "actions": [], "results": [],
                                 "nudged": True})
@@ -1404,6 +1455,7 @@ def run(args) -> int:
                 if count[argv_key] > 2:
                     out = json.dumps({"success": False, "error": "already ran this exact call - reuse the result"})
                 else:
+                    op.heartbeat("driver", f"{c['name']} {_arghint(c.get('args', {}))}")
                     if args.debug:
                         debug_print("joseph> " + c["name"] + " " + json.dumps(c.get("args", {}), default=str)[:200])
                     out = op.dispatch(c["name"], c.get("args", {}))
@@ -1452,9 +1504,11 @@ def run(args) -> int:
     _exact = tot.get("cost_source") == "gateway"
     _cost_tag = ("gateway-reported" if _exact else
                  "estimate; set BOXCUTTER_PRICE_IN/OUT for your exact gateway rate")
+    _cr, _cw = tot.get("cache_read_tokens", 0), tot.get("cache_write_tokens", 0)
+    _cache_tag = f"  + cache {_cr:,} read / {_cw:,} write" if (_cr or _cw) else ""
     sys.stderr.write(
-        f"joseph :: LLM spend - {tot['prompt_tokens']:,} in + {tot['completion_tokens']:,} out = "
-        f"{tot['total_tokens']:,} tokens over {tot['calls']} call(s)  "
+        f"joseph :: LLM spend - {tot['prompt_tokens']:,} fresh-in + {tot['completion_tokens']:,} out = "
+        f"{tot['total_tokens']:,} tokens over {tot['calls']} call(s){_cache_tag}  "
         f"{'' if _exact else '~'}${cost:,.4f} USD ({_cost_tag})\n")
     if getattr(args, "report", None):
         try:

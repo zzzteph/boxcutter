@@ -39,7 +39,7 @@ from . import skills
 from ..core import agentlog
 from ..core.envelope import debug_print, output_result
 from ..irvin import briefing
-from ..irvin.context import extract_json
+from ..irvin.context import extract_json, is_final_report
 from .provider import PROVIDERS, add_agent_args, make_provider
 from ..tools import toolschema
 
@@ -3141,7 +3141,7 @@ def run(args) -> int:
             final_text = text
             debug_print("bob> " + (" ".join(text.split()) if args.debug else " ".join(text.split())[:220]))
         if not calls:
-            if final_text.strip() and any(m in final_text for m in ("```json", '"application"', '"findings"')):
+            if is_final_report(final_text, ("application", "coverage", "bottom_line")):
                 if not chain_nudged:                 # before accepting the report, force one chain-building pass
                     chain_nudged = True
                     messages.append({"role": "user", "content": (

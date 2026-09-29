@@ -31,7 +31,12 @@ _RETRY_STATUS = {429, 500, 502, 503, 504}
 # per-model price table (list prices), overridable per run with BOXCUTTER_PRICE_IN / BOXCUTTER_PRICE_OUT
 # (USD per 1M tokens) - a gateway/Bedrock contract rate differs from list, but the tokens don't.
 _USAGE_LOCK = threading.Lock()
+# prompt_tokens/completion_tokens are the FRESH (uncached) input + the output. cache_read_tokens are prefix
+# tokens served from cache (~0.1x input price); cache_write_tokens are tokens written to the cache the first
+# time a prefix appears (~1.25x). Tracked separately so usage_cost() prices each correctly and the report can
+# SHOW how much of the re-sent prefix was cached vs paid fresh.
 _USAGE: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
                 "gateway_cost_usd": 0.0, "cost_calls": 0, "by_model": {}}
 
 # USD per 1,000,000 tokens, (input, output). This is only a FALLBACK: when the gateway reports the real
@@ -51,7 +56,7 @@ def reset_usage() -> None:
     """Zero the ledger - call once at the start of a run so counts reflect only that run."""
     with _USAGE_LOCK:
         _USAGE.update(prompt_tokens=0, completion_tokens=0, total_tokens=0, calls=0,
-                      gateway_cost_usd=0.0, cost_calls=0)
+                      cache_read_tokens=0, cache_write_tokens=0, gateway_cost_usd=0.0, cost_calls=0)
         _USAGE["by_model"] = {}
 
 
@@ -65,6 +70,12 @@ def _record_usage(model: str, usage, cost=None) -> None:
     try:
         pt = int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0)
         ct = int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0)
+        # Anthropic reports cached prefix tokens in these keys and EXCLUDES them from input_tokens, so they price
+        # cleanly on top of prompt_tokens (no double-count). We track only these - OpenAI/LiteLLM fold their
+        # server-side cached tokens INTO prompt_tokens, so counting them here would double-count; that path keeps
+        # its prior full-price accounting (a small over-estimate, unchanged by this feature).
+        cr = int(usage.get("cache_read_input_tokens", 0) or 0)
+        cw = int(usage.get("cache_creation_input_tokens", 0) or 0)
     except (TypeError, ValueError):
         return
     tt = pt + ct
@@ -76,15 +87,20 @@ def _record_usage(model: str, usage, cost=None) -> None:
         _USAGE["prompt_tokens"] += pt
         _USAGE["completion_tokens"] += ct
         _USAGE["total_tokens"] += tt
+        _USAGE["cache_read_tokens"] += cr
+        _USAGE["cache_write_tokens"] += cw
         _USAGE["calls"] += 1
         if c is not None:
             _USAGE["gateway_cost_usd"] += c
             _USAGE["cost_calls"] += 1
         m = _USAGE["by_model"].setdefault(model or "?",
                                           {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0,
+                                           "cache_read_tokens": 0, "cache_write_tokens": 0,
                                            "gateway_cost_usd": 0.0, "cost_calls": 0})
         m["prompt_tokens"] += pt
         m["completion_tokens"] += ct
+        m["cache_read_tokens"] += cr
+        m["cache_write_tokens"] += cw
         m["calls"] += 1
         if c is not None:
             m["gateway_cost_usd"] += c
@@ -156,7 +172,12 @@ def usage_cost() -> tuple[float, dict]:
             exact_models += 1
         else:                                                   # list-price fallback
             pin, pout = _price_for(model)
-            cost += u["prompt_tokens"] / 1_000_000 * pin + u["completion_tokens"] / 1_000_000 * pout
+            # fresh input + output at list price, plus the cached prefix priced at its discount: cache READS at
+            # ~0.1x input, cache WRITES at ~1.25x input (Anthropic's standard multipliers).
+            cost += (u["prompt_tokens"] / 1_000_000 * pin
+                     + u["completion_tokens"] / 1_000_000 * pout
+                     + u.get("cache_read_tokens", 0) / 1_000_000 * pin * 0.10
+                     + u.get("cache_write_tokens", 0) / 1_000_000 * pin * 1.25)
     tot["cost_source"] = ("gateway" if priced_models and exact_models == priced_models
                           else "table" if exact_models == 0 else "mixed")
     tot["estimated_usd"] = round(cost, 4)
@@ -251,6 +272,111 @@ class _Provider:
         return rec
 
 
+# -- prompt caching (Anthropic) -------------------------------------------------------------------------------
+# The agentic loop re-sends a large, MOSTLY-UNCHANGED prefix on every call: the system prompt, the tool schemas,
+# and the whole conversation so far. Uncached, each call is billed full input price for content it already sent
+# - which is where a long run's spend goes (input dwarfs output). A cache breakpoint tells Anthropic to reuse
+# the already-processed prefix at ~0.1x input price (with a one-time 1.25x "write" when a prefix first appears
+# or extends). We set three breakpoints per call:
+#   1. the last TOOL   - caches the big, static native-schema tool array;
+#   2. the last SYSTEM block - caches the static system prompt (+ playbooks, for an analyst lane);
+#   3. the last block of the last MESSAGE - a ROLLING breakpoint, so each turn READS the previous turn's cached
+#      prefix and pays fresh only for the turn just appended.
+# Prompt caching is GA - no beta header needed, so the claude-code OAuth header path is untouched. Disable with
+# BOXCUTTER_PROMPT_CACHE=0 for a gateway that doesn't support it. OpenAI/LiteLLM cache the prefix server-side
+# automatically (no request param), so this is Anthropic-only.
+_CACHE_CONTROL = {"type": "ephemeral"}
+
+
+def _caching_on() -> bool:
+    return (os.environ.get("BOXCUTTER_PROMPT_CACHE", "1") or "1").strip().lower() not in \
+        ("0", "false", "no", "off")
+
+
+def _mark_last(blocks):
+    """A COPY of `blocks` with a cache breakpoint on the last one. The block dict is copied, not mutated in
+    place - the originals live in the caller's stored history / tool list and must stay breakpoint-free, or a
+    growing conversation would accumulate breakpoints and blow past Anthropic's limit of 4."""
+    if not blocks:
+        return blocks
+    out = list(blocks)
+    out[-1] = {**out[-1], "cache_control": dict(_CACHE_CONTROL)}
+    return out
+
+
+def _cache_last_message(messages):
+    """A shallow copy of `messages` with a ROLLING cache breakpoint on the last block of the last message - but
+    only when that content is a block LIST (the tool_result turns). The very first turn's user brief is a plain
+    string; we leave it as-is so its representation is byte-identical every turn (a string vs. a one-text-block
+    list would hash differently and miss the cache). The stored history is never mutated."""
+    if not messages:
+        return messages
+    out = list(messages)
+    m = dict(out[-1])
+    content = m.get("content")
+    if isinstance(content, list) and content:
+        content = list(content)
+        content[-1] = {**content[-1], "cache_control": dict(_CACHE_CONTROL)}
+        m["content"] = content
+        out[-1] = m
+    return out
+
+
+# -- history bounding ------------------------------------------------------------------------------------------
+# An agentic loop re-sends its WHOLE message history every turn, and each turn appends a tool result (a DOM
+# snapshot, a JS bundle, a scan output - up to tens of KB). Uncompacted, that history grows without bound and
+# late calls balloon to six-figure token counts (the real driver of a long run's spend). We keep the most
+# RECENT tool outputs verbatim - the model needs fresh data to act - and shrink OLDER ones to a stub. Their full
+# text is always on disk (the agent's workspace: tools/ flows/ run.jsonl) and re-readable on demand, so nothing
+# is lost. Only a tool_result's CONTENT text is replaced; its block + tool_use_id stay, so the tool_use/
+# tool_result pairing the API requires is never broken. Idempotent: an already-stubbed result is left byte-for-
+# byte alone, so the aged part of the prefix stays cache-stable - only the one result crossing the boundary
+# each turn changes. Handles both wire shapes: Anthropic (role:user, tool_result blocks) and OpenAI (role:tool).
+_HISTORY_BUDGET_CHARS = 200_000    # ~50k tokens of the most-recent tool output kept verbatim; older -> stub
+_HISTORY_STUB = ("[earlier tool output elided to bound context - its full text is in the run workspace "
+                 "(re-read it with workspace_read, or see run.jsonl) if you need it again]")
+
+
+def bound_tool_history(messages, budget_chars: int = _HISTORY_BUDGET_CHARS, keep_min: int = 3) -> int:
+    """Compact tool-result CONTENT older than a recent-window budget, in place. Keeps the newest results whose
+    cumulative size is within `budget_chars` (always at least `keep_min` newest) full; stubs everything older.
+    Returns the number of results stubbed on this call (0 = nothing bounded). Never touches block structure or
+    ids - only the text - so the message list stays API-valid."""
+    refs = []   # (kind, msg_idx, blk_idx|None, length), oldest -> newest
+    for mi, m in enumerate(messages):
+        if not isinstance(m, dict):
+            continue
+        role, content = m.get("role"), m.get("content")
+        if role == "user" and isinstance(content, list):
+            for bi, b in enumerate(content):
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    c = b.get("content")
+                    refs.append(("block", mi, bi, len(c) if isinstance(c, str) else len(str(c))))
+        elif role == "tool":
+            c = content
+            refs.append(("msg", mi, None, len(c) if isinstance(c, str) else len(str(c))))
+    if len(refs) <= keep_min:
+        return 0
+    total, cutoff = 0, 0
+    for k in range(len(refs) - 1, -1, -1):
+        newer = len(refs) - 1 - k                # results strictly newer than k
+        total += refs[k][3]
+        if newer >= keep_min and total > budget_chars:
+            cutoff = k + 1                        # refs[:cutoff] get stubbed, refs[cutoff:] kept verbatim
+            break
+    stubbed = 0
+    for kind, mi, bi, _ln in refs[:cutoff]:
+        if kind == "block":
+            blk = messages[mi]["content"][bi]
+            if blk.get("content") != _HISTORY_STUB:
+                blk["content"] = _HISTORY_STUB
+                stubbed += 1
+        elif messages[mi].get("content") != _HISTORY_STUB:
+            messages[mi]["content"] = _HISTORY_STUB
+            stubbed += 1
+    return stubbed
+
+
 class Anthropic(_Provider):
     default_model, env = "claude-sonnet-4-6", "ANTHROPIC_API_KEY"
     _default_base, _base_env = "https://api.anthropic.com", "ANTHROPIC_BASE_URL"
@@ -271,8 +397,19 @@ class Anthropic(_Provider):
         return system
 
     def send(self, system, messages, tools):
-        body = {"model": self.model, "max_tokens": 8192, "system": self._prep_system(system), "messages": messages,
-                "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["schema"]} for t in tools]}
+        sys_field = self._prep_system(system)
+        tool_defs = [{"name": t["name"], "description": t["description"], "input_schema": t["schema"]}
+                     for t in tools]
+        msgs = messages
+        if _caching_on():
+            # Breakpoint on the tool array, the system prompt, and (rolling) the latest message, so the big
+            # re-sent prefix is served from cache at ~0.1x instead of full input price. Copies only - the
+            # caller's stored messages/tools stay breakpoint-free (see _mark_last / _cache_last_message).
+            tool_defs = _mark_last(tool_defs)
+            sys_field = _mark_last(sys_field if isinstance(sys_field, list)
+                                   else [{"type": "text", "text": sys_field or ""}])
+            msgs = _cache_last_message(messages)
+        body = {"model": self.model, "max_tokens": 8192, "system": sys_field, "messages": msgs, "tools": tool_defs}
         # Model-agnostic: NO native-thinking budget param. The agent's visible narration is captured/streamed
         # in parse(); we send the SAME request shape to every model, so none can 400 on a reasoning param.
         r = _post(self.api, json=body, timeout=180, headers=self._headers())

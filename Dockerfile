@@ -122,11 +122,20 @@ COPY server /opt/boxcutter/server
 RUN python3 -m venv /opt/srv \
  && /opt/srv/bin/pip install --no-cache-dir -r /opt/boxcutter/server/requirements.txt
 COPY --from=web /web/dist /opt/boxcutter/server/web_dist
+
+# --- MCP server mode (`boxcutter mcp`): expose the deterministic tools over the Model Context Protocol ---
+# The `mcp` SDK (+ its starlette/uvicorn transport) is an OPTIONAL dep, kept out of the lean engine. It goes in
+# the SAME /opt/srv venv the web server already uses (which has uvicorn/starlette/pydantic), so there is no
+# second copy of that stack. `boxcutter mcp` runs under system python (the ENTRYPOINT) and re-execs into this
+# venv for the SDK, while tools keep executing under the lean engine python - see boxcutter/mcp_server.py.
+COPY requirements-mcp.txt /opt/boxcutter/requirements-mcp.txt
+RUN /opt/srv/bin/pip install --no-cache-dir -r /opt/boxcutter/requirements-mcp.txt
 # DB + JWT secret + built-in-agent config persist here; mount a named volume to keep them across restarts.
 ENV DATA_DIR=/data \
     DATABASE_URL=sqlite:////data/boxcutter_ui.db \
     RUNNER_CONFIG=/data/runner-config.json \
     PYTHONUNBUFFERED=1
 VOLUME ["/data"]
-# 8000 = web UI/API (`boxcutter serve`); 7070 = a scanner's local control UI (`boxcutter agent`)
-EXPOSE 8000 7070
+# 8000 = web UI/API (`boxcutter serve`); 7070 = a scanner's local control UI (`boxcutter agent`);
+# 9000 = the MCP endpoint (`boxcutter mcp --http`, default port)
+EXPOSE 8000 7070 9000

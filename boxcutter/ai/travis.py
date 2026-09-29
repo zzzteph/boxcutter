@@ -36,7 +36,7 @@ from urllib.parse import urlparse
 from ..core import agentlog
 from ..core.envelope import debug_print, harvest_images, output_result
 from ..irvin import briefing
-from ..irvin.context import extract_json
+from ..irvin.context import extract_json, is_final_report
 from .provider import PROVIDERS, add_agent_args, make_provider
 from ..tools import toolschema
 
@@ -251,7 +251,7 @@ def _triage(provider, target_url: str, host: str, headers: list, tools_spec: lis
             final_text = text
             debug_print("travis> " + (" ".join(text.split()) if args.debug else " ".join(text.split())[:220]))
         if not calls:
-            if final_text.strip() and any(m in final_text for m in ("```json", '"interest"', '"looks_like"')):
+            if is_final_report(final_text, ("interest", "looks_like")):
                 interest = str((extract_json(final_text) or {}).get("interest") or "").lower()
                 checks = {"swagger-specs", "graphql-detect", "js-endpoints"}
                 if interest in ("high", "medium") and not (used & checks) and not depth_nudged:
@@ -478,7 +478,7 @@ def _agentic_discover(provider, domain: str, live: dict, resolved: dict, headers
             final_text = text
             debug_print("travis-disc> " + " ".join(text.split())[:200])
         if not calls:
-            if final_text.strip() and ('"ranked"' in final_text or "```json" in final_text):
+            if is_final_report(final_text, ("ranked",)):
                 break
             messages.append({"role": "user", "content": "Emit the ranked JSON now (or keep expanding with dnsx)."})
             continue

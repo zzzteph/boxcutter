@@ -209,6 +209,7 @@ a like-for-like swap for a deep scan.
 | engine | `boxcutter <tool> <target>` | - | one scan, JSON envelope on stdout |
 | server | `boxcutter serve` | `8000` (UI/API) | built-in agent; persist with `-v boxcutter-data:/data` |
 | agent | `boxcutter agent --server <URL> --token <T>` | `7070` (control UI) | scale-out scanner; publish `7070` to loopback only |
+| mcp | `boxcutter mcp [--http]` | `9000` (HTTP) | expose the tools over MCP to any agent; `--api-key` to gate |
 
 Agent flags and env vars:
 
@@ -222,6 +223,64 @@ Agent flags and env vars:
 | `OLLAMA_BASE_URL` | auto | point the agent at its Ollama for local models (e.g. `http://host.docker.internal:11434`) |
 
 The agent only needs to reach the server; the server never connects back to the agent.
+
+## MCP server
+
+Expose boxcutter's deterministic tools over the [Model Context Protocol](https://modelcontextprotocol.io) so
+any MCP client - Claude Desktop, an IDE agent, or your own orchestrator - can drive the toolkit. Each tool's
+name, description and JSON-Schema are generated straight from its own argparse, so the advertised contract can
+never drift from what the CLI accepts. Only the deterministic tools are exposed; the LLM-driven `ai` agents
+need a provider/API key and are deliberately not deployable here.
+
+Two transports:
+
+```bash
+# stdio - for clients that SPAWN boxcutter as a subprocess (configure this command in the client):
+boxcutter mcp
+
+# Streamable HTTP - a networked endpoint, with an optional shared-secret key:
+docker run -d --name boxcutter-mcp -p 9000:9000 \
+  -e BOXCUTTER_MCP_API_KEY=$SECRET \
+  ghcr.io/zzzteph/boxcutter mcp --http --host 0.0.0.0
+```
+
+The endpoint is at `http://<host>:9000/mcp` (`/health` is an open liveness probe). When a key is set, clients
+send it as `Authorization: Bearer <key>` or `X-API-Key: <key>`. Put TLS (a reverse proxy) in front for real
+exposure - the key is a deployment gate, not a substitute for it.
+
+### `--http` and `--host`
+
+`--http` picks the transport. Without it, `boxcutter mcp` speaks MCP over **stdio** (a client launches boxcutter
+as a child process and talks over stdin/stdout - for local clients like Claude Desktop). With `--http` it runs
+a **networked** Streamable HTTP server clients connect to at `http://<host>:9000/mcp`.
+
+`--host` is the interface the HTTP server binds to:
+
+- `127.0.0.1` (the default) - **loopback only**, reachable from the same machine/container.
+- `0.0.0.0` - **all interfaces**, reachable from outside.
+
+Inside Docker you need `--host 0.0.0.0`: `-p 9000:9000` forwards traffic to the container's *external* interface,
+so a process bound to `127.0.0.1` inside the container isn't reachable through the published port. `0.0.0.0` lets
+it accept the forwarded traffic (the same reason `boxcutter serve` binds `0.0.0.0`).
+
+`0.0.0.0` means anything that can route to the host can reach the endpoint, so pair it with the API key and TLS.
+If you don't need remote access, publish to loopback and tunnel instead - the container still binds `0.0.0.0`
+(so the port mapping works), but Docker only exposes it on the host's loopback:
+
+```bash
+docker run -d --name boxcutter-mcp -p 127.0.0.1:9000:9000 \
+  -e BOXCUTTER_MCP_API_KEY=$SECRET \
+  ghcr.io/zzzteph/boxcutter mcp --http --host 0.0.0.0
+
+# reach it from your own machine over SSH:
+ssh -L 9000:127.0.0.1:9000 user@mcp-host
+```
+
+Inspect what's exposed without a client: `boxcutter mcp --list-tools`, `--print-catalog` (JSON of every
+name/description/schema), or `--print-docs` (a Markdown reference). Per-call timeout is `--tool-timeout`
+(default 1800s); `--all-tools` advertises the full registry even where a binary isn't installed.
+
+From a source checkout (no Docker): `pip install -r requirements-mcp.txt` then `boxcutter mcp`.
 
 ## Output
 

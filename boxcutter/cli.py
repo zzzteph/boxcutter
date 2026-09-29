@@ -48,7 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="operating modes:\n"
                "  boxcutter <tool>|workflow|ai ...   run the scanning engine (default)\n"
                "  boxcutter serve                    run the web UI/API server (+ a built-in agent)\n"
-               "  boxcutter agent --server URL ...   run this host as a scale-out scanner\n",
+               "  boxcutter agent --server URL ...   run this host as a scale-out scanner\n"
+               "  boxcutter mcp [--http]             serve the tools over MCP (stdio or HTTP)\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"boxcutter {__version__}")
@@ -193,7 +194,7 @@ def _print_tool_list(show_all: bool = False) -> None:
 
 
 # Top-level subcommands that are neither a tool nor a workflow.
-_RESERVED_SUBCOMMANDS = {"workflow", "ai", "raw", "run", "agent", "serve", "forge"}
+_RESERVED_SUBCOMMANDS = {"workflow", "ai", "raw", "run", "agent", "serve", "forge", "mcp"}
 
 
 def _desugar(argv: list[str]) -> list[str]:
@@ -229,11 +230,13 @@ def main(argv: list[str] | None = None) -> int:
     # Operating modes: the same boxcutter runs as a server or a scanner agent, not just the CLI. These are
     # handled before the tool/workflow machinery (they have their own arg parsing and long-running loops), and
     # `serve` pulls in web deps only when invoked - the lean engine never imports them.
-    if raw_argv and raw_argv[0] in ("agent", "serve", "forge"):
+    if raw_argv and raw_argv[0] in ("agent", "serve", "forge", "mcp"):
         if raw_argv[0] == "agent":
             from . import agent as _mode
         elif raw_argv[0] == "forge":
             from .forge import conductor as _mode
+        elif raw_argv[0] == "mcp":
+            from . import mcp_server as _mode
         else:
             from . import serve as _mode
         return _mode.main(raw_argv[1:])
