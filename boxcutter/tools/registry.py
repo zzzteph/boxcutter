@@ -13,6 +13,7 @@ from ..ai import (
     crawlio,
     irvin,
     joseph,
+    joseph_mcp,
     juicy,
     logio,
     prawlio,
@@ -139,6 +140,9 @@ AI = [
     # Human-operator agent: live browser + ZAP + full tool registry + in-container scripting; one litellm brain
     # that THINKS OUT LOUD (a transparent reasoning stream) and acts, with parallel read-only analysts on a shared bus.
     joseph,
+    # joseph's operator brain, EXTERNAL: same think-out-loud loop, but every action is an MCP tools/call against
+    # a remote `boxcutter mcp` endpoint (deterministic tools + sandboxed run_shell/run_python) instead of in-process.
+    joseph_mcp,
 ]
 
 # Every command resolvable by NAME (tools + ai) - toolschema and the workflow runner look themselves up here.

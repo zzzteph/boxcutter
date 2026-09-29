@@ -85,7 +85,7 @@ def _do(page, action):
     elif verb in ("captcha", "wander", "humanize"):
         page.wander(float(rest) if rest.strip() else 3.0)   # idle human mouse drift to warm up a behaviour check
     elif verb == "screenshot":
-        png = page.screenshot()
+        png = page.screenshot(raw=True)
         if not png:
             return {"type": "screenshot", "image_path": "", "error": "empty screenshot"}
         # write the PNG to a temp file and hand back only the PATH (not base64): the executor loop reads it

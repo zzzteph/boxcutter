@@ -789,7 +789,7 @@ class _Operator:
             if what == "url":
                 return page.current_url()
             if what == "screenshot":
-                shot = page.screenshot()
+                shot = page.screenshot(raw=True)
                 name = f"shot_{int(time.time() * 1000)}.png"
                 path = os.path.join(self.workspace, "flows", name)
                 mode = "wb" if isinstance(shot, (bytes, bytearray)) else "w"

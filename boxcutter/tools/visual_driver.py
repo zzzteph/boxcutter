@@ -176,7 +176,7 @@ def _shoot(page, grid: int) -> bytes:
             drew = True
         except CDPError:
             drew = False
-    png = page.screenshot()
+    png = page.screenshot(raw=True)
     if drew:
         page.remove_grid()
     return png

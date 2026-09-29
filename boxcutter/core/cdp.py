@@ -368,10 +368,11 @@ class Chrome:
         except CDPError:
             return ""
 
-    def screenshot(self, full_page: bool = False, scale: float = 1.0) -> str:
-        """Capture the page as a PNG, returned base64-encoded. ``full_page`` grabs the
-        whole scrollable document; otherwise just the viewport. ``scale`` downsamples
-        the capture (e.g. 0.25 for a thumbnail) via the CDP clip - no image library."""
+    def screenshot(self, full_page: bool = False, scale: float = 1.0, *, raw: bool = False):
+        """Capture the page as a PNG. Returns base64 TEXT by default (what the screenshot tool stores); with
+        ``raw=True`` returns decoded BYTES (what an agent's vision path writes/forwards). ``full_page`` grabs the
+        whole scrollable document; ``scale`` downsamples via the CDP clip (e.g. 0.25 for a thumbnail) - no image
+        library. Lets both a tool keep the capture AND an agent SEE what is rendered right now, from one method."""
         params: dict = {"format": "png"}
         if full_page or scale != 1.0:
             if full_page:
@@ -383,7 +384,8 @@ class Chrome:
                 w, h = self.viewport or (1920, 1080)
             if w and h:
                 params["clip"] = {"x": 0, "y": 0, "width": w, "height": h, "scale": scale}
-        return (self._cmd("Page.captureScreenshot", params) or {}).get("data", "")
+        data = (self._cmd("Page.captureScreenshot", params) or {}).get("data", "")
+        return (base64.b64decode(data) if data else b"") if raw else data
 
     def _act(self, find: str, body: str) -> None:
         self.eval(f"(()=>{{const e={find}; if(!e) throw new Error('element not found'); {body}}})()")
@@ -590,15 +592,6 @@ class Chrome:
                 "return best;})()" % json.dumps(q))
         except CDPError:
             return None
-
-    def screenshot(self) -> bytes:
-        """Capture the current page as PNG bytes (Page.captureScreenshot). Lets an agent SEE what is
-        rendered right now - the real login form, an unexpected consent/MFA/error screen, a CSS-in-JS theme
-        with no usable field ids - instead of reasoning blind from the DOM alone. Returns b'' if the browser
-        hands back nothing."""
-        r = self._cmd("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False})
-        data = r.get("data") or ""
-        return base64.b64decode(data) if data else b""
 
     # -- human-like coordinate input (the visual driver) ---------------------
     # The agent decides WHERE (an x,y read off the coordinate grid); these decide HOW - a real, trusted mouse

@@ -82,7 +82,7 @@ def run(args) -> int:
             except Exception:  # noqa: BLE001
                 events = []
             try:
-                shot = page.screenshot()
+                shot = page.screenshot(raw=True)
             except Exception:  # noqa: BLE001
                 shot = b""
     except Exception as exc:  # noqa: BLE001
