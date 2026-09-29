@@ -104,10 +104,16 @@ ENV NODE_PATH=/usr/share/crack-js/node_modules
 # Alpine/musl but Claude Code targets glibc, so we add gcompat (glibc shim) + a musl-native ripgrep and set
 # USE_BUILTIN_RIPGREP=0 so it uses that instead of its bundled glibc build. Gate off with
 # `--build-arg INSTALL_CLAUDE_CODE=false` to keep the image lean.
+# amd64 only: the Claude Code CLI's bundled runtime SIGILLs ("Illegal instruction") under QEMU-emulated arm64
+# during a multi-arch buildx, so installing/running it there fails the whole build - and the CLI can't run on
+# that emulated path anyway. TARGETARCH is provided automatically by buildx; gate the step to amd64 so arm64
+# images build fine (they simply omit the `forge` claude-code backend). Force it on elsewhere by building a
+# single-arch amd64 image, or with `--build-arg INSTALL_CLAUDE_CODE=false` to skip it everywhere.
 ARG INSTALL_CLAUDE_CODE=true
+ARG TARGETARCH
 ENV CLAUDE_CONFIG_DIR=/data/.claude \
     USE_BUILTIN_RIPGREP=0
-RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ]; then \
+RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ] && [ "$TARGETARCH" = "amd64" ]; then \
         apk add --no-cache ripgrep gcompat && \
         npm install -g --no-audit --no-fund @anthropic-ai/claude-code && \
         npm cache clean --force && \
