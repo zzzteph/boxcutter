@@ -276,6 +276,31 @@ docker run -d --name boxcutter-mcp -p 127.0.0.1:9000:9000 \
 ssh -L 9000:127.0.0.1:9000 user@mcp-host
 ```
 
+### Long-running tools & timeouts
+
+Assume **every** call can take minutes - `nuclei`, `sqlmap`, the `zap-scan-*` scanners and `harvest` routinely
+do. An MCP `tools/call` is **synchronous**: the client holds the connection open and receives the result when
+the tool finishes (correlated by JSON-RPC id). There is no separate job queue to poll. Calls run **concurrently**
+in their own worker threads, so a slow tool never blocks the others - results just come back as each finishes.
+
+The server never cuts a call short on its own; the only server-side bound is `--tool-timeout` (default `1800`s /
+30 min), after which that one call returns a `{"success": false, "error": "… timed out"}` envelope. Raise it for
+long scans (`--tool-timeout 3600`, or `0` for no limit).
+
+The real risk with a minutes-long call is an *idle* timeout on the connection, not the server:
+
+- **HTTP, default transport (SSE):** the stream sends a keepalive `: ping` every **15s** while the tool runs, so
+  a reverse proxy / load balancer only drops the call if its idle timeout is under 15s. This is the recommended
+  transport for long tools.
+- **HTTP `--json-response`:** one plain response held open with **no keepalive** until the tool finishes - more
+  likely to be cut by a proxy on a long call. Don't use it for slow tools.
+- **stdio:** no HTTP layer, so no HTTP timeout - only the client's own MCP request timeout applies.
+
+So for slow tools: keep the default SSE transport, set `--tool-timeout` above your longest scan, and raise the
+**client's** read timeout and any **reverse-proxy / load-balancer** read/idle timeout (e.g. nginx
+`proxy_read_timeout 3600s`) above the longest expected runtime. (If you need fire-and-forget jobs decoupled from
+a live connection, that's what the `boxcutter serve` + `agent` fleet is for; the MCP server is synchronous.)
+
 Inspect what's exposed without a client: `boxcutter mcp --list-tools`, `--print-catalog` (JSON of every
 name/description/schema), or `--print-docs` (a Markdown reference). Per-call timeout is `--tool-timeout`
 (default 1800s); `--all-tools` advertises the full registry even where a binary isn't installed.
