@@ -120,22 +120,17 @@ RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ] && [ "$TARGETARCH" = "amd64" ]; then 
         claude --version ; \
     fi
 
-# --- web server mode (`boxcutter serve`): FastAPI API + the built SPA + a built-in agent ---
-# Server deps go in a DEDICATED venv so the lean engine's system-python imports stay untouched (the base marks
-# system python externally-managed, PEP 668). `boxcutter serve` execs this venv for uvicorn; the engine and
-# `boxcutter agent` keep using the on-PATH python. The agent mode needs no extra deps - it is stdlib + the engine.
+# --- non-engine modes (`boxcutter serve` + `boxcutter mcp`): install the full requirements.txt into a venv ---
+# The heavier deps (FastAPI/uvicorn for serve, the MCP SDK + its starlette/uvicorn transport for mcp) go in a
+# DEDICATED venv so the lean engine's system-python imports stay untouched (the base marks system python
+# externally-managed, PEP 668). `boxcutter serve` execs this venv for uvicorn; `boxcutter mcp` re-execs into it
+# for the MCP SDK - and in both cases the scanning TOOLS still run under the on-PATH engine python. The engine
+# and `boxcutter agent` need nothing from here (stdlib + requests/websocket-client already present).
+COPY requirements.txt /opt/boxcutter/requirements.txt
 COPY server /opt/boxcutter/server
 RUN python3 -m venv /opt/srv \
- && /opt/srv/bin/pip install --no-cache-dir -r /opt/boxcutter/server/requirements.txt
+ && /opt/srv/bin/pip install --no-cache-dir -r /opt/boxcutter/requirements.txt
 COPY --from=web /web/dist /opt/boxcutter/server/web_dist
-
-# --- MCP server mode (`boxcutter mcp`): expose the deterministic tools over the Model Context Protocol ---
-# The `mcp` SDK (+ its starlette/uvicorn transport) is an OPTIONAL dep, kept out of the lean engine. It goes in
-# the SAME /opt/srv venv the web server already uses (which has uvicorn/starlette/pydantic), so there is no
-# second copy of that stack. `boxcutter mcp` runs under system python (the ENTRYPOINT) and re-execs into this
-# venv for the SDK, while tools keep executing under the lean engine python - see boxcutter/mcp_server.py.
-COPY requirements-mcp.txt /opt/boxcutter/requirements-mcp.txt
-RUN /opt/srv/bin/pip install --no-cache-dir -r /opt/boxcutter/requirements-mcp.txt
 # DB + JWT secret + built-in-agent config persist here; mount a named volume to keep them across restarts.
 ENV DATA_DIR=/data \
     DATABASE_URL=sqlite:////data/boxcutter_ui.db \

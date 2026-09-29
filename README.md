@@ -184,7 +184,7 @@ For a permanent endpoint, put nginx (with TLS and auth) in front of `127.0.0.1:7
 publishing `7070` on a public interface. The agent never needs its port reachable from the server;
 only the agent needs to reach the server.
 
-From a source checkout (no Docker): `pip install -r server/requirements.txt` then
+From a source checkout (no Docker): `pip install -r requirements.txt` then
 `boxcutter serve`. Agents need no extra dependencies: `boxcutter agent --server ... --token ...`.
 
 ### Local models (Ollama)
@@ -305,7 +305,7 @@ Inspect what's exposed without a client: `boxcutter mcp --list-tools`, `--print-
 name/description/schema), or `--print-docs` (a Markdown reference). Per-call timeout is `--tool-timeout`
 (default 1800s); `--all-tools` advertises the full registry even where a binary isn't installed.
 
-From a source checkout (no Docker): `pip install -r requirements-mcp.txt` then `boxcutter mcp`.
+From a source checkout (no Docker): `pip install -r requirements.txt` then `boxcutter mcp`.
 
 ## Output
 

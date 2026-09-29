@@ -1,6 +1,0 @@
-# Dependencies for `boxcutter mcp` (the Model Context Protocol server). NOT needed for the engine, the CLI,
-# `boxcutter agent`, or `boxcutter serve`. Kept out of the lean engine on purpose - install only to expose the
-# tools over MCP:  pip install -r requirements-mcp.txt
-#
-# The SDK brings its own transport stack (starlette + uvicorn + sse-starlette) for the Streamable HTTP mode.
-mcp>=1.6,<2

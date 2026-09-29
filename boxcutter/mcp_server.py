@@ -20,7 +20,7 @@ never drift from what the CLI actually accepts.
 The ``mcp`` SDK is an OPTIONAL dependency, kept out of the lean engine exactly like the web server's deps.
 Install it with::
 
-    pip install -r requirements-mcp.txt      # then: boxcutter mcp
+    pip install -r requirements.txt      # then: boxcutter mcp
 
 Full generated documentation of every exposed tool: ``boxcutter mcp --print-docs`` (or see docs/MCP_TOOLS.md).
 """
@@ -422,7 +422,7 @@ def main(argv=None) -> int:
     _reexec_into_sdk_python([] if argv is None else list(argv))
     if _import_mcp() is None:
         _log("the MCP SDK is not installed. Install it with:\n"
-             "    pip install -r requirements-mcp.txt\n"
+             "    pip install -r requirements.txt\n"
              "(kept out of the lean engine on purpose, like the web server's deps).")
         return 1
 

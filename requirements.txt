@@ -1,6 +1,29 @@
-# boxcutter's core dependency.
-requests>=2.28
+# boxcutter dependencies - one file for every mode.
+#
+# The lean scanning ENGINE and `boxcutter agent` need only `requests` (plus websocket-client for the browser
+# tools). In the Docker image those come from the base (apk py3-requests) + a websocket-client pip install, so
+# the engine layer never pulls the heavier deps below. The web SERVER (`boxcutter serve`) and the MCP server
+# (`boxcutter mcp`) need the rest; in the image the whole file installs into a dedicated /opt/srv venv, leaving
+# the engine's system-python imports untouched. From a source checkout, `pip install -r requirements.txt` gets
+# everything (or just `pip install requests websocket-client` for engine-only use).
 
-# The browser tools (harvest/login/actions) drive chromium over CDP with this. Pure-Python, installs
-# on musl. Optional: when it's absent those tools degrade gracefully, the rest of boxcutter is unaffected.
+# --- engine + agent (always) ---
+requests>=2.31
+# Browser tools (harvest/login/actions) drive chromium over CDP; pure-Python, installs on musl. Optional: when
+# absent those tools degrade gracefully and the rest of boxcutter is unaffected.
 websocket-client>=1.6
+
+# --- web server: `boxcutter serve` (FastAPI API + built SPA + a built-in agent) ---
+fastapi>=0.110
+uvicorn[standard]>=0.27
+sqlmodel>=0.0.16
+pydantic-settings>=2.2
+passlib[bcrypt]>=1.7
+bcrypt>=4.0.1,<4.1
+pyjwt>=2.8
+python-multipart>=0.0.9
+pymysql>=1.1
+psycopg[binary]>=3.1     # Postgres driver — set DATABASE_URL=postgresql+psycopg://user:pass@host/db to use it
+
+# --- MCP server: `boxcutter mcp` (brings its own starlette/uvicorn/sse-starlette transport) ---
+mcp>=1.6,<2

@@ -5,7 +5,7 @@ The server's own dependencies (FastAPI / uvicorn / SQLModel / ...) are deliberat
 engine. In the published image they live in a dedicated venv, and ``serve`` re-execs that interpreter when the
 current one can't import uvicorn. To run ``serve`` from a source checkout, install them first:
 
-    pip install -r server/requirements.txt   # then: boxcutter serve
+    pip install -r requirements.txt   # then: boxcutter serve
 
 The built-in agent auto-enrolls to the local server and starts IDLE (0 slots) - raise it from the Scanners
 page, or run separate ``boxcutter agent`` hosts to scale out.
@@ -42,7 +42,7 @@ def _server_python() -> list:
         if cand and os.path.exists(cand):
             return [cand]
     _log("server dependencies not found. Install them with:\n"
-         "    pip install -r server/requirements.txt\n"
+         "    pip install -r requirements.txt\n"
          "or use the boxcutter Docker image, which bundles them.")
     return []
 
