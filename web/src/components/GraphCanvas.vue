@@ -6,7 +6,6 @@
 // are rejected; the server validates deeper cycles). Owns its {nodes, edges} state and emits `change`; seed via
 // :initial. The canvas is zoomable (the +/− controls or ctrl/⌘ + wheel).
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import Select from './Select.vue'
 
 const props = defineProps({
   initial: { type: Object, default: () => ({ nodes: [], edges: [] }) },
@@ -33,16 +32,19 @@ function onWheel(e) { if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoomBy(e
 const kindOf = (tool) => props.catalog.find(t => t.name === tool)?.kind || ''
 const isTerminal = (tool) => !!props.catalog.find(t => t.name === tool)?.terminal
 const hasInput = (id) => edges.some(e => e.to === id)   // is this box fed by an upstream box?
-// grouped picker: the catalog arrives sorted by pipeline stage, so insert a header when the group changes
-const toolOpts = computed(() => {
-  const out = []; let g = null
+// the "add a box" PALETTE: the catalog arrives sorted by pipeline stage; group it so you click a tool to drop
+// a box, instead of hunting in a dropdown.
+const paletteOpen = ref(false)
+const grouped = computed(() => {
+  const order = []; const map = {}
   for (const t of props.catalog) {
-    if (t.group && t.group !== g) { g = t.group; out.push({ header: true, label: g }) }
-    out.push({ value: t.name, label: `${t.name} · ${t.kind}` })
+    const g = t.group || 'Other'
+    if (!map[g]) { map[g] = { group: g, tools: [] }; order.push(map[g]) }
+    map[g].tools.push(t)
   }
-  return out
+  return order
 })
-const addTool = ref('')
+function pick(tool) { addNode(tool) }      // keep the palette open so several boxes can be added in a row
 
 // per-box condition (only on a wired box): run it only on the upstream URLs that contain / don't contain a value
 const condOf = (n) => n.when || { mode: 'contains', value: '' }
@@ -75,7 +77,6 @@ function addNode(tool) {
   const id = 'b' + (++seq)
   // stagger new boxes so they don't stack exactly on top of each other
   nodes.push({ id, tool, args: '', when: null, conditions: tool === 'filter' ? [{ mode: 'contains', value: '' }] : null, repeat: null, x: 40 + (nodes.length % 4) * 40, y: 40 + (nodes.length % 6) * 30 })
-  addTool.value = ''
   emitChange()
 }
 function removeNode(id) {
@@ -177,13 +178,24 @@ onBeforeUnmount(() => {
 <template>
   <div class="gc">
     <div class="gc-bar">
-      <div class="gc-add"><Select v-model="addTool" :options="toolOpts" placeholder="+ add a tool box…" @change="addNode" /></div>
-      <span class="muted" style="font-size:12px">Drag a box to move · drag its right dot onto another box's left dot to wire · a box can take several inputs · findings tools have no output.</span>
+      <button class="gc-addbtn" @click="paletteOpen = !paletteOpen">{{ paletteOpen ? '✕ Close' : '➕ Add a box' }}</button>
+      <span class="muted" style="font-size:12px">A box with no wire in runs on the <b>scan Target</b> (the
+        host/URL/domain you give the scan) · a wired box runs on what feeds it · drag a box's right dot onto
+        another's left dot to wire · a box can take several inputs.</span>
       <span class="gc-zoom">
         <button class="gc-zbtn" title="Zoom out" @click="zoomBy(-0.1)">−</button>
         <button class="gc-zbtn gc-zlabel" title="Reset zoom" @click="zoomReset">{{ Math.round(zoom * 100) }}%</button>
         <button class="gc-zbtn" title="Zoom in" @click="zoomBy(0.1)">+</button>
       </span>
+    </div>
+    <div v-if="paletteOpen" class="gc-palette">
+      <div v-for="g in grouped" :key="g.group" class="gc-pcol">
+        <div class="gc-pgroup">{{ g.group }}</div>
+        <button v-for="t in g.tools" :key="t.name" class="gc-chip"
+                :title="(t.description || '') + '  → out: ' + t.kind" @click="pick(t.name)">
+          <span class="gc-chipn">{{ t.name }}</span><span class="gc-chipk">{{ t.kind }}</span>
+        </button>
+      </div>
     </div>
     <div ref="canvas" class="gc-canvas" :class="{ wiring: drag.mode === 'wire' }" @wheel="onWheel">
       <div class="gc-world" :style="{ transform: `scale(${zoom})`, transformOrigin: '0 0' }">
@@ -203,8 +215,9 @@ onBeforeUnmount(() => {
           <span class="gc-kind" :class="isTerminal(n.tool) ? 'terminal' : 'chain'">{{ kindOf(n.tool) || 'items' }}</span>
           <button class="danger ghost icon gc-x" title="Remove" @pointerdown.stop @click="removeNode(n.id)">✕</button>
         </div>
-        <div class="gc-io" :title="'what this box consumes and produces'">
-          in: {{ hasInput(n.id) ? 'wired URLs' : 'the Target' }} →
+        <div class="gc-io"
+             title="A box with no wire in runs on the scan's Target (the host/URL/domain you give the scan in New Scan). A wired box runs on what the boxes feeding it produced.">
+          in: {{ hasInput(n.id) ? 'wired input' : 'scan Target' }} →
           out: {{ isTerminal(n.tool) ? kindOf(n.tool) + ' (terminal)' : (kindOf(n.tool) || 'items') }}
         </div>
         <!-- filter box: several keep/reject conditions, ALL must pass -->
@@ -255,7 +268,18 @@ onBeforeUnmount(() => {
   --accent: var(--primary, #8ab4f8);
 }
 .gc-bar { display: flex; align-items: center; gap: 12px; }
-.gc-add { width: 260px; }
+.gc-addbtn { font-size: 13px; font-weight: 600; padding: 5px 12px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--primary, #8ab4f8); color: var(--on-primary, #06264d); cursor: pointer; }
+.gc-palette { display: flex; flex-wrap: wrap; gap: 14px; padding: 10px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--panel-2); max-height: 220px; overflow: auto; }
+.gc-pcol { display: flex; flex-direction: column; gap: 5px; min-width: 150px; }
+.gc-pgroup { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.gc-chip { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px;
+  padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+  color: var(--text); cursor: pointer; text-align: left; }
+.gc-chip:hover { border-color: var(--primary, #8ab4f8); }
+.gc-chipn { font-weight: 600; }
+.gc-chipk { font-size: 10px; color: var(--muted); }
 .gc-zoom { margin-left: auto; display: flex; gap: 4px; }
 .gc-zbtn { font-size: 12px; padding: 2px 9px; border: 1px solid var(--line, #ccc); border-radius: 6px;
   background: var(--panel-2, #f3f4f6); color: var(--text, #16181d); cursor: pointer; }

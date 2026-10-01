@@ -177,8 +177,9 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None) -> dict:
             raise WorkflowError("an edge references an unknown box")
         if src == dst:
             raise WorkflowError("a box can't feed itself")
-        if by_id[src]["kind"] == "findings":
-            raise WorkflowError(f"'{by_id[src]['tool']}' produces findings, not targets — it can't feed a box")
+        if by_id[src]["kind"] == "findings" and by_id[dst]["tool"] not in _FLOW_TOOLS:
+            raise WorkflowError(f"'{by_id[src]['tool']}' produces findings — it can only feed a flow box "
+                                "(filter / limit), not a scanner that needs a target")
         incoming[dst].append(src)
         outgoing[src].append(dst)
 
@@ -189,14 +190,29 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None) -> dict:
     for nid in order:
         node = by_id[nid]
         parents = incoming[nid]
-        if node["tool"] in _FLOW_TOOLS:                # flow nodes: shape parents' URL stream (no tool runs).
-            # collect every parent into one var via select+save (merges + dedups); `hosts` collapses URLs to
-            # hostnames; then a finalize pass sorts (aggregate) or caps (limit). `filter` keeps/rejects by its
-            # condition (contains = keep, excludes = reject). Boxes wired AFTER run over the resulting set.
+        if node["tool"] in _FLOW_TOOLS:                # flow nodes: shape the parents' stream (no tool runs).
+            # Work on WHATEVER the parents produce - urls, items, or findings:
+            #   * findings in  -> filter/limit the shared `findings` set in place (keeps the finding objects);
+            #   * urls/items in -> `filter`/`limit` PRESERVE the items (no url coercion), `hosts` collapses to
+            #     hostnames, `aggregate` collects + sorts a URL set. A box wired AFTER runs over the result.
+            findings_mode = bool(parents) and all(by_id[p]["kind"] == "findings" for p in parents)
+            if findings_mode:
+                # all parents' findings live in the shared `findings` var; filter/limit it in place. This box is
+                # then itself a findings box (feeds only other flow boxes; its result is in the workflow output).
+                by_id[nid]["kind"] = "findings"
+                sel = "findings" + _cond_chain(node)                  # class/severity/contains/excludes on findings
+                if node["tool"] == "limit":
+                    sel += " | limit:" + str(_limit_count(node["args"]))
+                steps.append({"select": "${" + sel + "}", "set": "findings"})
+                continue
             fvar = _var(nid)
-            base = " | urls | hosts" if node["tool"] == "hosts" else " | urls"
             for pid in parents:
-                proj = _var(pid) + base + _cond_chain(node)   # keep/reject condition(s): all must pass
+                if node["tool"] == "hosts":
+                    proj = _var(pid) + " | urls | hosts"
+                elif node["tool"] == "aggregate":
+                    proj = _var(pid) + " | urls" + _cond_chain(node)
+                else:                                     # filter / limit: keep the item kind (urls OR items)
+                    proj = _var(pid) + _cond_chain(node)
                 steps.append({"select": "${" + proj + "}", "save": fvar})
             if parents and node["tool"] == "aggregate":
                 steps.append({"select": "${" + fvar + " | sort}", "set": fvar})            # dedup + sort
