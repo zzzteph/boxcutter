@@ -37,6 +37,12 @@ def _unique(items: list) -> list:
     return dedupe([u for u in items if isinstance(u, str)])
 
 
+def _sort(items: list) -> list:
+    """Sort the string items alphabetically (and drop non-strings) - so an aggregated set reads in a stable,
+    predictable order instead of discovery order. De-dupes as a side effect."""
+    return sorted({u for u in items if isinstance(u, str)})
+
+
 def _hosts(items: list) -> list:
     """Hostname of each value; a bare domain (no scheme) is kept as-is."""
     out: list[str] = []
@@ -84,6 +90,7 @@ FILTERS = {
     "js": _js,
     "dedup": _dedup,
     "unique": _unique,
+    "sort": _sort,
     "hosts": _hosts,
     "url": _url,
     "urls": _urls,
@@ -157,9 +164,26 @@ def _excludes(arg: str, items: list) -> list:
     return [it for it in items if a not in _item_text(it).lower()]
 
 
+def _severity(arg: str, items: list) -> list:
+    """Keep findings whose severity is in the comma-separated allowlist, e.g. ``severity:critical,high``."""
+    want = {s.strip().lower() for s in arg.split(",") if s.strip()}
+    return [f for f in items if isinstance(f, dict) and str(f.get("severity", "")).lower() in want]
+
+
+def _limit(arg: str, items: list) -> list:
+    """Keep only the first N items, e.g. ``limit:200`` - to bound cost on a huge recon set."""
+    try:
+        n = int(arg)
+    except (TypeError, ValueError):
+        return items
+    return items[:max(0, n)]
+
+
 PARAM_FILTERS = {
     "class": _class,
     "not-class": _not_class,
     "contains": _contains,
     "excludes": _excludes,
+    "severity": _severity,
+    "limit": _limit,
 }

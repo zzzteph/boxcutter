@@ -26,6 +26,9 @@ Step keys:
   workflow: <name>                run another workflow
   for_each: <ref> + do: [steps]   run nested steps per item; the current item is
                                   ${<list>.item}, e.g. for_each ${live} -> ${live.item}
+  repeat:   <ref> + do: [steps]   re-run the nested steps until <ref> stops growing (a
+                  [+ max: N]      fixpoint) or N rounds (default 3, max 10) - recursion,
+                                  e.g. discover hosts -> find more -> rediscover
 Top-level ``output: <var>`` names the variable to emit (default: nothing).
 
 Filters (piped with ``|`` inside ``${...}``): plain ``name`` filters (see
@@ -158,6 +161,27 @@ def _run_step(step: dict, variables: dict, args, dbg) -> None:
                 _run_step(sub, variables, args, dbg)
         variables["_target"] = outer_target
         variables[var] = outer_item
+        return
+
+    if "repeat" in step:
+        # RECURSION: re-run the nested do: steps until the watched list stops growing (a fixpoint) or `max`
+        # rounds, whichever comes first - e.g. discover hosts -> find endpoints -> discover more hosts ->
+        # rediscover. `save` merges+dedups so the set only grows and converges; the scope guard on every save
+        # keeps new discoveries in-scope; `max` (clamped 1..10) hard-bounds it so the loop always terminates.
+        do = step.get("do", [])
+        try:
+            rounds = int(step.get("max", 3))
+        except (TypeError, ValueError):
+            rounds = 3
+        rounds = max(1, min(rounds, 10))
+        for r in range(rounds):
+            before = len(_resolve_list(step["repeat"], variables))
+            for sub in do:
+                _run_step(sub, variables, args, dbg)
+            after = len(_resolve_list(step["repeat"], variables))
+            dbg(f"repeat round {r + 1}/{rounds}: {before} -> {after} item(s)")
+            if after <= before:                         # no new items this round -> stable, stop
+                break
         return
 
     if "select" in step:

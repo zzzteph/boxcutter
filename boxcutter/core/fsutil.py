@@ -28,14 +28,6 @@ def read_text(path: str) -> str:
         return ""
 
 
-def read_bytes(path: str) -> bytes | None:
-    try:
-        with open(path, "rb") as fh:
-            return fh.read()
-    except OSError:
-        return None
-
-
 def remove(path: str) -> None:
     """Best-effort unlink - never raises."""
     try:

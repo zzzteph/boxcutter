@@ -640,38 +640,6 @@ def _j(raw):
         return {}
 
 
-# ==============================================================================================================
-# bob reuse - run bob's FULL check battery (LLM loop + every backstop) with caleb's headers/context injected.
-# ==============================================================================================================
-def _bob_scan(target, headers, context, args, tag, max_steps=None) -> tuple:
-    """Invoke bob.run in-process with a constructed args namespace; return (findings, envelope). This is caleb's
-    per-phase scanning muscle: bob's whole battery, authenticated by the injected header list."""
-    out = os.path.join(_scratch(), f"caleb_bob_{tag}_{random.randint(1000,9999)}.json")
-    ns = types.SimpleNamespace(
-        target=target, header=list(headers or []), context=context or "",
-        provider=args.provider, model=args.model, api_key=args.api_key, base_url=args.base_url,
-        max_steps=max_steps or args.max_steps, report=None, output=out, table=False,
-        debug=args.debug, jsonl=None, severity=None)
-    set_output_kind("findings")
-    try:
-        bob.run(ns)
-    except Exception as exc:  # noqa: BLE001
-        debug_print(f"caleb :: bob scan ({tag}) error: {exc}")
-        return [], {}
-    env = {}
-    try:
-        with open(out, encoding="utf-8") as fh:
-            env = json.load(fh)
-    except Exception:  # noqa: BLE001
-        pass
-    finally:
-        try:
-            os.remove(out)
-        except OSError:
-            pass
-    return (env.get("data") or []), env
-
-
 def _scratch() -> str:
     d = os.environ.get("TEMP") or os.environ.get("TMPDIR") or "/tmp"
     return d
@@ -1881,23 +1849,6 @@ def phase_p4_review(store: ArtifactStore, sm: SessionManager, args) -> bool:
 # ==============================================================================================================
 # helpers shared by phases
 # ==============================================================================================================
-def _endpoint_context(store: ArtifactStore) -> str:
-    """A compact, agnostic inventory line so bob's LLM does not have to re-discover what caleb already mapped."""
-    eps = [f"{e['method']} {urlparse(e['url']).path}" for e in store.endpoints[:60]]
-    return "Known endpoints (already discovered - test these, don't re-crawl): " + "; ".join(dict.fromkeys(eps)) if eps else ""
-
-
-def _scope_context(store: ArtifactStore, inv: str, sess: dict | None) -> str:
-    parts = [f"SCOPE: {', '.join(store.hosts)} (the app's own UI + backend/API hosts)."]
-    if inv:
-        parts.append(inv)
-    if sess:
-        parts.append(f"You are AUTHENTICATED as identity {sess['label']} (role {sess.get('role')}); the auth "
-                     "header is already injected on every request - now exercise the authenticated surface: "
-                     "auth-gated IDOR/BOLA, excessive-data, mass-assignment, privilege-esc, business logic.")
-    return "\n".join(parts)
-
-
 def _tag_identity(findings: list, sess: dict) -> list:
     out = []
     for f in (findings or []):

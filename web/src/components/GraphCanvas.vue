@@ -1,9 +1,10 @@
 <script setup>
 // A small dependency-free node-graph editor: draggable tool boxes wired producer -> consumer. Boxes are
 // absolutely-positioned divs; edges are SVG bezier paths under them. Ports are typed from the tool catalog —
-// a `findings` (terminal) tool has NO output port, so it can't feed a downstream box. A box takes at most one
-// input (dropping a new wire onto an occupied input replaces it), which keeps the graph a DAG the compiler
-// accepts. Owns its own {nodes, edges} state and emits `change`; seed edit mode via :initial.
+// a `findings` (terminal) tool has NO output port, so it can't feed a downstream box. A box may take MULTIPLE
+// inputs (fan-in): it then runs on the UNION of every upstream's URLs. The graph stays a DAG (direct back-edges
+// are rejected; the server validates deeper cycles). Owns its {nodes, edges} state and emits `change`; seed via
+// :initial. The canvas is zoomable (the +/− controls or ctrl/⌘ + wheel).
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import Select from './Select.vue'
 
@@ -22,6 +23,12 @@ let seq = 0
 
 const canvas = ref(null)
 const drag = reactive({ mode: null, id: null, ox: 0, oy: 0, fromId: null, mx: 0, my: 0 })
+
+// zoom: the node/edge world is scaled from the top-left; pointer coords are divided by it (see local()).
+const zoom = ref(1)
+function zoomBy(d) { zoom.value = Math.min(1.6, Math.max(0.4, Math.round((zoom.value + d) * 100) / 100)) }
+function zoomReset() { zoom.value = 1 }
+function onWheel(e) { if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoomBy(e.deltaY < 0 ? 0.1 : -0.1) } }
 
 const kindOf = (tool) => props.catalog.find(t => t.name === tool)?.kind || ''
 const isTerminal = (tool) => !!props.catalog.find(t => t.name === tool)?.terminal
@@ -43,9 +50,15 @@ function setCondMode(n, mode) { const w = condOf(n); n.when = { mode, value: w.v
 function toggleMode(n) { setCondMode(n, condOf(n).mode === 'excludes' ? 'contains' : 'excludes') }
 function setCondVal(n, v) { n.when = { mode: condOf(n).mode, value: v }; emitChange() }
 
+// per-box "repeat until stable": re-run this box on its own newly-discovered URLs until nothing new (bounded).
+const repeatOf = (n) => n.repeat || null
+function toggleRepeat(n) { n.repeat = n.repeat ? null : { max: 3 }; emitChange() }
+function setRepeatMax(n, v) { n.repeat = { max: Math.max(1, Math.min(10, parseInt(v, 10) || 3)) }; emitChange() }
+
 function emitChange() {
   emit('change', {
-    nodes: nodes.map(n => ({ id: n.id, tool: n.tool, args: n.args, x: n.x, y: n.y, when: n.when || null })),
+    nodes: nodes.map(n => ({ id: n.id, tool: n.tool, args: n.args, x: n.x, y: n.y,
+                             when: n.when || null, repeat: n.repeat || null })),
     edges: edges.map(e => ({ from: e.from, to: e.to })),
   })
 }
@@ -54,7 +67,7 @@ function addNode(tool) {
   if (!tool) return
   const id = 'b' + (++seq)
   // stagger new boxes so they don't stack exactly on top of each other
-  nodes.push({ id, tool, args: '', when: null, x: 40 + (nodes.length % 4) * 40, y: 40 + (nodes.length % 6) * 30 })
+  nodes.push({ id, tool, args: '', when: null, repeat: null, x: 40 + (nodes.length % 4) * 40, y: 40 + (nodes.length % 6) * 30 })
   addTool.value = ''
   emitChange()
 }
@@ -90,7 +103,8 @@ const tempPath = computed(() => {
 
 function local(e) {
   const r = canvas.value.getBoundingClientRect()
-  return { x: e.clientX - r.left, y: e.clientY - r.top }
+  // the world is scaled from 0,0, so convert screen offset back to world coords by dividing by the zoom
+  return { x: (e.clientX - r.left) / zoom.value, y: (e.clientY - r.top) / zoom.value }
 }
 
 // ---- move a box ----
@@ -131,18 +145,18 @@ function endDrag(e) {
 function connect(from, to) {
   if (from === to) return
   if (isTerminal(nodeById(from)?.tool)) return    // a findings box has no output (shouldn't happen: no port)
-  // a box takes at most one input — replace any existing incoming edge on the target
-  for (let i = edges.length - 1; i >= 0; i--) if (edges[i].to === to) edges.splice(i, 1)
+  if (edges.some(e => e.from === from && e.to === to)) return   // already wired — no duplicate
   // reject a direct back-edge (from is already downstream of to) to avoid the obvious 2-cycle; the server
   // validates deeper cycles and surfaces the message.
   if (edges.some(e => e.from === to && e.to === from)) return
+  // fan-in allowed: a box may have several incoming edges; it runs on the union of its upstreams' URLs.
   edges.push({ from, to })
   emitChange()
 }
 
 onMounted(() => {
   for (const n of (props.initial?.nodes || [])) {
-    nodes.push({ id: n.id, tool: n.tool, args: n.args || '', when: n.when || null, x: n.x ?? 40, y: n.y ?? 40 })
+    nodes.push({ id: n.id, tool: n.tool, args: n.args || '', when: n.when || null, repeat: n.repeat || null, x: n.x ?? 40, y: n.y ?? 40 })
     const num = parseInt(String(n.id).replace(/\D/g, '')); if (num > seq) seq = num
   }
   for (const e of (props.initial?.edges || [])) edges.push({ from: e.from, to: e.to })
@@ -157,9 +171,15 @@ onBeforeUnmount(() => {
   <div class="gc">
     <div class="gc-bar">
       <div class="gc-add"><Select v-model="addTool" :options="toolOpts" placeholder="+ add a tool box…" @change="addNode" /></div>
-      <span class="muted" style="font-size:12px">Drag a box to move · drag its right dot onto another box's left dot to wire · findings tools have no output.</span>
+      <span class="muted" style="font-size:12px">Drag a box to move · drag its right dot onto another box's left dot to wire · a box can take several inputs · findings tools have no output.</span>
+      <span class="gc-zoom">
+        <button class="gc-zbtn" title="Zoom out" @click="zoomBy(-0.1)">−</button>
+        <button class="gc-zbtn gc-zlabel" title="Reset zoom" @click="zoomReset">{{ Math.round(zoom * 100) }}%</button>
+        <button class="gc-zbtn" title="Zoom in" @click="zoomBy(0.1)">+</button>
+      </span>
     </div>
-    <div ref="canvas" class="gc-canvas" :class="{ wiring: drag.mode === 'wire' }">
+    <div ref="canvas" class="gc-canvas" :class="{ wiring: drag.mode === 'wire' }" @wheel="onWheel">
+      <div class="gc-world" :style="{ transform: `scale(${zoom})`, transformOrigin: '0 0' }">
       <svg class="gc-edges">
         <path v-if="tempPath" :d="tempPath" class="gc-edge gc-temp" />
         <g v-for="p in edgePaths" :key="p.from + '>' + p.to">
@@ -185,19 +205,44 @@ onBeforeUnmount(() => {
           <input class="gc-condv" :value="condOf(n).value" placeholder="text (optional)"
                  @input="setCondVal(n, $event.target.value)" />
         </div>
+        <div v-if="!isTerminal(n.tool)" class="gc-rep" @pointerdown.stop
+             title="re-run this box on its own newly-discovered URLs until nothing new is found (bounded)">
+          <button class="gc-mode" :class="{ on: repeatOf(n) }" @click="toggleRepeat(n)">
+            ↻ repeat{{ repeatOf(n) ? ' until stable' : '' }}</button>
+          <input v-if="repeatOf(n)" class="gc-repmax" type="number" min="1" max="10" :value="repeatOf(n).max"
+                 title="max rounds" @input="setRepeatMax(n, $event.target.value)" />
+        </div>
         <input class="gc-args" :value="n.args" placeholder="extra args (optional)"
                @pointerdown.stop @input="setArgs(n, $event.target.value)" />
       </div>
 
+      </div>
       <div v-if="!nodes.length" class="gc-empty">Add a tool box to start.</div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.gc { display: flex; flex-direction: column; gap: 8px; }
+.gc {
+  display: flex; flex-direction: column; gap: 8px;
+  /* this canvas was authored against a --panel/--text/--line/--accent palette the app doesn't define, so it
+     fell back to white boxes + near-black text on a dark UI (unreadable). Alias those names to the REAL theme
+     tokens here, once, so every box, input and edge below is legible in the app's dark theme. */
+  --panel: var(--sc, #1e1f23);
+  --panel-2: var(--sc-low, #1a1b1f);
+  --text: var(--on-surface, #e4e2e6);
+  --muted: var(--on-surface-variant, #c5c6cf);
+  --muted-strong: var(--outline, #8f9099);
+  --line: var(--outline-variant, #43474e);
+  --accent: var(--primary, #8ab4f8);
+}
 .gc-bar { display: flex; align-items: center; gap: 12px; }
 .gc-add { width: 260px; }
+.gc-zoom { margin-left: auto; display: flex; gap: 4px; }
+.gc-zbtn { font-size: 12px; padding: 2px 9px; border: 1px solid var(--line, #ccc); border-radius: 6px;
+  background: var(--panel-2, #f3f4f6); color: var(--text, #16181d); cursor: pointer; }
+.gc-zlabel { min-width: 46px; }
+.gc-world { position: absolute; inset: 0; }
 .gc-canvas {
   position: relative; height: 460px; border: 1px solid var(--line, var(--border, #ddd)); border-radius: 10px;
   background: var(--panel-2, var(--panel)); overflow: hidden;
@@ -219,11 +264,19 @@ onBeforeUnmount(() => {
 .gc-kind.terminal { background: var(--muted-strong, #6b7280); }
 .gc-io { padding: 0 10px 6px; font-size: 11px; color: var(--muted, #5a6172); }
 .gc-x { margin-left: auto; }
-.gc-args { margin: 0 8px 8px; width: calc(100% - 16px); font-size: 12px; color: var(--text, #16181d); }
-.gc-cond { display: flex; gap: 4px; margin: 0 8px 6px; align-items: center; }
-.gc-mode { font-size: 11px; padding: 2px 8px; border: 1px solid var(--line, #ccc); border-radius: 6px;
-  background: var(--panel-2, #f3f4f6); color: var(--text, #16181d); cursor: pointer; white-space: nowrap; }
-.gc-condv { flex: 1; min-width: 0; font-size: 12px; color: var(--text, #16181d); }
+/* inputs need an explicit dark background + border, or light theme text sits on the browser's default white */
+.gc-args, .gc-condv, .gc-repmax {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 3px 6px; font-size: 12px;
+}
+.gc-args::placeholder, .gc-condv::placeholder { color: var(--muted); }
+.gc-args { margin: 0 8px 8px; width: calc(100% - 16px); }
+.gc-cond, .gc-rep { display: flex; gap: 4px; margin: 0 8px 6px; align-items: center; }
+.gc-mode { font-size: 11px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel-2); color: var(--text); cursor: pointer; white-space: nowrap; }
+.gc-mode.on { background: var(--primary, #8ab4f8); color: var(--on-primary, #06264d); border-color: var(--primary, #8ab4f8); }
+.gc-condv { flex: 1; min-width: 0; }
+.gc-repmax { width: 52px; }
 .gc-in, .gc-out {
   position: absolute; top: 18px; width: 14px; height: 14px; border-radius: 50%;
   background: var(--panel, #fff); border: 2px solid var(--accent, #5865f2);

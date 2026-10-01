@@ -73,7 +73,7 @@ class WorkflowGraphIn(BaseModel):
 # tool -> pipeline stage, so the builder's picker can GROUP the flat tool list (mirrors registry ordering).
 _TOOL_GROUP = {
     "subfinder": "Recon", "dnsx": "Recon", "dns-brute": "Recon", "ping-scan": "Recon", "nmap": "Recon",
-    "httpx": "Recon", "api-map": "Recon", "smart-enum": "Recon", "screenshot": "Recon",
+    "httpx": "Recon", "liveless": "Recon", "api-map": "Recon", "smart-enum": "Recon", "screenshot": "Recon",
     "wayback": "Recon", "wayback-domains": "Recon",
     "katana-crawl": "Crawl", "zap-crawl": "Crawl", "js-endpoints": "Crawl", "harvest": "Crawl",
     "browser-login": "Crawl", "browser-actions": "Crawl", "visual-driver": "Crawl", "vision-verify": "Crawl",
@@ -86,8 +86,18 @@ _TOOL_GROUP = {
     "swagger-parser": "API specs", "swagger-endpoints": "API specs", "swagger-specs": "API specs",
     "graphql-detect": "GraphQL", "graphql-audit": "GraphQL",
     "http-request": "Generic",
+    "aggregate": "Flow", "filter": "Flow", "limit": "Flow", "hosts": "Flow",
 }
-_GROUP_ORDER = ["Recon", "Crawl", "Vuln scanners", "Fuzzing", "Secrets", "API specs", "GraphQL", "Generic", "Other"]
+_GROUP_ORDER = ["Recon", "Crawl", "Vuln scanners", "Fuzzing", "Secrets", "API specs", "GraphQL",
+                "Flow", "Generic", "Other"]
+# descriptions for synthetic flow pseudo-tools (not in the engine's tool list, so not in TOOL_DESC)
+_SYNTH_DESC = {"aggregate": "Collect, de-duplicate and sort everything wired into it into one URL set; the "
+                            "boxes after it run once over that union.",
+               "filter": "Keep or reject URLs by a text match (set the condition: contains = keep, excludes = "
+                         "reject). Boxes after it get only the kept URLs.",
+               "limit": "Cap the wired-in URLs to the first N (put N in the box's args field; default 100) - to "
+                        "bound cost on a huge recon set.",
+               "hosts": "Collapse the wired-in URLs to their unique hostnames."}
 
 
 @router.get("/tool-catalog")
@@ -98,7 +108,7 @@ def tool_catalog(user: User = Depends(current_user)):
         g = _TOOL_GROUP.get(name, "Other")
         return (_GROUP_ORDER.index(g), name)
     return [{"name": n, "kind": k, "group": _TOOL_GROUP.get(n, "Other"),
-             "terminal": k == "findings", "description": TOOL_DESC.get(n, "")}
+             "terminal": k == "findings", "description": TOOL_DESC.get(n, "") or _SYNTH_DESC.get(n, "")}
             for n, k in sorted(TOOL_KIND.items(), key=lambda kv: gkey(kv[0]))]
 
 

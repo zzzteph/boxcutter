@@ -51,7 +51,3 @@ def run_tool(module, argv: list[str]) -> dict:
         fsutil.remove(out)
 
 
-def tool_data(module, argv: list[str]) -> list:
-    """Same as :func:`run_tool` but returns just the ``data`` list."""
-    data = run_tool(module, argv).get("data", [])
-    return data if isinstance(data, list) else []

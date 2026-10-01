@@ -10,6 +10,8 @@ const router = useRouter()
 const catalog = ref([])
 const name = ref('')
 const help = ref('')
+const severities = ref([])                 // workflow-level findings filter: keep only these (empty = all)
+const SEVS = ['critical', 'high', 'medium', 'low', 'info']
 const editingId = ref(null)
 const err = ref('')
 const busy = ref(false)
@@ -23,6 +25,7 @@ function onGraph(g) { gnodes.value = g.nodes; gedges.value = g.edges }
 
 const graph = computed(() => ({
   name: name.value.trim(), help: help.value.trim(), nodes: gnodes.value, edges: gedges.value,
+  severities: severities.value,
 }))
 
 // live compile preview (debounced): the exact workflow YAML the runner gets, or the precise validation error
@@ -62,6 +65,7 @@ async function load() {
         editingId.value = t.id
         name.value = g.name || t.name || ''
         help.value = g.help || ''
+        severities.value = Array.isArray(g.severities) ? g.severities : []
         initialGraph.value = { nodes: g.nodes || [], edges: g.edges || [] }
       }
     } catch { /* fall through to an empty canvas */ }
@@ -86,6 +90,14 @@ onMounted(load)
       <div>
         <label>Description <span class="muted">— optional</span></label>
         <input v-model="help" placeholder="subfinder → httpx → nuclei" />
+      </div>
+    </div>
+    <div style="margin-top:12px">
+      <label>Keep findings of severity <span class="muted">— optional; leave all unchecked to keep every severity</span></label>
+      <div class="row" style="gap:14px;flex-wrap:wrap;margin-top:4px">
+        <label v-for="s in SEVS" :key="s" style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+          <input type="checkbox" :value="s" v-model="severities" style="width:auto" /> {{ s }}
+        </label>
       </div>
     </div>
     <p class="muted" style="margin:10px 0 0">Chain tools into a pipeline: each box runs on the <b>Target</b>, or
