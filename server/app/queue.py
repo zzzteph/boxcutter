@@ -13,7 +13,7 @@ from sqlalchemy import func, or_, update
 
 from .activity import log_activity
 from .config import settings
-from .models import Job, LLMProfile, Runner, Scan, ScanItem, Stage, Target, Template
+from .models import Job, LLMProfile, Runner, Scan, ScanItem, Schedule, Stage, Target, Template
 
 _INFLIGHT = ("claimed", "running")
 
@@ -135,6 +135,60 @@ def claim_job(session: Session, runner: Runner, models=None):
             return session.get(Job, job_id)
         # someone else claimed it first; pick another
     return None
+
+
+def rerun_scan(session: Session, scan: Scan) -> int:
+    """Re-run a whole scan from stage 0 - the user-less core of the router's /rerun, for the scheduler. Bumps
+    run_no (so findings diff against the prior run), clears finished_at, re-enqueues the seed stage."""
+    scan.run_no += 1
+    scan.last_run_at = datetime.now(timezone.utc)
+    scan.finished_at = None
+    scan.status = "running"
+    session.add(scan)
+    session.commit()
+    jobs = enqueue_scan(session, scan)
+    if jobs == 0:                                            # nothing to do -> resolve straight to done
+        maybe_finish_scan(session, scan.id)
+    return jobs
+
+
+def run_due_schedules(session: Session) -> int:
+    """Fire every enabled schedule whose next_run_at is due and whose scan isn't already running - the recurring
+    perimeter monitor. Called each sweeper cycle. Never raises out (a bad schedule must not kill the sweeper)."""
+    now = datetime.now(timezone.utc)
+    fired = 0
+    due = session.exec(select(Schedule).where(
+        Schedule.enabled == True, Schedule.next_run_at <= now)).all()  # noqa: E712
+    for sch in due:
+        scan = session.get(Scan, sch.scan_id)
+        if not scan:                                         # the scan was deleted -> drop the orphan schedule
+            session.delete(sch)
+            continue
+        if scan.status in ("queued", "running", "paused"):
+            # DON'T PILE UP. The previous run isn't finished (still running), or the user paused it. Skip this
+            # tick and re-check soon (<=5 min) instead of burning the whole interval, so the moment it reaches
+            # 'done' the next due check fires it. A run that can't finish (no scanners online, a hung job) just
+            # keeps deferring - it never stacks a second copy - and shows as 'running' on the Monitoring page;
+            # requeue_stale recovers jobs from lost agents so a run normally self-heals to 'done'.
+            sch.next_run_at = now + timedelta(seconds=min(sch.interval_seconds, 300))
+            session.add(sch)
+            continue
+        try:
+            jobs = rerun_scan(session, scan)
+        except Exception:  # noqa: BLE001 - one bad scan never stops the others / the sweeper
+            sch.next_run_at = now + timedelta(seconds=sch.interval_seconds)
+            session.add(sch)
+            continue
+        sch.last_run_at = now
+        sch.next_run_at = now + timedelta(seconds=sch.interval_seconds)
+        session.add(sch)
+        log_activity(session, "scan_scheduled_run",
+                     f"Scheduled run of '{scan.name}' (every {sch.interval_seconds}s, {jobs} assets)",
+                     scan_id=scan.id)
+        fired += 1
+    if due:
+        session.commit()
+    return fired
 
 
 def requeue_stale(session: Session) -> int:

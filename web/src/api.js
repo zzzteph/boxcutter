@@ -49,6 +49,7 @@ export const api = {
   get: (p) => req('GET', p),
   post: (p, b) => req('POST', p, b),
   postForm,
+  put: (p, b) => req('PUT', p, b),
   patch: (p, b) => req('PATCH', p, b),
   del: (p) => req('DELETE', p),
   login: (username, password, code) => req('POST', '/auth/login', { username, password, code }),

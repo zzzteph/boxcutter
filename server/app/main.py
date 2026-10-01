@@ -18,8 +18,9 @@ from sqlmodel import Session
 from .activity import cap_job_events, prune_logs
 from .config import settings
 from .db import engine, init_db
-from .queue import requeue_stale
-from .routers import admin, auth, console, keys, ollama, operator, runners, scans, templates
+from .queue import requeue_stale, run_due_schedules
+from .routers import (admin, auth, console, keys, ollama, operator, runners, scans, schedules,
+                      templates)
 from .seed import seed
 
 
@@ -29,6 +30,7 @@ async def _sweeper() -> None:
         try:
             with Session(engine) as s:
                 requeue_stale(s)
+                run_due_schedules(s)          # fire any recurring (scheduled) scans that are due
                 cycle += 1
                 if cycle % 20 == 0:      # ~ every 10 min: trim log rows past retention + cap each job's live log
                     prune_logs(s, settings.activity_retention_days)
@@ -121,6 +123,7 @@ app.include_router(templates.router)
 app.include_router(admin.router)
 app.include_router(keys.router)
 app.include_router(ollama.router)
+app.include_router(schedules.router)
 app.include_router(operator.router)
 app.include_router(console.router)      # /console/claude/ws — before the static mount so the WS route matches
 

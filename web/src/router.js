@@ -10,6 +10,7 @@ const routes = [
   { path: '/scans/new', component: () => import('./views/NewScan.vue') },
   { path: '/scans/:id', component: () => import('./views/ScanDetail.vue') },
   { path: '/operator', component: () => import('./views/Operator.vue') },
+  { path: '/monitoring', component: () => import('./views/Schedules.vue') },
   { path: '/templates', component: () => import('./views/Templates.vue') },
   { path: '/workflows/new', component: () => import('./views/WorkflowBuilder.vue') },
   { path: '/llm-profiles', component: () => import('./views/LLMProfiles.vue') },

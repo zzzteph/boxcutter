@@ -50,6 +50,13 @@ function setCondMode(n, mode) { const w = condOf(n); n.when = { mode, value: w.v
 function toggleMode(n) { setCondMode(n, condOf(n).mode === 'excludes' ? 'contains' : 'excludes') }
 function setCondVal(n, v) { n.when = { mode: condOf(n).mode, value: v }; emitChange() }
 
+// the `filter` box carries MULTIPLE conditions (all must pass): each row is contains(keep)/excludes(reject)+text.
+const condsOf = (n) => n.conditions || []
+function addCond(n) { if (!n.conditions) n.conditions = []; n.conditions.push({ mode: 'contains', value: '' }); emitChange() }
+function rmCond(n, i) { (n.conditions || []).splice(i, 1); emitChange() }
+function toggleCondRow(n, i) { const c = n.conditions[i]; c.mode = c.mode === 'excludes' ? 'contains' : 'excludes'; emitChange() }
+function setCondRowVal(n, i, v) { n.conditions[i].value = v; emitChange() }
+
 // per-box "repeat until stable": re-run this box on its own newly-discovered URLs until nothing new (bounded).
 const repeatOf = (n) => n.repeat || null
 function toggleRepeat(n) { n.repeat = n.repeat ? null : { max: 3 }; emitChange() }
@@ -58,7 +65,7 @@ function setRepeatMax(n, v) { n.repeat = { max: Math.max(1, Math.min(10, parseIn
 function emitChange() {
   emit('change', {
     nodes: nodes.map(n => ({ id: n.id, tool: n.tool, args: n.args, x: n.x, y: n.y,
-                             when: n.when || null, repeat: n.repeat || null })),
+                             when: n.when || null, conditions: n.conditions || null, repeat: n.repeat || null })),
     edges: edges.map(e => ({ from: e.from, to: e.to })),
   })
 }
@@ -67,7 +74,7 @@ function addNode(tool) {
   if (!tool) return
   const id = 'b' + (++seq)
   // stagger new boxes so they don't stack exactly on top of each other
-  nodes.push({ id, tool, args: '', when: null, repeat: null, x: 40 + (nodes.length % 4) * 40, y: 40 + (nodes.length % 6) * 30 })
+  nodes.push({ id, tool, args: '', when: null, conditions: tool === 'filter' ? [{ mode: 'contains', value: '' }] : null, repeat: null, x: 40 + (nodes.length % 4) * 40, y: 40 + (nodes.length % 6) * 30 })
   addTool.value = ''
   emitChange()
 }
@@ -156,7 +163,7 @@ function connect(from, to) {
 
 onMounted(() => {
   for (const n of (props.initial?.nodes || [])) {
-    nodes.push({ id: n.id, tool: n.tool, args: n.args || '', when: n.when || null, repeat: n.repeat || null, x: n.x ?? 40, y: n.y ?? 40 })
+    nodes.push({ id: n.id, tool: n.tool, args: n.args || '', when: n.when || null, conditions: n.conditions || null, repeat: n.repeat || null, x: n.x ?? 40, y: n.y ?? 40 })
     const num = parseInt(String(n.id).replace(/\D/g, '')); if (num > seq) seq = num
   }
   for (const e of (props.initial?.edges || [])) edges.push({ from: e.from, to: e.to })
@@ -200,7 +207,18 @@ onBeforeUnmount(() => {
           in: {{ hasInput(n.id) ? 'wired URLs' : 'the Target' }} →
           out: {{ isTerminal(n.tool) ? kindOf(n.tool) + ' (terminal)' : (kindOf(n.tool) || 'items') }}
         </div>
-        <div v-if="hasInput(n.id)" class="gc-cond" @pointerdown.stop title="run this box only on upstream URLs matching">
+        <!-- filter box: several keep/reject conditions, ALL must pass -->
+        <div v-if="n.tool === 'filter'" class="gc-conds" @pointerdown.stop
+             title="keep (contains) / reject (excludes) — all conditions must pass">
+          <div v-for="(c, i) in condsOf(n)" :key="i" class="gc-cond">
+            <button class="gc-mode" @click="toggleCondRow(n, i)">{{ c.mode === 'excludes' ? 'excludes' : 'contains' }}</button>
+            <input class="gc-condv" :value="c.value" placeholder="text" @input="setCondRowVal(n, i, $event.target.value)" />
+            <button class="gc-cx" title="remove condition" @click="rmCond(n, i)">✕</button>
+          </div>
+          <button class="gc-addc" @click="addCond(n)">+ condition</button>
+        </div>
+        <!-- any other wired box: a single optional condition on its input -->
+        <div v-else-if="hasInput(n.id)" class="gc-cond" @pointerdown.stop title="run this box only on upstream URLs matching">
           <button class="gc-mode" @click="toggleMode(n)">{{ condOf(n).mode === 'excludes' ? 'excludes' : 'contains' }}</button>
           <input class="gc-condv" :value="condOf(n).value" placeholder="text (optional)"
                  @input="setCondVal(n, $event.target.value)" />
@@ -277,6 +295,11 @@ onBeforeUnmount(() => {
 .gc-mode.on { background: var(--primary, #8ab4f8); color: var(--on-primary, #06264d); border-color: var(--primary, #8ab4f8); }
 .gc-condv { flex: 1; min-width: 0; }
 .gc-repmax { width: 52px; }
+.gc-conds { display: flex; flex-direction: column; gap: 4px; margin: 0 8px 6px; }
+.gc-cx { font-size: 10px; padding: 0 5px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel-2); color: var(--muted); cursor: pointer; }
+.gc-addc { align-self: flex-start; font-size: 11px; padding: 1px 8px; border: 1px dashed var(--line);
+  border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
 .gc-in, .gc-out {
   position: absolute; top: 18px; width: 14px; height: 14px; border-radius: 50%;
   background: var(--panel, #fff); border: 2px solid var(--accent, #5865f2);

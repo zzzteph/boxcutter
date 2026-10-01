@@ -23,7 +23,8 @@ TOOL_KIND: dict[str, str] = {
     "browser-actions": "items", "browser-login": "items", "dirb": "findings", "dirsearch": "findings",
     "dns-brute": "urls", "dnsx": "urls", "fuzz": "findings", "git-extract": "findings",
     "graphql-audit": "findings", "graphql-detect": "urls", "harvest": "items", "http-request": "items",
-    "httpx": "items", "js-endpoints": "items", "katana-crawl": "urls", "liveless": "items",
+    "httpx": "items", "js-endpoints": "items", "js-files": "urls", "extract-domains": "urls",
+    "katana-crawl": "urls", "liveless": "items",
     "mass-assign": "findings",
     "nmap": "endpoints", "nuclei": "findings", "path-bust": "findings", "path-fuzz": "findings",
     "ping-scan": "urls", "scan-secrets": "findings", "screenshot": "screenshots", "smart-enum": "items",
@@ -58,6 +59,30 @@ def _parse_when(raw) -> dict | None:
     if not _COND_RE.match(value):
         raise WorkflowError("condition value must be 1-64 simple chars (letters, digits, . _ - /)")
     return {"mode": mode, "value": value}
+
+
+def _parse_conditions(raw) -> list[dict]:
+    """Zero or more keep/reject conditions (for a filter box). Each is validated like `when`; ALL must pass
+    (they chain as sequential filters = AND). Empty-value conditions are dropped; capped at 8."""
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        c = _parse_when(item)
+        if c:
+            out.append(c)
+        if len(out) >= 8:
+            break
+    return out
+
+
+def _cond_chain(node: dict) -> str:
+    """The ``| mode:value`` filter chain for a node: its multi `conditions` (AND) when set, else its single
+    `when`, else ''. Chained filters run in sequence, so multiple conditions must all pass."""
+    conds = node.get("conditions") or ([node["when"]] if node.get("when") else [])
+    return "".join(f" | {c['mode']}:{c['value']}" for c in conds)
 
 
 def _parse_repeat(raw) -> dict | None:
@@ -141,6 +166,7 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None) -> dict:
             raise WorkflowError(f"unknown tool '{tool}'")
         by_id[nid] = {"id": nid, "tool": tool, "args": str(n.get("args", "") or "").strip(),
                       "kind": TOOL_KIND[tool], "when": _parse_when(n.get("when")),
+                      "conditions": _parse_conditions(n.get("conditions")),
                       "repeat": _parse_repeat(n.get("repeat"))}
 
     incoming: dict[str, list[str]] = {nid: [] for nid in by_id}
@@ -170,9 +196,7 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None) -> dict:
             fvar = _var(nid)
             base = " | urls | hosts" if node["tool"] == "hosts" else " | urls"
             for pid in parents:
-                proj = _var(pid) + base
-                if node.get("when"):                   # keep/reject condition (filter; usable on any flow box)
-                    proj += f" | {node['when']['mode']}:{node['when']['value']}"
+                proj = _var(pid) + base + _cond_chain(node)   # keep/reject condition(s): all must pass
                 steps.append({"select": "${" + proj + "}", "save": fvar})
             if parents and node["tool"] == "aggregate":
                 steps.append({"select": "${" + fvar + " | sort}", "set": fvar})            # dedup + sort
@@ -196,9 +220,7 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None) -> dict:
                 if node["args"]:
                     inner["args"] = node["args"]
                 inner["save"] = save
-                proj = pvar + " | urls"
-                if node.get("when"):                   # condition: grep the piped URLs before running
-                    proj += f" | {node['when']['mode']}:{node['when']['value']}"
+                proj = pvar + " | urls" + _cond_chain(node)   # condition(s): grep the piped URLs first
                 steps.append({"for_each": "${" + proj + "}", "do": [inner]})
 
         # RECURSION: a box flagged 'repeat until stable' re-runs on its OWN growing output after the seed
@@ -210,9 +232,7 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None) -> dict:
             if node["args"]:
                 rinner["args"] = node["args"]
             rinner["save"] = vv
-            rproj = vv + " | urls"
-            if node.get("when"):
-                rproj += f" | {node['when']['mode']}:{node['when']['value']}"
+            rproj = vv + " | urls" + _cond_chain(node)
             steps.append({"repeat": "${" + vv + " | urls}", "max": node["repeat"]["max"],
                           "do": [{"for_each": "${" + rproj + "}", "do": [rinner]}]})
 

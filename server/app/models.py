@@ -199,6 +199,20 @@ class Screenshot(SQLModel, table=True):
     last_seen: datetime = Field(default_factory=now)
 
 
+class Schedule(SQLModel, table=True):
+    """Recurring re-run of a scan - continuous perimeter monitoring. Every ``interval_seconds`` the server's
+    sweeper re-runs the scan (bumps run_no, re-enqueues) when it isn't already running, so findings diff over
+    time (new / open / resolved). One schedule per scan (it re-runs the SAME scan, building on its history)."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scan_id: int = Field(foreign_key="scan.id", index=True, unique=True)
+    interval_seconds: int = 3600                              # how often to re-run (min enforced in the API)
+    enabled: bool = True
+    last_run_at: Optional[datetime] = None
+    next_run_at: Optional[datetime] = Field(default=None, index=True)   # when the sweeper should fire it next
+    created_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    created_at: datetime = Field(default_factory=now)
+
+
 class OperatorRun(SQLModel, table=True):
     """A DIRECT, in-container run of an ai operator agent (joseph). Unlike a Scan - which fans jobs out across
     the runner fleet - an operator run executes the engine as a subprocess on THIS server host: you pick an LLM
