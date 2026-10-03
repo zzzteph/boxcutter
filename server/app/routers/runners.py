@@ -66,23 +66,35 @@ _PROGRESS_FLAGS = {"tool": ("--debug",), "workflow": ("--steps", "--show-finding
 def _workflow_files(tmpl: Template | None) -> dict:
     """For a CUSTOM (UI-authored) workflow template, the workflow file(s) the runner must drop into a
     BOXCUTTER_WORKFLOWS dir so `boxcutter workflow <name>` resolves. Built-in workflows ship in the image and
-    return {} here. Shape: {"<name>.yaml": "<spec as JSON/YAML text>"}."""
+    return {} here. Shape: {"<name>.yaml": "<spec as JSON/YAML text>"}. A fan-out workflow ships ALL its
+    segment files (one per stage) so every stage's `boxcutter workflow <segment>` resolves on the runner."""
     if not tmpl or tmpl.kind != "workflow":
         return {}
     try:
         spec = json.loads(tmpl.spec_json or "{}")
     except Exception:  # noqa: BLE001
         return {}
+    pipeline = spec.get("pipeline")
+    if pipeline:
+        return {f"{s['name']}.yaml": s["yaml"] for s in pipeline if s.get("name") and s.get("yaml")}
     name, text = spec.get("name"), spec.get("yaml")
     return {f"{name}.yaml": text} if name and text else {}
 
 
-def build_argv(session: Session, tmpl: Template, target: str, scan: Scan | None = None):
+def build_argv(session: Session, tmpl: Template, target: str, scan: Scan | None = None, stage_no: int = 0):
     """Map a template + target (+ the scan's own inputs) to a boxcutter CLI argv and any secret env it needs.
     All kinds run as `boxcutter <argv>` (the CLI desugars agent/tool/workflow names). Template params are the
-    same for every scan that uses the template; the scan's vars (context/creds/custom) are per-scan."""
+    same for every scan that uses the template; the scan's vars (context/creds/custom) are per-scan.
+
+    ``stage_no`` picks the right segment of a FAN-OUT workflow: a split graph compiles to an ordered
+    ``spec['pipeline']`` of segments (one per pipeline stage), so a job at stage N runs that segment's workflow
+    name. A plain workflow has no pipeline and always runs ``spec['name']``."""
     spec = json.loads(tmpl.spec_json or "{}")
     name = spec.get("name", "")
+    pipeline = spec.get("pipeline") if tmpl.kind == "workflow" else None
+    if pipeline:                                   # fan-out workflow: run this stage's segment
+        seg = pipeline[stage_no] if 0 <= stage_no < len(pipeline) else pipeline[0]
+        name = seg.get("name") or name
     # the engine is `boxcutter <tool> <target>`, `boxcutter workflow <name> <target>`, or
     # `boxcutter ai <agent> <target>` — prefix the right subcommand for the template's kind.
     if tmpl.kind == "workflow":
@@ -130,6 +142,10 @@ def build_argv(session: Session, tmpl: Template, target: str, scan: Scan | None 
     for flag in _PROGRESS_FLAGS.get(tmpl.kind, ()):
         if flag not in argv:
             argv.append(flag)
+    # per-scan VERBOSE DEBUG: stream the engine's tool-by-tool diagnostics to the live log, so a workflow can be
+    # debugged (which step ran on what, why a step was skipped, a tool's own errors) - opt-in, kept clean by default.
+    if vars_.get("debug") and "--debug" not in argv:
+        argv.append("--debug")
     return argv, secrets_env
 
 
@@ -187,19 +203,19 @@ def enroll(body: EnrollIn, session: Session = Depends(get_session)):
 
 # ---- job loop -----------------------------------------------------------------------------------------------
 class ClaimIn(BaseModel):
-    models: list[str] = []                 # local models the agent has installed (gates ollama-profile jobs)
+    pass                                   # (no body fields; kept so old agents POSTing JSON still validate)
 
 
 @router.post("/runner/claim")
 def claim(body: ClaimIn = ClaimIn(), runner: Runner = Depends(current_runner),
           session: Session = Depends(get_session)):
-    # NEVER hand this runner a job whose required local model it lacks - it simply isn't selected for it.
-    job = claim_job(session, runner, body.models)
+    job = claim_job(session, runner)
     if not job:
         return {"job": None}
     tmpl = session.get(Template, job.template_id)
     target = session.get(Target, job.target_id)
-    argv, secrets_env = build_argv(session, tmpl, target.value, session.get(Scan, job.scan_id))
+    argv, secrets_env = build_argv(session, tmpl, target.value, session.get(Scan, job.scan_id),
+                                   stage_no=job.stage_no)
     job.argv_json = json.dumps(argv)          # remember the exact command for the debug view
     session.add(job)
     session.commit()

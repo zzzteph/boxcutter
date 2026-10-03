@@ -147,12 +147,6 @@ def _test_llm(provider: str, model: str | None, key: str, proxy_url: str | None)
     a bad model 400/404) - so a profile can be verified WITHOUT running a whole scan."""
     provider = (provider or "").lower()
     try:
-        if provider == "ollama":
-            base = (proxy_url or "http://localhost:11434").rstrip("/")
-            if base.endswith("/v1"):
-                base = base[:-3]
-            requests.get(base + "/api/tags", timeout=6).raise_for_status()
-            return True, "reachable"
         if provider == "claude-code":
             # The claude-code login this server rides for operator runs lives HERE - CLAUDE_CODE_OAUTH_TOKEN, or
             # the token `claude` /login wrote under CLAUDE_CONFIG_DIR. Discover it the SAME way the engine does
@@ -201,7 +195,7 @@ def test_llm_profile(pid: int, admin: User = Depends(require_admin), session: Se
     p = session.get(LLMProfile, pid)
     if not p:
         raise HTTPException(404)
-    if p.provider.lower() not in ("ollama", "claude-code") and not p.api_key_secret:
+    if p.provider.lower() != "claude-code" and not p.api_key_secret:
         return {"ok": False, "error": "no API key set on this profile"}
     ok, detail = _test_llm(p.provider, p.model, p.api_key_secret, p.proxy_url)
     return {"ok": ok, "error": "" if ok else detail, "detail": detail}

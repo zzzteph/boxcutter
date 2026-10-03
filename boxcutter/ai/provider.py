@@ -246,7 +246,7 @@ class _Provider:
     newest gpt-5.x) - then remembers it for the run. `reasoning` is kept only as an on/off switch for the live
     narration stream (0 = off); it never turns model reasoning back on."""
 
-    requires_key = True                      # providers with no API key (e.g. local Ollama) override to False
+    requires_key = True                      # providers with no API key (e.g. claude-code) override to False
 
     def _init_reasoning(self, reasoning=0):
         self.reasoning = int(reasoning or 0)   # on/off switch for the live narration stream; sends NO model param
@@ -631,20 +631,7 @@ class LiteLLM(OpenAI):
     _default_base, _base_env = "http://localhost:4000", "LITELLM_BASE_URL"
 
 
-class Ollama(OpenAI):
-    """Local Ollama - OpenAI-compatible API at :11434/v1, NO API key needed (models run on your own box):
-    `boxcutter <agent> --provider ollama --model llama3.1:8b`. Point elsewhere with --llm-proxy-url /
-    OLLAMA_BASE_URL. NOTE: small local models are markedly weaker at multi-step agentic reasoning than the
-    hosted providers - good for cheap/offline passes, not a like-for-like swap for a deep scan."""
-    default_model, env = "llama3.1:8b", "OLLAMA_API_KEY"
-    _default_base, _base_env = "http://localhost:11434/v1", "OLLAMA_BASE_URL"
-    requires_key = False
-
-    def __init__(self, model, key, base_url=None, reasoning=0):
-        super().__init__(model, key or "ollama", base_url, reasoning)   # Ollama ignores the bearer token
-
-
-PROVIDERS = {"anthropic": Anthropic, "openai": OpenAI, "litellm": LiteLLM, "ollama": Ollama,
+PROVIDERS = {"anthropic": Anthropic, "openai": OpenAI, "litellm": LiteLLM,
              "claude-code": ClaudeCode}
 
 
@@ -702,13 +689,12 @@ def add_ai_provider_args(parser) -> None:
                         choices=list(PROVIDERS),
                         help="LLM provider (default anthropic; env BOXCUTTER_AI_PROVIDER). 'claude-code' rides "
                              "your local, authenticated Claude Code login with NO API key (billed to your "
-                             "Claude subscription); 'litellm' fronts any provider via your gateway; 'ollama' "
-                             "runs a local model with no key.")
+                             "Claude subscription); 'litellm' fronts any provider via your gateway.")
     parser.add_argument("--model", default=os.environ.get("BOXCUTTER_AI_MODEL") or None,
                         help="Model id (default: the provider's default; env BOXCUTTER_AI_MODEL)")
     parser.add_argument("--api-key", dest="api_key", default=None,
                         help="LLM API key (or set the provider's env var, e.g. ANTHROPIC_API_KEY). Not needed "
-                             "for --provider claude-code (uses your Claude Code login) or ollama.")
+                             "for --provider claude-code (uses your Claude Code login).")
     # The LLM endpoint (a LiteLLM/OpenAI gateway or a direct API base). Named --llm-proxy-url, not --base-url,
     # so it can't be confused with the TARGET's base URL; the internal attribute stays `base_url` (the SDK term).
     parser.add_argument("--llm-proxy-url", dest="base_url",

@@ -10,7 +10,8 @@ from ..db import get_session
 from ..models import Template, User
 from ..security import current_user
 from ..seed import TOOLS as TOOL_DESC, WORKFLOWS as BUILTIN_WORKFLOWS
-from ..workflow_compile import TOOL_KIND, WorkflowError, compile_to_text
+from ..tool_flags import TOOL_FLAGS
+from ..workflow_compile import TOOL_KIND, WorkflowError, compile_pipeline
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
@@ -109,23 +110,47 @@ def tool_catalog(user: User = Depends(current_user)):
         g = _TOOL_GROUP.get(name, "Other")
         return (_GROUP_ORDER.index(g), name)
     return [{"name": n, "kind": k, "group": _TOOL_GROUP.get(n, "Other"),
-             "terminal": k == "findings", "description": TOOL_DESC.get(n, "") or _SYNTH_DESC.get(n, "")}
+             "terminal": k == "findings", "description": TOOL_DESC.get(n, "") or _SYNTH_DESC.get(n, ""),
+             "flags": TOOL_FLAGS.get(n, [])}      # accepted CLI flags, for live arg validation in the builder
             for n, k in sorted(TOOL_KIND.items(), key=lambda kv: gkey(kv[0]))]
+
+
+@router.get("/tool-flags")
+def tool_flags(user: User = Depends(current_user)):
+    """The accepted CLI flags per tool, so New Scan / the template editor can warn about an argument the tool will
+    reject (e.g. `-severity` on nuclei) before the scan runs. Tool-native scanner flags go through `--opt-args`."""
+    return TOOL_FLAGS
+
+
+def _preview_text(segments: list[dict]) -> str:
+    """Render the compiled segment(s) for the builder's live preview. A single segment shows its YAML as before;
+    a fan-out pipeline shows each stage with a header so you can see exactly where the work is distributed."""
+    if len(segments) == 1:
+        return segments[0]["yaml"]
+    parts = []
+    for i, s in enumerate(segments):
+        head = (f"# ─── stage {i}: {s['name']} — runs on the scan target"
+                if i == 0 else
+                f"# ─── stage {i}: {s['name']} — fans out across the fleet on stage {i - 1}'s "
+                f"{'URLs' if s['item_filter'] == 'urls' else 'items'} (one job each)")
+        parts.append(head + "\n" + s["yaml"])
+    return "\n\n".join(parts)
 
 
 @router.post("/workflow/preview")
 def preview_workflow(body: WorkflowGraphIn, user: User = Depends(current_user)):
-    """Compile a graph WITHOUT saving — for the builder's live preview. Returns {spec, yaml} or a 400 with the
-    validation message so the UI can show exactly why a wiring is illegal."""
+    """Compile a graph WITHOUT saving — for the builder's live preview. Returns {spec, yaml, segments} or a 400
+    with the validation message so the UI can show exactly why a wiring is illegal. ``segments`` is the number of
+    fan-out stages the graph compiles to (1 = an ordinary single-process workflow)."""
     graph = dict(body.graph or {})
     graph["name"] = body.name or "preview"
     if body.help is not None:
         graph["help"] = body.help
     try:
-        spec, text = compile_to_text(graph, reserved_names=set(BUILTIN_WORKFLOWS))
+        segs = compile_pipeline(graph, reserved_names=set(BUILTIN_WORKFLOWS))
     except WorkflowError as e:
         raise HTTPException(400, str(e))
-    return {"spec": spec, "yaml": text}
+    return {"spec": segs[0]["spec"], "yaml": _preview_text(segs), "segments": len(segs)}
 
 
 @router.post("/workflow")
@@ -139,10 +164,17 @@ def save_workflow(body: WorkflowGraphIn, user: User = Depends(current_user),
     if body.help is not None:
         graph["help"] = body.help
     try:
-        spec, text = compile_to_text(graph, reserved_names=set(BUILTIN_WORKFLOWS))
+        segs = compile_pipeline(graph, reserved_names=set(BUILTIN_WORKFLOWS))
     except WorkflowError as e:
         raise HTTPException(400, str(e))
-    stored = {"name": spec["name"], "yaml": text, "graph": graph}   # yaml = the workflow file the runner writes
+    seg0 = segs[0]
+    spec = seg0["spec"]
+    # yaml = the stage-0 workflow file the runner writes; graph = the editable source. A fan-out graph also stores
+    # its ordered segments under `pipeline` — the server turns these into real pipeline stages at scan time, so
+    # the downstream work fans out across the fleet instead of running inside one process (see scans._builder_stages).
+    stored = {"name": spec["name"], "yaml": seg0["yaml"], "graph": graph}
+    if len(segs) > 1:
+        stored["pipeline"] = [{"name": s["name"], "yaml": s["yaml"], "item_filter": s["item_filter"]} for s in segs]
     if body.template_id is not None:
         t = session.get(Template, body.template_id)
         if not t or (t.owner_id != user.id and user.role != "admin"):

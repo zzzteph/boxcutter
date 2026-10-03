@@ -19,7 +19,7 @@ from .activity import cap_job_events, prune_logs
 from .config import settings
 from .db import engine, init_db
 from .queue import requeue_stale, run_due_schedules
-from .routers import (admin, auth, console, keys, ollama, operator, runners, scans, schedules,
+from .routers import (admin, auth, console, keys, operator, runners, scans, schedules,
                       templates)
 from .seed import seed
 
@@ -122,7 +122,6 @@ app.include_router(runners.router)
 app.include_router(templates.router)
 app.include_router(admin.router)
 app.include_router(keys.router)
-app.include_router(ollama.router)
 app.include_router(schedules.router)
 app.include_router(operator.router)
 app.include_router(console.router)      # /console/claude/ws — before the static mount so the WS route matches

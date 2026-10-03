@@ -102,9 +102,9 @@ def create_run(body: RunIn, user: User = Depends(current_user), session: Session
         if not p:
             raise HTTPException(404, "LLM profile not found")
         provider, model, proxy_url, profile_name = p.provider, p.model, p.proxy_url, p.name
-        if p.provider.lower() not in ("claude-code", "ollama") and not p.api_key_secret:
-            raise HTTPException(400, f"profile '{p.name}' has no API key set - add one, or use a claude-code / "
-                                     "ollama profile")
+        if p.provider.lower() != "claude-code" and not p.api_key_secret:
+            raise HTTPException(400, f"profile '{p.name}' has no API key set - add one, or use a claude-code "
+                                     "profile")
         if p.api_key_secret:
             secret_env[op._ENV_FOR.get(p.provider.lower(), "API_KEY")] = p.api_key_secret
 

@@ -24,7 +24,7 @@ const isClaudeCode = computed(() => (selProfile.value?.provider || '').toLowerCa
 // warn only when a claude-code profile is picked but this server has no Claude Code login to ride
 const ccWarn = computed(() => isClaudeCode.value && cc.value && !cc.value.logged_in)
 const noKey = computed(() => selProfile.value &&
-  !['claude-code', 'ollama'].includes((selProfile.value.provider || '').toLowerCase()) && !selProfile.value.has_key)
+  (selProfile.value.provider || '').toLowerCase() !== 'claude-code' && !selProfile.value.has_key)
 const canRun = computed(() => !busy.value && form.authorized && form.profile_id &&
   (form.target.trim() || form.context.trim()) && !noKey.value)
 
@@ -136,7 +136,7 @@ onUnmounted(() => clearInterval(timer))
       <label style="margin-top:12px">LLM profile</label>
       <Select v-model="form.profile_id" :options="profileOpts" placeholder="Pick a profile" />
       <p v-if="noKey" class="err" style="font-size:12.5px">This profile has no API key — set one on LLM Profiles,
-        or pick a Claude Code / Ollama profile.</p>
+        or pick a Claude Code profile.</p>
       <div v-if="isClaudeCode && cc" class="cc" :class="{ warn: ccWarn }">
         <div v-if="cc.logged_in">✓ Claude Code login found on this server — no API key needed.</div>
         <div v-else><b>No Claude Code login on this server.</b> Authorize it once — right here, in a console.</div>

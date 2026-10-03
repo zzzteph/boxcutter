@@ -1,7 +1,10 @@
 <script setup>
 import { ref, reactive, computed, watch, nextTick, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { api, isAdmin } from '../api'
 import Select from '../components/Select.vue'
+
+const router = useRouter()
 
 const KIND_LABEL = { tool: 'Tool', workflow: 'Workflow', ai_agent: 'AI agent' }
 // The real stock boxcutter catalog (boxcutter --list-all / workflow --list / ai --list), with one-line
@@ -84,6 +87,7 @@ const CUSTOM = '__custom__'
 
 const templates = ref([])
 const profiles = ref([])
+const toolFlags = ref({})                              // accepted flags per tool, for arg validation (#7)
 const err = ref('')
 const loading = ref(true)
 const editingId = ref(null)                            // null = creating; an id = editing that template
@@ -121,10 +125,26 @@ const suspendWatch = ref(false)                        // silence the auto-defau
 watch(() => form.kind, (k) => { if (!suspendWatch.value) form.specName = (CATALOG[k][0] || {}).name || CUSTOM })
 watch(resolvedSpec, (s) => { if (!suspendWatch.value && s && !form.name.trim()) form.name = s })
 
+// flags a tool template's params use that the tool would reject at run time (e.g. `-severity` on nuclei)
+const paramWarnings = computed(() => {
+  if (form.kind !== 'tool') return []
+  const allowed = toolFlags.value[resolvedSpec.value]
+  if (!allowed || !allowed.length) return []
+  const out = []
+  for (const p of form.params) {
+    const k = (p.flag || '').trim()
+    if (!k) continue
+    const flag = (k.startsWith('-') ? k : '--' + k).split('=')[0]
+    if (!allowed.includes(flag)) out.push(flag)
+  }
+  return [...new Set(out)]
+})
+
 async function load() {
   try {
     templates.value = await api.get('/templates')
     profiles.value = await api.get('/llm-profiles')
+    try { toolFlags.value = await api.get('/templates/tool-flags') } catch (e) { /* non-fatal */ }
   } catch (e) { err.value = e.message } finally { loading.value = false }
 }
 function resetForm() {
@@ -136,6 +156,12 @@ function cancelEdit() { resetForm(); err.value = '' }
 
 // load an existing template into the form so it can be edited (the form doubles as the editor)
 async function startEdit(t) {
+  // a workflow built in the graph builder (it carries spec.graph) can only be edited THERE — the flat form below
+  // can't represent its wiring and would clobber it on save. Open the builder in edit mode instead.
+  if (t.kind === 'workflow' && t.spec && t.spec.graph) {
+    router.push('/workflows/new?template=' + t.id)
+    return
+  }
   err.value = ''
   suspendWatch.value = true
   editingId.value = t.id
@@ -211,6 +237,9 @@ onMounted(load)
       <button class="danger ghost icon" title="Remove" @click="rmParam(i)">✕</button>
     </div>
     <button class="tonal sm" @click="addParam">+ Add parameter</button>
+    <p v-if="paramWarnings.length" style="color:var(--bad);font-size:12px;margin:8px 0 0">
+      ⚠ <b>{{ resolvedSpec }}</b> doesn't accept {{ paramWarnings.join(', ') }} — pass tool-native flags via an
+      <code>--opt-args</code> value instead, or the scan will fail with "unrecognized arguments".</p>
     <pre class="cmd" style="margin-top:10px">{{ preview }}</pre>
 
     <label style="margin-top:14px">Description <span class="muted">— shown in the scan template picker</span></label>
@@ -240,13 +269,16 @@ onMounted(load)
         <b>{{ t.name }}</b><span class="tag" :class="'kind-' + t.kind">{{ KIND_LABEL[t.kind] || t.kind }}</span>
       </div>
       <div class="muted" style="margin-top:8px"><code>{{ t.spec.name }}</code></div>
+      <div v-if="t.spec && t.spec.graph" class="muted" style="font-size:12px;margin-top:4px">
+        🧩 graph workflow<span v-if="t.spec.pipeline"> · ⑂ {{ t.spec.pipeline.length }} fan-out stages</span>
+      </div>
       <div v-if="t.description" class="muted" style="font-size:12.5px;margin-top:6px;line-height:1.4">{{ t.description }}</div>
       <pre v-if="specTokens(t.spec).length" class="cmd sm">{{ specTokens(t.spec).join(' ') }}</pre>
       <div v-if="t.kind === 'ai_agent'" class="muted" style="font-size:12px;margin-top:4px">
         profile: {{ profileName(t.llm_profile_id) }}<span v-if="t.context"> · “{{ t.context }}”</span>
       </div>
       <div class="row" style="margin-top:10px;gap:8px">
-        <button class="tonal sm" @click="startEdit(t)">Edit</button>
+        <button class="tonal sm" @click="startEdit(t)">{{ (t.kind === 'workflow' && t.spec && t.spec.graph) ? 'Edit in builder' : 'Edit' }}</button>
         <button class="danger ghost sm" @click="del(t.id)">Delete</button>
       </div>
     </div>

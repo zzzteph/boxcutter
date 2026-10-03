@@ -50,6 +50,7 @@ const isAgent = computed(() => selTmpl.value?.kind === 'ai_agent')
 const profiles = ref([])
 const profileId = ref(null)
 const showReasoning = ref(false)
+const verbose = ref(false)                 // --debug: stream detailed step/tool logs for debugging a workflow
 const profileOpts = computed(() => profiles.value.map(p => ({ value: p.id, label: `${p.name} (${p.provider})` })))
 const selProfile = computed(() => profiles.value.find(p => p.id === profileId.value) || null)
 watch(templateId, () => { profileId.value = selTmpl.value?.llm_profile_id ?? null })
@@ -91,6 +92,7 @@ const preview = computed(() => {
     if (c.value !== '' && c.value != null) parts.push(q(String(c.value)))
   }
   for (const f of (PROGRESS[t.kind] || [])) parts.push(f)
+  if (verbose.value && !parts.includes('--debug')) parts.push('--debug')
   return parts.filter(Boolean).join(' ')
 })
 function q(s) { return /\s/.test(s) ? `"${s}"` : s }
@@ -103,14 +105,34 @@ function varsPayload() {
     if (profileId.value) v.llm_profile_id = profileId.value
     if (showReasoning.value) v.reasoning = 8000
   }
+  if (verbose.value) v.debug = true
   const custom = vars.custom.filter(c => c.key.trim()).map(c => ({ key: c.key.trim(), value: c.value }))
   if (custom.length) v.custom = custom
   return v
 }
 
+// arg validation (#7): accepted flags per tool, so a scan-specific custom param the tool would reject
+// (e.g. `-severity` on a nuclei template) is caught here instead of failing mid-scan.
+const toolFlags = ref({})
+const argWarnings = computed(() => {
+  const t = selTmpl.value
+  if (!t || t.kind !== 'tool') return []        // workflows/agents: flags aren't a single tool's — skip
+  const allowed = toolFlags.value[t.spec?.name]
+  if (!allowed || !allowed.length) return []
+  const out = []
+  for (const c of vars.custom) {
+    const k = (c.key || '').trim()
+    if (!k) continue
+    const flag = (k.startsWith('-') ? k : '--' + k).split('=')[0]
+    if (!allowed.includes(flag)) out.push(flag)
+  }
+  return [...new Set(out)]
+})
+
 async function load() {
   templates.value = await api.get('/templates')
   profiles.value = await api.get('/llm-profiles')
+  try { toolFlags.value = await api.get('/templates/tool-flags') } catch (e) { /* non-fatal */ }
   if (!templateId.value && templates.value[0]) templateId.value = templates.value[0].id
 }
 async function create() {
@@ -229,6 +251,11 @@ onMounted(load)
         Tool &amp; workflow parameters come from the template. Add any <b>scan-specific</b> extras below.
       </p>
 
+      <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer">
+        <input type="checkbox" v-model="verbose" style="width:auto" />
+        Verbose logs (debug) — stream detailed step/tool output to the live log, to debug a workflow
+      </label>
+
       <label style="margin-top:6px">Custom parameters (this scan)</label>
       <div v-for="(c, i) in vars.custom" :key="i" class="kvrow">
         <input v-model="c.key" placeholder="--flag or key" />
@@ -236,6 +263,9 @@ onMounted(load)
         <button class="danger ghost icon" title="Remove" @click="rmCustom(i)">✕</button>
       </div>
       <button class="tonal sm" @click="addCustom">+ Add parameter</button>
+      <p v-if="argWarnings.length" class="muted" style="color:var(--bad);font-size:12px;margin-top:8px">
+        ⚠ <b>{{ selTmpl.spec.name }}</b> doesn't accept {{ argWarnings.join(', ') }} — pass tool-native flags via
+        an <code>--opt-args</code> value instead, or they'll be rejected when the scan runs.</p>
 
       <label style="margin-top:14px">Command preview</label>
       <pre class="cmd">{{ preview || 'Pick a template…' }}</pre>

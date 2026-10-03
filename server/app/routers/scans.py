@@ -79,12 +79,13 @@ class ScanPatch(BaseModel):
     vars: dict | None = None
 
 
-def _create_stages(session: Session, scan_id: int, stages) -> int:
+def _create_stages(session: Session, scan_id: int, stages, start_level: int = 0) -> int:
     """Persist the pipeline's downstream stages. Each entry advances to the next level UNLESS `branch=True`, in
     which case it shares the previous entry's level (a parallel fan-out consuming the same upstream items). Each
-    stage's template must exist. Returns the number of stages created."""
+    stage's template must exist. ``start_level`` is the highest stage_no already used (by a fan-out workflow's own
+    segments), so user-declared stages continue AFTER them. Returns the number of stages created."""
     n = 0
-    level = 0
+    level = start_level
     for i, st in enumerate(stages or [], start=1):
         if not session.get(Template, st.template_id):
             raise HTTPException(404, f"stage {i}: template not found")
@@ -96,6 +97,31 @@ def _create_stages(session: Session, scan_id: int, stages) -> int:
     if n:
         session.commit()
     return n
+
+
+def _builder_stages(session: Session, scan_id: int, template_id: int) -> int:
+    """A FAN-OUT workflow template (built in the graph builder with a split boundary) carries an ordered
+    ``spec['pipeline']`` of segments. Materialize segments 1..N-1 as real downstream Stage rows pointing back at
+    the SAME template (each job picks its segment by stage_no, see runners.build_argv) so the downstream tools run
+    as separate per-item jobs across the whole fleet. Segment 0 is the implicit stage-0 template, so nothing is
+    created for it. Returns the highest stage_no used (0 for an ordinary, single-segment workflow)."""
+    tmpl = session.get(Template, template_id)
+    if not tmpl or tmpl.kind != "workflow":
+        return 0
+    try:
+        pipeline = (json.loads(tmpl.spec_json or "{}") or {}).get("pipeline") or []
+    except Exception:
+        pipeline = []
+    top = 0
+    for i, seg in enumerate(pipeline):
+        if i == 0:
+            continue
+        item_filter = seg.get("item_filter") if seg.get("item_filter") in ("all", "urls") else "all"
+        session.add(Stage(scan_id=scan_id, stage_no=i, template_id=template_id, item_filter=item_filter))
+        top = i
+    if top:
+        session.commit()
+    return top
 
 
 def _perm(session: Session, scan: Scan, user: User):
@@ -159,7 +185,8 @@ def create_scan(body: ScanIn, user: User = Depends(current_user), session: Sessi
     session.commit()
     session.refresh(scan)
     _ingest_targets(session, scan.id, body.targets)          # stage 0 (Target.stage_no defaults to 0)
-    stages = _create_stages(session, scan.id, body.stages)
+    base_level = _builder_stages(session, scan.id, body.template_id)   # a fan-out workflow's own segments
+    stages = base_level + _create_stages(session, scan.id, body.stages, start_level=base_level)
     n = enqueue_scan(session, scan)                          # enqueue stage 0 only; later stages promote on drain
     suffix = f" ({stages}-stage pipeline)" if stages else ""
     log_activity(session, "scan_created", f"Scan '{scan.name}' created — {n} assets{suffix}", scan_id=scan.id)
@@ -203,7 +230,8 @@ def create_scan_upload(
     # raw file in a text decoder and iterate lines lazily so ingestion streams end to end.
     text = io.TextIOWrapper(file.file, encoding="utf-8", errors="replace")
     _ingest_targets(session, scan.id, text)
-    nstages = _create_stages(session, scan.id, stage_specs)
+    base_level = _builder_stages(session, scan.id, template_id)        # a fan-out workflow's own segments
+    nstages = base_level + _create_stages(session, scan.id, stage_specs, start_level=base_level)
     n = enqueue_scan(session, scan)
     suffix = f", {nstages}-stage pipeline" if nstages else ""
     log_activity(session, "scan_created", f"Scan '{scan.name}' created — {n} assets (upload{suffix})",
@@ -346,6 +374,19 @@ def get_scan(scan_id: int, user: User = Depends(current_user), session: Session 
     # the UI can render the chain + a progress bar per box without extra requests.
     stage_rows = session.exec(select(Stage).where(Stage.scan_id == scan_id).order_by(Stage.stage_no)).all()
     tmpl_names = {t.id: t.name for t in session.exec(select(Template)).all()} if stage_rows else {}
+    # a fan-out workflow's stages all point at the SAME seed template, so label them by their SEGMENT name
+    # (stage_no -> spec.pipeline[stage_no].name) instead of repeating the template name on every box.
+    try:
+        seed_pipeline = (json.loads(tmpl.spec_json or "{}") or {}).get("pipeline") or [] if tmpl else []
+    except Exception:
+        seed_pipeline = []
+
+    def _stage_label(stage_no: int, template_id: int) -> str:
+        if template_id == scan.template_id and 0 <= stage_no < len(seed_pipeline):
+            return seed_pipeline[stage_no].get("name") or (tmpl.name if tmpl else "")
+        if template_id == scan.template_id:
+            return tmpl.name if tmpl else ""
+        return tmpl_names.get(template_id, "")
     sjobs: dict = {}
     for sn, tid, jstatus, c in session.exec(
             select(Job.stage_no, Job.template_id, Job.status, func.count())
@@ -360,10 +401,10 @@ def get_scan(scan_id: int, user: User = Depends(current_user), session: Session 
                 "running": d.get("running", 0) + d.get("claimed", 0),
                 "pending": d.get("pending", 0), "failed": d.get("failed", 0)}
 
-    pipeline = [{"stage_no": 0, "template_id": scan.template_id, "template": tmpl.name if tmpl else "",
+    pipeline = [{"stage_no": 0, "template_id": scan.template_id, "template": _stage_label(0, scan.template_id),
                  "item_filter": None, "jobs": _stage_progress(0, scan.template_id)}]
     pipeline += [{"stage_no": s.stage_no, "template_id": s.template_id,
-                  "template": tmpl_names.get(s.template_id, ""), "item_filter": s.item_filter,
+                  "template": _stage_label(s.stage_no, s.template_id), "item_filter": s.item_filter,
                   "jobs": _stage_progress(s.stage_no, s.template_id)} for s in stage_rows]
     out.update({"targets": targets, "jobs": jstat, "vars": vars_,
                 "template": ({"id": tmpl.id, "name": tmpl.name, "kind": tmpl.kind, "context": tmpl.context,

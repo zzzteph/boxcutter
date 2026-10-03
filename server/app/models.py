@@ -46,7 +46,7 @@ class ApiKey(SQLModel, table=True):
 class LLMProfile(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True, unique=True, max_length=150)
-    provider: str = Field(max_length=40)                      # anthropic | openai | litellm | ollama | claude-code
+    provider: str = Field(max_length=40)                      # anthropic | openai | litellm | claude-code
     model: Optional[str] = Field(default=None, max_length=120)
     proxy_url: Optional[str] = Field(default=None, max_length=500)
     api_key_secret: str = _text("")                          # server-only, never serialized to the browser
@@ -122,8 +122,7 @@ class Job(SQLModel, table=True):
     template_id: int = Field(foreign_key="template.id")
     run_no: int = 0
     stage_no: int = Field(default=0)                          # pipeline stage this job belongs to (0 = seed stage)
-    # the local model this job REQUIRES (an ai_agent template on an ollama profile); empty = any agent can run
-    # it. An agent only claims a job whose needs_model it has installed - so a model it can't run is never taken.
+    # legacy column (kept so existing DBs still map cleanly); always "" now. Any agent can run any job.
     needs_model: str = Field(default="", max_length=120)
     dedup_key: str = Field(index=True, unique=True, max_length=128)
     # opaque per-job run token: integer PKs get reused after a scan is deleted (SQLite reuses rowids), so a

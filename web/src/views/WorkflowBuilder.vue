@@ -31,6 +31,7 @@ const graph = computed(() => ({
 // live compile preview (debounced): the exact workflow YAML the runner gets, or the precise validation error
 const preview = ref('')
 const previewErr = ref('')
+const segCount = ref(1)                   // how many fan-out stages the graph compiles to (1 = single process)
 let tmr = null
 watch([graph], () => { clearTimeout(tmr); tmr = setTimeout(runPreview, 350) }, { deep: true })
 async function runPreview() {
@@ -40,6 +41,7 @@ async function runPreview() {
     const r = await api.post('/templates/workflow/preview',
       { name: graph.value.name, help: graph.value.help, graph: graph.value })
     preview.value = r.yaml
+    segCount.value = r.segments || 1
   } catch (e) { previewErr.value = e.message }
 }
 
@@ -115,6 +117,9 @@ onMounted(load)
       <h2>Workflow preview</h2>
       <p class="muted" style="margin-top:0">The actual boxcutter workflow your boxes turn into — the recipe the
         scanner runs. It updates live as you wire boxes; you don't edit it here.</p>
+      <p v-if="segCount > 1" class="muted" style="margin-top:0;color:var(--primary)">
+        ⑂ Fans out across the fleet in <b>{{ segCount }} stages</b> — each stage after a fan-out wire runs as
+        separate per-item jobs spread over every online scanner.</p>
       <p v-if="previewErr" class="err">{{ previewErr }}</p>
       <pre class="cmd" style="white-space:pre-wrap">{{ preview || (previewErr ? '' : 'Add a box and a name…') }}</pre>
     </div>
