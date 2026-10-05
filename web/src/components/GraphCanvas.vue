@@ -21,12 +21,16 @@ const edges = reactive([])    // {from, to}
 let seq = 0
 
 const canvas = ref(null)
-const drag = reactive({ mode: null, id: null, ox: 0, oy: 0, fromId: null, mx: 0, my: 0 })
+const drag = reactive({ mode: null, id: null, ox: 0, oy: 0, fromId: null, mx: 0, my: 0, px: 0, py: 0 })
+
+// pan: a view offset for the whole world, so you can drag the empty canvas to move everything around. Applied
+// as a translate BEFORE the zoom scale; pointer->world conversion subtracts it (see local()).
+const pan = reactive({ x: 0, y: 0 })
 
 // zoom: the node/edge world is scaled from the top-left; pointer coords are divided by it (see local()).
 const zoom = ref(1)
 function zoomBy(d) { zoom.value = Math.min(1.6, Math.max(0.4, Math.round((zoom.value + d) * 100) / 100)) }
-function zoomReset() { zoom.value = 1 }
+function zoomReset() { zoom.value = 1; pan.x = 0; pan.y = 0 }
 function onWheel(e) { if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoomBy(e.deltaY < 0 ? 0.1 : -0.1) } }
 
 // Auto-arrange into clean left->right layers by wiring DEPTH (longest path from a root): roots in column 0, each
@@ -67,17 +71,22 @@ function autoLayout() { tidy(true) }                     // the manual Tidy butt
 function structural() { if (autoArrange.value) tidy(false); else emitChange() }
 function toggleAuto() { autoArrange.value = !autoArrange.value; if (autoArrange.value) tidy(true) }
 
-// right-click on the canvas -> a context menu to drop a tool box AT the cursor
-const ctx = reactive({ open: false, cx: 0, cy: 0, wx: 0, wy: 0 })
+// right-click on the canvas -> a TWO-LEVEL context menu: pick a group, then a box (with its info) from that
+// group's submenu. `group` is the currently-opened group (null = show only the group list).
+const ctx = reactive({ open: false, cx: 0, cy: 0, wx: 0, wy: 0, group: '' })
+const activeGroup = computed(() => grouped.value.find(g => g.group === ctx.group) || null)
 function onContextMenu(e) {
   const r = canvas.value.getBoundingClientRect()
   ctx.cx = e.clientX; ctx.cy = e.clientY                  // menu sits at the cursor (fixed positioning)
-  ctx.wx = (e.clientX - r.left) / zoom.value              // world coords for the new box
-  ctx.wy = (e.clientY - r.top) / zoom.value
+  ctx.wx = (e.clientX - r.left - pan.x) / zoom.value      // world coords (undo pan + zoom) for the new box
+  ctx.wy = (e.clientY - r.top - pan.y) / zoom.value
+  ctx.group = ''                                          // always start at the group list
   ctx.open = true
 }
-function ctxAdd(tool) { addNode(tool, Math.max(0, ctx.wx - 20), Math.max(0, ctx.wy - 14)); ctx.open = false }
-function closeCtx() { ctx.open = false }
+// drop the box where the cursor was (top-left at the click point). Auto-arrange still governs: with it ON the
+// box snaps into the tidy layout; turn it OFF to hand-place and the drop position is kept exactly.
+function ctxAdd(tool) { addNode(tool, Math.max(0, ctx.wx), Math.max(0, ctx.wy), !autoArrange.value); ctx.open = false }
+function closeCtx() { ctx.open = false; ctx.group = '' }
 
 const kindOf = (tool) => props.catalog.find(t => t.name === tool)?.kind || ''
 const isTerminal = (tool) => !!props.catalog.find(t => t.name === tool)?.terminal
@@ -125,9 +134,22 @@ const KIND_SHAPE = { target: 'circle', urls: 'circle', items: 'square', endpoint
                      findings: 'diamond', screenshots: 'square' }
 const kindColor = (k) => KIND_COLOR[k] || 'var(--accent, #5865f2)'
 const kindShape = (k) => 'gc-port-' + (KIND_SHAPE[k] || 'circle')
+// plain-language gloss for each data type — "items" especially isn't self-explanatory.
+const KIND_HELP = {
+  target: 'the scan target you enter (a host, URL or domain)',
+  urls: 'hostnames / URLs this step found — each one becomes a target for the next box',
+  items: 'a list of results this step produced (live URLs, endpoints or records) — each one becomes a target for the next box',
+  endpoints: 'host:port services, e.g. from a port scan',
+  findings: 'security issues — terminal: a findings box can only feed a filter / limit box',
+  screenshots: 'captured page images',
+}
+const kindHelp = (k) => KIND_HELP[k] || ''
 
 // #9: the tool's one-line description (from the catalog), shown on the box so you know what it does.
 const descOf = (tool) => props.catalog.find(t => t.name === tool)?.description || ''
+// a SPECIFIC noun for what the box produces (e.g. httpx -> "live HTTP services (URLs)") instead of the generic
+// output kind ("items"), which is shared by many unrelated tools. Falls back to the kind.
+const producesOf = (tool) => props.catalog.find(t => t.name === tool)?.produces || kindOf(tool) || 'items'
 
 // ---- data-flow emulation: a REPRESENTATION (not a real scan) of the example values that flow between boxes,
 // so you can see what a box produces and what the next box down the wire will receive. Keyed off the data TYPE
@@ -204,13 +226,8 @@ const grouped = computed(() => {
 })
 function pick(tool) { addNode(tool) }      // keep the palette open so several boxes can be added in a row
 
-// per-box condition (only on a wired box): run it only on the upstream URLs that contain / don't contain a value
-const condOf = (n) => n.when || { mode: 'contains', value: '' }
-function setCondMode(n, mode) { const w = condOf(n); n.when = { mode, value: w.value }; emitChange() }
-function toggleMode(n) { setCondMode(n, condOf(n).mode === 'excludes' ? 'contains' : 'excludes') }
-function setCondVal(n, v) { n.when = { mode: condOf(n).mode, value: v }; emitChange() }
-
 // the `filter` box carries MULTIPLE conditions (all must pass): each row is contains(keep)/excludes(reject)+text.
+// (Per-box contains/excludes was removed — use a dedicated `filter` box for that.)
 const condsOf = (n) => n.conditions || []
 function addCond(n) { if (!n.conditions) n.conditions = []; n.conditions.push({ mode: 'contains', value: '' }); emitChange() }
 function rmCond(n, i) { (n.conditions || []).splice(i, 1); emitChange() }
@@ -224,7 +241,7 @@ function setRepeatMax(n, v) { n.repeat = { max: Math.max(1, Math.min(10, parseIn
 
 function emitChange() {
   emit('change', {
-    nodes: nodes.map(n => ({ id: n.id, tool: n.tool, args: n.args, x: n.x, y: n.y,
+    nodes: nodes.map(n => ({ id: n.id, tool: n.tool, args: n.args, optargs: n.optargs || '', x: n.x, y: n.y,
                              when: n.when || null, conditions: n.conditions || null, repeat: n.repeat || null })),
     edges: edges.map(e => e.split
       ? { from: e.from, to: e.to, split: true, item_filter: e.item_filter || 'all' }
@@ -232,12 +249,13 @@ function emitChange() {
   })
 }
 
-function addNode(tool, px, py) {
+function addNode(tool, px, py, fixed) {
   if (!tool) return
   const id = 'b' + (++seq)
   // px/py set when added via right-click (drop at the cursor); else stagger so boxes don't stack exactly
-  nodes.push({ id, tool, args: '', when: null, conditions: tool === 'filter' ? [{ mode: 'contains', value: '' }] : null, repeat: null, x: px ?? (40 + (nodes.length % 4) * 40), y: py ?? (40 + (nodes.length % 6) * 30) })
-  structural()
+  nodes.push({ id, tool, args: '', optargs: '', when: null, conditions: tool === 'filter' ? [{ mode: 'contains', value: '' }] : null, repeat: null, x: px ?? (40 + (nodes.length % 4) * 40), y: py ?? (40 + (nodes.length % 6) * 30) })
+  // a deliberately-placed box (right-click drop) keeps its spot — persist without auto-arranging it away.
+  if (fixed) emitChange(); else structural()
 }
 function removeNode(id) {
   const i = nodes.findIndex(n => n.id === id)
@@ -250,6 +268,9 @@ function removeEdge(from, to) {
   if (i >= 0) { edges.splice(i, 1); structural() }
 }
 function setArgs(n, v) { n.args = v; emitChange() }
+function setOptArgs(n, v) { n.optargs = v; emitChange() }
+// does this tool accept --opt-args (verbatim passthrough to the underlying binary)? only then show the field.
+const optArgsSupported = (tool) => flagsOf(tool).includes('--opt-args')
 
 // ---- geometry (canvas-local coords) ----
 const nodeById = (id) => nodes.find(n => n.id === id)
@@ -274,8 +295,19 @@ const tempPath = computed(() => {
 
 function local(e) {
   const r = canvas.value.getBoundingClientRect()
-  // the world is scaled from 0,0, so convert screen offset back to world coords by dividing by the zoom
-  return { x: (e.clientX - r.left) / zoom.value, y: (e.clientY - r.top) / zoom.value }
+  // the world is translated by pan then scaled from 0,0 — undo both to get world coords
+  return { x: (e.clientX - r.left - pan.x) / zoom.value, y: (e.clientY - r.top - pan.y) / zoom.value }
+}
+
+// ---- pan the whole canvas by dragging empty background ----
+function startPan(e) {
+  if (e.button !== 0) return
+  // only grab EMPTY canvas — not a box, port, wire, label or control (those start their own drag / click)
+  const cl = e.target && e.target.classList
+  if (!cl || !(cl.contains('gc-world') || cl.contains('gc-canvas') || cl.contains('gc-edges')
+               || cl.contains('gc-empty'))) return
+  drag.mode = 'pan'; drag.px = e.clientX - pan.x; drag.py = e.clientY - pan.y
+  window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', endDrag)
 }
 
 // ---- move a box ----
@@ -294,6 +326,7 @@ function startWire(e, n) {
   window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', endDrag)
 }
 function onMove(e) {
+  if (drag.mode === 'pan') { pan.x = e.clientX - drag.px; pan.y = e.clientY - drag.py; return }
   const p = local(e)
   if (drag.mode === 'move') {
     const n = nodeById(drag.id)
@@ -335,7 +368,7 @@ function connect(from, to) {
 
 onMounted(() => {
   for (const n of (props.initial?.nodes || [])) {
-    nodes.push({ id: n.id, tool: n.tool, args: n.args || '', when: n.when || null, conditions: n.conditions || null, repeat: n.repeat || null, x: n.x ?? 40, y: n.y ?? 40 })
+    nodes.push({ id: n.id, tool: n.tool, args: n.args || '', optargs: n.optargs || '', when: n.when || null, conditions: n.conditions || null, repeat: n.repeat || null, x: n.x ?? 40, y: n.y ?? 40 })
     const num = parseInt(String(n.id).replace(/\D/g, '')); if (num > seq) seq = num
   }
   for (const e of (props.initial?.edges || []))
@@ -371,7 +404,7 @@ onBeforeUnmount(() => {
     </div>
     <div class="gc-legend">
       <span class="muted" style="font-size:11px">port types:</span>
-      <span v-for="(c, k) in KIND_COLOR" :key="k" class="gc-leg">
+      <span v-for="(c, k) in KIND_COLOR" :key="k" class="gc-leg" :title="kindHelp(k)">
         <span class="gc-legdot" :class="'gc-port-' + (KIND_SHAPE[k] || 'circle')" :style="{ background: c, borderColor: c }"></span>{{ k }}
       </span>
     </div>
@@ -381,14 +414,14 @@ onBeforeUnmount(() => {
         <div class="gc-pgroup"><span class="gc-dot" :style="{ background: GROUP_COLOR[g.group] || '#8f9099' }"></span>{{ g.group }}</div>
         <button v-for="t in g.tools" :key="t.name" class="gc-chip"
                 :style="{ borderLeft: '3px solid ' + (GROUP_COLOR[g.group] || '#8f9099') }" @click="pick(t.name)">
-          <span class="gc-chiphead"><span class="gc-chipn">{{ t.name }}</span><span class="gc-chipk">out: {{ t.kind }}</span></span>
+          <span class="gc-chiphead"><span class="gc-chipn">{{ t.name }}</span><span class="gc-chipk">out: {{ t.produces || t.kind }}</span></span>
           <span class="gc-chipd">{{ t.description || 'no description' }}</span>
         </button>
       </div>
     </div>
-    <div ref="canvas" class="gc-canvas" :class="{ wiring: drag.mode === 'wire' }" @wheel="onWheel"
-         @contextmenu.prevent="onContextMenu">
-      <div class="gc-world" :style="{ transform: `scale(${zoom})`, transformOrigin: '0 0' }">
+    <div ref="canvas" class="gc-canvas" :class="{ wiring: drag.mode === 'wire', panning: drag.mode === 'pan' }"
+         @wheel="onWheel" @pointerdown="startPan" @contextmenu.prevent="onContextMenu">
+      <div class="gc-world" :style="{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: '0 0' }">
       <svg class="gc-edges">
         <path v-if="tempPath" :d="tempPath" class="gc-edge gc-temp" />
         <g v-for="p in edgePaths" :key="p.from + '>' + p.to">
@@ -414,20 +447,22 @@ onBeforeUnmount(() => {
       <div v-for="n in nodes" :key="n.id" class="gc-node" :data-id="n.id"
            :style="{ left: n.x + 'px', top: n.y + 'px', width: BOX_W + 'px', borderLeftColor: colorOf(n.tool), borderLeftWidth: '3px' }">
         <div class="gc-in" :class="kindShape(inKind(n.id))" :style="{ borderColor: kindColor(inKind(n.id)) }"
-             :title="'input: ' + inKind(n.id)"></div>
+             :title="'input (' + inKind(n.id) + '): ' + kindHelp(inKind(n.id))"></div>
         <div v-if="!isTerminal(n.tool)" class="gc-out" :class="kindShape(outKind(n.id))"
              :style="{ background: kindColor(outKind(n.id)), borderColor: kindColor(outKind(n.id)) }"
-             :title="'output: ' + outKind(n.id) + ' — drag to wire'" @pointerdown="startWire($event, n)"></div>
+             :title="'output (' + outKind(n.id) + '): ' + kindHelp(outKind(n.id)) + ' — drag to wire'"
+             @pointerdown="startWire($event, n)"></div>
         <div class="gc-node-head" @pointerdown="startMove($event, n)">
           <span class="gc-tool">{{ n.tool }}</span>
           <span class="gc-kind" :class="isTerminal(n.tool) ? 'terminal' : 'chain'"
-                :style="isTerminal(n.tool) ? null : { background: colorOf(n.tool) }">{{ kindOf(n.tool) || 'items' }}</span>
+                :style="isTerminal(n.tool) ? null : { background: colorOf(n.tool) }"
+                :title="'outputs ' + producesOf(n.tool) + ' (' + (kindOf(n.tool) || 'items') + ') — ' + kindHelp(kindOf(n.tool) || 'items')">{{ kindOf(n.tool) || 'items' }}</span>
           <button class="danger ghost icon gc-x" title="Remove" @pointerdown.stop @click="removeNode(n.id)">✕</button>
         </div>
         <div class="gc-io"
              title="A box with no wire in runs on the scan's Target (the host/URL/domain you give the scan in New Scan). A wired box runs on what the boxes feeding it produced.">
           in: {{ hasInput(n.id) ? 'wired input' : 'scan Target' }} →
-          out: {{ isTerminal(n.tool) ? kindOf(n.tool) + ' (terminal)' : (kindOf(n.tool) || 'items') }}
+          out: {{ producesOf(n.tool) }}{{ isTerminal(n.tool) ? ' (terminal)' : '' }}
         </div>
         <div v-if="descOf(n.tool)" class="gc-desc" :title="descOf(n.tool)">{{ descOf(n.tool) }}</div>
         <!-- data-flow emulation: example values this box takes in and gives out (by type, propagated along wires) -->
@@ -451,12 +486,6 @@ onBeforeUnmount(() => {
           </div>
           <button class="gc-addc" @click="addCond(n)">+ condition</button>
         </div>
-        <!-- any other wired box: a single optional condition on its input -->
-        <div v-else-if="hasInput(n.id)" class="gc-cond" @pointerdown.stop title="run this box only on upstream URLs matching">
-          <button class="gc-mode" @click="toggleMode(n)">{{ condOf(n).mode === 'excludes' ? 'excludes' : 'contains' }}</button>
-          <input class="gc-condv" :value="condOf(n).value" placeholder="text (optional)"
-                 @input="setCondVal(n, $event.target.value)" />
-        </div>
         <div v-if="!isTerminal(n.tool)" class="gc-rep" @pointerdown.stop
              title="re-run this box on its own newly-discovered URLs until nothing new is found (bounded)">
           <button class="gc-mode" :class="{ on: repeatOf(n) }" @click="toggleRepeat(n)">
@@ -464,11 +493,16 @@ onBeforeUnmount(() => {
           <input v-if="repeatOf(n)" class="gc-repmax" type="number" min="1" max="10" :value="repeatOf(n).max"
                  title="max rounds" @input="setRepeatMax(n, $event.target.value)" />
         </div>
-        <input class="gc-args" :value="n.args" placeholder="extra args (optional)"
+        <input v-if="n.tool !== 'filter'" class="gc-args" :value="n.args"
+               :placeholder="n.tool === 'limit' ? 'max items (e.g. 100)' : 'tool args (e.g. --timeout 60)'"
                @pointerdown.stop @input="setArgs(n, $event.target.value)" />
         <div v-if="argIssues(n).length" class="gc-argwarn" @pointerdown.stop>
-          ⚠ {{ n.tool }} doesn't accept {{ argIssues(n).join(', ') }} — pass tool-native flags via
-          <code>--opt-args "…"</code></div>
+          ⚠ {{ n.tool }} doesn't accept {{ argIssues(n).join(', ') }} — put tool-native flags in
+          <b>opt-args</b> below</div>
+        <input v-if="optArgsSupported(n.tool)" class="gc-args gc-optargs" :value="n.optargs"
+               placeholder="opt-args → passed to the tool verbatim (e.g. -severity critical,high)"
+               title="Forwarded verbatim to the underlying scanner binary — put its native flags here"
+               @pointerdown.stop @input="setOptArgs(n, $event.target.value)" />
       </div>
 
       </div>
@@ -479,12 +513,27 @@ onBeforeUnmount(() => {
       <div v-if="ctx.open" class="gc-ctxbackdrop" @click="closeCtx" @contextmenu.prevent="closeCtx"></div>
       <div v-if="ctx.open" class="gc-ctxmenu" :style="{ left: ctx.cx + 'px', top: ctx.cy + 'px' }"
            @contextmenu.prevent>
-        <div class="gc-ctxhint">Add a box here</div>
-        <template v-for="g in grouped" :key="g.group">
-          <div class="gc-ctxgroup">{{ g.group }}</div>
-          <button v-for="t in g.tools" :key="t.name" class="gc-ctxitem" :title="t.description || ''"
-                  @click="ctxAdd(t.name)">{{ t.name }} <span class="gc-chipk">{{ t.kind }}</span></button>
-        </template>
+        <!-- level 1: the groups -->
+        <div class="gc-ctxcol gc-ctxgroups">
+          <div class="gc-ctxhint">Add a box</div>
+          <button v-for="g in grouped" :key="g.group" class="gc-ctxgrow"
+                  :class="{ active: ctx.group === g.group }"
+                  @mouseenter="ctx.group = g.group" @click="ctx.group = g.group">
+            <span class="gc-dot" :style="{ background: GROUP_COLOR[g.group] || '#8f9099' }"></span>
+            <span class="gc-ctxgname">{{ g.group }}</span>
+            <span class="gc-ctxcount">{{ g.tools.length }}</span>
+            <span class="gc-ctxchev">▸</span>
+          </button>
+        </div>
+        <!-- level 2: the boxes in the chosen group, with info -->
+        <div v-if="activeGroup" class="gc-ctxcol gc-ctxtools">
+          <div class="gc-ctxhint">{{ activeGroup.group }} — pick a box</div>
+          <button v-for="t in activeGroup.tools" :key="t.name" class="gc-ctxtool" @click="ctxAdd(t.name)">
+            <span class="gc-ctxthead"><span class="gc-ctxtname">{{ t.name }}</span>
+              <span class="gc-chipk">out: {{ t.produces || t.kind }}</span></span>
+            <span class="gc-ctxtdesc">{{ t.description || 'no description' }}</span>
+          </button>
+        </div>
       </div>
     </teleport>
   </div>
@@ -532,6 +581,8 @@ onBeforeUnmount(() => {
   background: var(--panel-2, var(--panel)); overflow: hidden;
   background-image: radial-gradient(var(--line, #e3e3e3) 1px, transparent 1px); background-size: 20px 20px;
 }
+.gc-canvas { cursor: grab; }                 /* empty canvas is pannable — drag to move everything */
+.gc-canvas.panning { cursor: grabbing; }
 .gc-canvas.wiring { cursor: crosshair; }
 .gc-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .gc-edge { fill: none; stroke: var(--accent, #5865f2); stroke-width: 2; }
@@ -551,7 +602,7 @@ onBeforeUnmount(() => {
 .gc-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 .gc-node {
   position: absolute; border: 1px solid var(--line, #ccc); border-radius: 8px; background: var(--panel, #fff);
-  color: var(--text, #16181d); box-shadow: 0 1px 3px rgba(0,0,0,.12); user-select: none;
+  color: var(--text, #16181d); box-shadow: 0 1px 3px rgba(0,0,0,.12); user-select: none; cursor: default;
 }
 .gc-node-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; cursor: grab; }
 .gc-node-head:active { cursor: grabbing; }
@@ -567,6 +618,7 @@ onBeforeUnmount(() => {
 }
 .gc-args::placeholder, .gc-condv::placeholder { color: var(--muted); }
 .gc-args { margin: 0 8px 8px; width: calc(100% - 16px); }
+.gc-optargs { border-style: dashed; }        /* opt-args reads distinct from the recognized tool args */
 .gc-argwarn { margin: -2px 8px 8px; font-size: 10.5px; line-height: 1.35; color: var(--bad, #ed4245); }
 .gc-argwarn code { font-size: 10px; }
 .gc-cond, .gc-rep { display: flex; gap: 4px; margin: 0 8px 6px; align-items: center; }
@@ -609,14 +661,28 @@ onBeforeUnmount(() => {
 .gc-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
 /* right-click context menu — teleported to <body>, so it uses the REAL theme tokens (the .gc aliases don't reach it) */
 .gc-ctxbackdrop { position: fixed; inset: 0; z-index: 70; }
-.gc-ctxmenu { position: fixed; z-index: 71; min-width: 190px; max-height: 70vh; overflow: auto; padding: 6px;
+/* two-level flyout: a groups column, and (when a group is active) a boxes column beside it */
+.gc-ctxmenu { position: fixed; z-index: 71; display: flex; align-items: flex-start;
   background: var(--sc, #1e1f23); color: var(--on-surface, #e4e2e6);
   border: 1px solid var(--outline-variant, #43474e); border-radius: 8px; box-shadow: 0 8px 30px rgba(0, 0, 0, .5); }
+.gc-ctxcol { padding: 6px; max-height: 72vh; overflow: auto; }
+.gc-ctxgroups { min-width: 160px; }
+.gc-ctxtools { min-width: 240px; max-width: 300px; border-left: 1px solid var(--outline-variant, #43474e); }
 .gc-ctxhint { font-size: 11px; color: var(--on-surface-variant, #c5c6cf); padding: 2px 8px 6px; }
-.gc-ctxgroup { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
-  color: var(--on-surface-variant, #c5c6cf); padding: 6px 8px 2px; }
-.gc-ctxitem { display: flex; justify-content: space-between; gap: 10px; width: 100%; text-align: left;
-  font-size: 12.5px; padding: 4px 8px; border: 0; border-radius: 5px; background: transparent;
-  color: var(--on-surface, #e4e2e6); cursor: pointer; }
-.gc-ctxitem:hover { background: var(--sc-high, #282a2e); }
+.gc-ctxgrow { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; font-size: 12.5px;
+  padding: 5px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--on-surface, #e4e2e6);
+  cursor: pointer; }
+.gc-ctxgrow:hover, .gc-ctxgrow.active { background: var(--sc-high, #282a2e); }
+.gc-ctxgname { flex: 1; }
+.gc-ctxcount { font-size: 10.5px; color: var(--on-surface-variant, #c5c6cf);
+  background: var(--sc-low, #1a1b1f); border-radius: 999px; padding: 0 7px; }
+.gc-ctxchev { color: var(--on-surface-variant, #c5c6cf); font-size: 11px; }
+.gc-ctxtool { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
+  padding: 5px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--on-surface, #e4e2e6);
+  cursor: pointer; }
+.gc-ctxtool:hover { background: var(--sc-high, #282a2e); }
+.gc-ctxthead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.gc-ctxtname { font-weight: 600; font-size: 12.5px; }
+.gc-ctxtdesc { font-size: 11px; line-height: 1.35; color: var(--on-surface-variant, #c5c6cf);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 </style>

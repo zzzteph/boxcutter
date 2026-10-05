@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 
 # tool name -> output kind, mirrored from the engine registry (boxcutter/tools/*.KIND).
 #   findings  -> issues; a terminal box (can't feed a downstream box)
@@ -130,6 +131,18 @@ class WorkflowError(ValueError):
     """A graph that can't be compiled (bad name, unknown tool, cycle, illegal wiring, ...)."""
 
 
+def _full_args(node: dict) -> str:
+    """The step's args string: the box's own tool args, plus ``--opt-args '<value>'`` (verbatim passthrough to the
+    underlying binary) when the box set an opt-args value. The value is shlex-quoted so it stays ONE token that
+    the tool wrapper forwards to the scanner intact (e.g. nuclei's native ``-severity critical,high``). Not applied
+    to flow pseudo-tools (their ``args`` means something else, e.g. limit's count)."""
+    args = node.get("args", "") or ""
+    opt = node.get("optargs", "") or ""
+    if opt and node.get("tool") not in _FLOW_TOOLS:
+        args = (args + " --opt-args " + shlex.quote(opt)).strip()
+    return args.strip()
+
+
 def _var(node_id: str) -> str:
     """A collision-safe workflow variable for a node's output. Prefixed so it can never shadow a reserved var
     (``target``/``findings``/``_target``/``_scope``); non-word chars folded to ``_``."""
@@ -171,6 +184,7 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None,
         if tool not in TOOL_KIND:
             raise WorkflowError(f"unknown tool '{tool}'")
         by_id[nid] = {"id": nid, "tool": tool, "args": str(n.get("args", "") or "").strip(),
+                      "optargs": str(n.get("optargs", "") or "").strip(),
                       "kind": TOOL_KIND[tool], "when": _parse_when(n.get("when")),
                       "conditions": _parse_conditions(n.get("conditions")),
                       "repeat": _parse_repeat(n.get("repeat"))}
@@ -227,10 +241,11 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None,
                               "set": fvar})                                                 # cap to N
             continue
         save = "findings" if node["kind"] == "findings" else _var(nid)
+        full_args = _full_args(node)                    # tool args + any --opt-args passthrough
         if not parents:                                # root: runs on the workflow target
             step: dict = {"tool": node["tool"], "target": "${target}"}
-            if node["args"]:
-                step["args"] = node["args"]
+            if full_args:
+                step["args"] = full_args
             step["save"] = save
             steps.append(step)
         else:                                          # child: run per URL EACH parent produced. With several
@@ -239,8 +254,8 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None,
             for pid in parents:
                 pvar = _var(pid)
                 inner: dict = {"tool": node["tool"], "target": "${" + pvar + ".item}"}
-                if node["args"]:
-                    inner["args"] = node["args"]
+                if full_args:
+                    inner["args"] = full_args
                 inner["save"] = save
                 proj = pvar + " | urls" + _cond_chain(node)   # condition(s): grep the piped URLs first
                 steps.append({"for_each": "${" + proj + "}", "do": [inner]})
@@ -251,8 +266,8 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None,
         if node.get("repeat") and node["kind"] != "findings":
             vv = save                                  # the box's own output var (_var(nid))
             rinner: dict = {"tool": node["tool"], "target": "${" + vv + ".item}"}
-            if node["args"]:
-                rinner["args"] = node["args"]
+            if full_args:
+                rinner["args"] = full_args
             rinner["save"] = vv
             rproj = vv + " | urls" + _cond_chain(node)
             steps.append({"repeat": "${" + vv + " | urls}", "max": node["repeat"]["max"],

@@ -92,6 +92,31 @@ _TOOL_GROUP = {
 }
 _GROUP_ORDER = ["Recon", "Crawl", "Vuln scanners", "Fuzzing", "Secrets", "API specs", "GraphQL",
                 "Flow", "Generic", "Other"]
+# A short, SPECIFIC noun for what each box actually PRODUCES — because the raw output kind ("items") is the same
+# for a dozen tools that emit very different things. Shown on the box as "out: <produces>". Missing -> kind.
+_TOOL_PRODUCES = {
+    "subfinder": "subdomains", "dnsx": "resolved hosts", "dns-brute": "resolved subdomains",
+    "ping-scan": "live hosts", "nmap": "open ports (host:port)", "httpx": "live HTTP services (URLs)",
+    "liveless": "live URLs", "api-map": "API findings", "smart-enum": "candidate paths",
+    "screenshot": "page screenshots", "wayback": "archived URLs", "wayback-domains": "archived hostnames",
+    "katana-crawl": "crawled URLs", "zap-crawl": "crawled URLs", "js-endpoints": "API endpoints",
+    "js-files": "JavaScript file URLs", "extract-domains": "referenced hostnames",
+    "harvest": "crawled requests (URLs)", "browser-login": "a login session (cookies/token)",
+    "browser-actions": "browser action results", "visual-driver": "screenshots + page state",
+    "vision-verify": "XSS-confirmation findings",
+    "nuclei": "vulnerability findings", "sqlmap": "SQL-injection findings", "blind-oracle": "injection findings",
+    "bola-walk": "BOLA/IDOR findings", "mass-assign": "mass-assignment findings",
+    "dirb": "discovered paths (findings)", "dirsearch": "discovered paths (findings)",
+    "zap-scan-url": "ZAP findings", "zap-scan-full": "ZAP findings", "zap-scan-openapi": "ZAP findings",
+    "path-fuzz": "discovered paths (findings)", "path-bust": "discovered paths (findings)",
+    "fuzz": "injection findings", "scan-secrets": "exposed-secret findings",
+    "git-extract": "extracted source + secrets", "swagger-parser": "API endpoints",
+    "swagger-endpoints": "endpoint URLs", "swagger-specs": "OpenAPI spec URLs",
+    "graphql-detect": "GraphQL endpoint URLs", "graphql-audit": "GraphQL findings",
+    "http-request": "an HTTP response",
+    "aggregate": "merged URL set", "filter": "filtered items", "limit": "first N items",
+    "hosts": "unique hostnames",
+}
 # descriptions for synthetic flow pseudo-tools (not in the engine's tool list, so not in TOOL_DESC)
 _SYNTH_DESC = {"aggregate": "Collect, de-duplicate and sort everything wired into it into one URL set; the "
                             "boxes after it run once over that union.",
@@ -111,6 +136,7 @@ def tool_catalog(user: User = Depends(current_user)):
         return (_GROUP_ORDER.index(g), name)
     return [{"name": n, "kind": k, "group": _TOOL_GROUP.get(n, "Other"),
              "terminal": k == "findings", "description": TOOL_DESC.get(n, "") or _SYNTH_DESC.get(n, ""),
+             "produces": _TOOL_PRODUCES.get(n, ""),   # specific noun for what this box outputs (vs. the raw kind)
              "flags": TOOL_FLAGS.get(n, [])}      # accepted CLI flags, for live arg validation in the builder
             for n, k in sorted(TOOL_KIND.items(), key=lambda kv: gkey(kv[0]))]
 
