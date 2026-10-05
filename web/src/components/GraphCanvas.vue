@@ -37,8 +37,24 @@ function onWheel(e) { if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoomBy(e
 // box one column right of its deepest parent, same-depth boxes stacked. On by default - it re-tidies on every
 // structural change (add box / wire / remove) so the graph stays readable; turn it off to hand-place boxes.
 const autoArrange = ref(true)
+let raf = null
+// smoothly tween every box from where it is now to its layout target, so boxes AND their wires glide together
+// (edges follow because they're bound to n.x/n.y) — far less disorienting than everything teleporting at once.
+function animateTo(targets) {
+  cancelAnimationFrame(raf)
+  const start = nodes.filter(n => targets[n.id]).map(n => ({ n, x0: n.x, y0: n.y, x1: targets[n.id].x, y1: targets[n.id].y }))
+  const t0 = performance.now(), dur = 360, ease = (t) => 1 - Math.pow(1 - t, 3)
+  function step(now) {
+    const e = ease(Math.min(1, (now - t0) / dur))
+    for (const s of start) { s.n.x = s.x0 + (s.x1 - s.x0) * e; s.n.y = s.y0 + (s.y1 - s.y0) * e }
+    if ((now - t0) < dur) raf = requestAnimationFrame(step)
+    else { for (const s of start) { s.n.x = s.x1; s.n.y = s.y1 } emitChange() }
+  }
+  raf = requestAnimationFrame(step)
+}
 function tidy(resetZoom = false) {
   if (!nodes.length) return
+  if (resetZoom) zoomReset()
   const depth = {}
   for (const n of nodes) depth[n.id] = 0
   for (let pass = 0; pass < nodes.length; pass++) {      // relax to a fixpoint (DAG -> converges)
@@ -51,16 +67,22 @@ function tidy(resetZoom = false) {
   }
   const layers = {}
   for (const n of nodes) (layers[depth[n.id] || 0] ||= []).push(n)
+  const COL_X = 40, COL_GAP = 260, ROW_Y = 24, ROW_GAP = 26
+  const cols = Object.keys(layers).map(Number).sort((a, b) => a - b)
+  for (const d of cols) layers[d].sort((a, b) => a.y - b.y)   // keep each column's existing top-to-bottom order
+  // vertically CENTER the whole block in the (now large) canvas so tidy fills the space nicely, not a thin strip
+  const worldH = ((canvas.value && canvas.value.clientHeight) || 540) / zoom.value
+  const colH = (d) => layers[d].reduce((s, n) => s + nodeH(n.id) + ROW_GAP, 0) - ROW_GAP
+  const tallest = Math.max(0, ...cols.map(colH))
+  const startY = Math.max(ROW_Y, (worldH - tallest) / 2)
   // stack each column by the boxes' ACTUAL rendered heights (a filter box is much taller than a plain tool), so
-  // tall boxes never overlap the one below — the old fixed row pitch was the main source of the "mess".
-  const COL_X = 40, COL_GAP = 250, ROW_Y = 24, ROW_GAP = 26
-  for (const d of Object.keys(layers).map(Number).sort((a, b) => a - b)) {
-    layers[d].sort((a, b) => a.y - b.y)                  // keep each column's existing top-to-bottom order
-    let y = ROW_Y
-    for (const n of layers[d]) { n.x = COL_X + d * COL_GAP; n.y = y; y += nodeH(n.id) + ROW_GAP }
+  // tall boxes never overlap the one below. Compute targets, then glide the boxes there.
+  const targets = {}
+  for (const d of cols) {
+    let y = startY
+    for (const n of layers[d]) { targets[n.id] = { x: COL_X + d * COL_GAP, y }; y += nodeH(n.id) + ROW_GAP }
   }
-  if (resetZoom) zoomReset()
-  emitChange()
+  animateTo(targets)
 }
 function nodeH(id) {        // measured box height (DOM), so the auto-layout accounts for tall boxes; fallback ~150
   const el = canvas.value && canvas.value.querySelector(`[data-id="${id}"]`)
@@ -280,12 +302,38 @@ function bezier(a, b) {
   const dx = Math.max(40, Math.abs(b.x - a.x) / 2)
   return `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`
 }
+// rounded right-angle path through waypoints (each interior corner filleted by radius r)
+function roundedPath(pts, r) {
+  let d = `M ${pts[0][0]} ${pts[0][1]}`
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [px, py] = pts[i - 1], [x, y] = pts[i], [nx, ny] = pts[i + 1]
+    const l1 = Math.hypot(px - x, py - y) || 1, l2 = Math.hypot(nx - x, ny - y) || 1
+    const d1 = Math.min(r, l1 / 2), d2 = Math.min(r, l2 / 2)
+    d += ` L ${x + (px - x) / l1 * d1} ${y + (py - y) / l1 * d1}`
+    d += ` Q ${x} ${y} ${x + (nx - x) / l2 * d2} ${y + (ny - y) / l2 * d2}`
+  }
+  const last = pts[pts.length - 1]
+  return d + ` L ${last[0]} ${last[1]}`
+}
+const minNodeY = computed(() => nodes.length ? Math.min(...nodes.map(n => n.y)) : 0)
+const EDGE_GUT = 26                  // how far into the gutter the over-the-top risers sit
+const SPAN_OVER = 230               // a wire wider than this skips a column → route it over the top, not through
+// an edge wide enough to cross an intermediate column is routed UP into the clear lane above every box, across,
+// and back DOWN — so a connection never passes under a box it doesn't belong to. Adjacent boxes keep the curve.
 const edgePaths = computed(() => edges.map(e => {
   const a = nodeById(e.from), b = nodeById(e.to)
   if (!a || !b) return null
   const pa = outPort(a), pb = inPort(b)
-  return { from: e.from, to: e.to, d: bezier(pa, pb), split: !!e.split, filter: e.item_filter || 'all',
-           mx: (pa.x + pb.x) / 2, my: (pa.y + pb.y) / 2 }
+  let d, mx, my
+  if (pb.x - pa.x > SPAN_OVER) {
+    const lane = Math.min(pa.y, pb.y, minNodeY.value) - 34       // horizontal channel above all boxes = clear
+    const x1 = pa.x + EDGE_GUT, x2 = pb.x - EDGE_GUT
+    d = roundedPath([[pa.x, pa.y], [x1, pa.y], [x1, lane], [x2, lane], [x2, pb.y], [pb.x, pb.y]], 12)
+    mx = (x1 + x2) / 2; my = lane
+  } else {
+    d = bezier(pa, pb); mx = (pa.x + pb.x) / 2; my = (pa.y + pb.y) / 2
+  }
+  return { from: e.from, to: e.to, d, split: !!e.split, filter: e.item_filter || 'all', mx, my }
 }).filter(Boolean))
 const tempPath = computed(() => {
   if (drag.mode !== 'wire') return ''
@@ -378,6 +426,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', endDrag)
+  cancelAnimationFrame(raf)
 })
 </script>
 
@@ -513,27 +562,26 @@ onBeforeUnmount(() => {
       <div v-if="ctx.open" class="gc-ctxbackdrop" @click="closeCtx" @contextmenu.prevent="closeCtx"></div>
       <div v-if="ctx.open" class="gc-ctxmenu" :style="{ left: ctx.cx + 'px', top: ctx.cy + 'px' }"
            @contextmenu.prevent>
-        <!-- level 1: the groups -->
-        <div class="gc-ctxcol gc-ctxgroups">
-          <div class="gc-ctxhint">Add a box</div>
-          <button v-for="g in grouped" :key="g.group" class="gc-ctxgrow"
-                  :class="{ active: ctx.group === g.group }"
-                  @mouseenter="ctx.group = g.group" @click="ctx.group = g.group">
+        <!-- STEP 1: pick a group -->
+        <template v-if="!activeGroup">
+          <div class="gc-ctxhint">Add a box — pick a group</div>
+          <button v-for="g in grouped" :key="g.group" class="gc-ctxgrow" @click="ctx.group = g.group">
             <span class="gc-dot" :style="{ background: GROUP_COLOR[g.group] || '#8f9099' }"></span>
             <span class="gc-ctxgname">{{ g.group }}</span>
             <span class="gc-ctxcount">{{ g.tools.length }}</span>
             <span class="gc-ctxchev">▸</span>
           </button>
-        </div>
-        <!-- level 2: the boxes in the chosen group, with info -->
-        <div v-if="activeGroup" class="gc-ctxcol gc-ctxtools">
-          <div class="gc-ctxhint">{{ activeGroup.group }} — pick a box</div>
+        </template>
+        <!-- STEP 2: pick a box in that group -->
+        <template v-else>
+          <button class="gc-ctxback" @click="ctx.group = ''">‹ groups</button>
+          <div class="gc-ctxhint"><span class="gc-dot" :style="{ background: GROUP_COLOR[activeGroup.group] || '#8f9099' }"></span>{{ activeGroup.group }}</div>
           <button v-for="t in activeGroup.tools" :key="t.name" class="gc-ctxtool" @click="ctxAdd(t.name)">
             <span class="gc-ctxthead"><span class="gc-ctxtname">{{ t.name }}</span>
               <span class="gc-chipk">out: {{ t.produces || t.kind }}</span></span>
             <span class="gc-ctxtdesc">{{ t.description || 'no description' }}</span>
           </button>
-        </div>
+        </template>
       </div>
     </teleport>
   </div>
@@ -577,7 +625,9 @@ onBeforeUnmount(() => {
 .gc-zlabel { min-width: 46px; }
 .gc-world { position: absolute; inset: 0; }
 .gc-canvas {
-  position: relative; height: 460px; border: 1px solid var(--line, var(--border, #ddd)); border-radius: 10px;
+  /* near full-screen working area (leaves room for the toolbar/legend above and a little page chrome) */
+  position: relative; height: calc(100vh - 210px); min-height: 480px;
+  border: 1px solid var(--line, var(--border, #ddd)); border-radius: 10px;
   background: var(--panel-2, var(--panel)); overflow: hidden;
   background-image: radial-gradient(var(--line, #e3e3e3) 1px, transparent 1px); background-size: 20px 20px;
 }
@@ -661,14 +711,14 @@ onBeforeUnmount(() => {
 .gc-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
 /* right-click context menu — teleported to <body>, so it uses the REAL theme tokens (the .gc aliases don't reach it) */
 .gc-ctxbackdrop { position: fixed; inset: 0; z-index: 70; }
-/* two-level flyout: a groups column, and (when a group is active) a boxes column beside it */
-.gc-ctxmenu { position: fixed; z-index: 71; display: flex; align-items: flex-start;
-  background: var(--sc, #1e1f23); color: var(--on-surface, #e4e2e6);
+/* two-STEP drill-in menu: step 1 = groups, click a group -> step 2 = its boxes (with a back button) */
+.gc-ctxmenu { position: fixed; z-index: 71; min-width: 230px; max-width: 320px; max-height: 72vh; overflow: auto;
+  padding: 6px; background: var(--sc, #1e1f23); color: var(--on-surface, #e4e2e6);
   border: 1px solid var(--outline-variant, #43474e); border-radius: 8px; box-shadow: 0 8px 30px rgba(0, 0, 0, .5); }
-.gc-ctxcol { padding: 6px; max-height: 72vh; overflow: auto; }
-.gc-ctxgroups { min-width: 160px; }
-.gc-ctxtools { min-width: 240px; max-width: 300px; border-left: 1px solid var(--outline-variant, #43474e); }
-.gc-ctxhint { font-size: 11px; color: var(--on-surface-variant, #c5c6cf); padding: 2px 8px 6px; }
+.gc-ctxhint { display: flex; align-items: center; font-size: 11px; color: var(--on-surface-variant, #c5c6cf); padding: 2px 8px 6px; }
+.gc-ctxback { width: 100%; text-align: left; font-size: 11.5px; padding: 3px 8px; margin-bottom: 2px; border: 0;
+  border-radius: 5px; background: transparent; color: var(--on-surface-variant, #c5c6cf); cursor: pointer; }
+.gc-ctxback:hover { background: var(--sc-high, #282a2e); color: var(--on-surface, #e4e2e6); }
 .gc-ctxgrow { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; font-size: 12.5px;
   padding: 5px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--on-surface, #e4e2e6);
   cursor: pointer; }
