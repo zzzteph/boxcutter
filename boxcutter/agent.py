@@ -176,10 +176,19 @@ def _scrub(text: str, secret_vals: list) -> str:
     return text
 
 
+def _agent_label() -> str:
+    """How this scanner labels its log lines, so a scan driven by several agents shows WHO produced each line."""
+    name = (CFG.get("name") or "").strip()
+    if name and name != "runner":
+        return name
+    rid = STATE.get("runner_id")
+    return f"scanner #{rid}" if rid else (name or "scanner")
+
+
 def _emit(job_id: int, line: str, agent: str = "", phase: str = "", reasoning: str | None = None) -> None:
     try:
         _req("POST", f"/runner/jobs/{job_id}/event",
-             {"line": line[:2000], "agent": agent, "phase": phase, "reasoning": reasoning,
+             {"line": line[:2000], "agent": agent or _agent_label(), "phase": phase, "reasoning": reasoning,
               "token": JOB_TOKENS.get(job_id, "")},
              CFG["token"], timeout=15)
     except Exception:  # noqa: BLE001 - a dropped log line must not kill the job
@@ -285,6 +294,12 @@ def run_job(job: dict, secrets: dict) -> dict:
     # values to redact from any streamed line or captured output (never leak the LLM key back to the server)
     secret_vals = [str(v) for v in (secrets or {}).values() if v and len(str(v)) >= 6]
     cmd = BOXCUTTER_CMD + [str(a) for a in job["argv"]]
+    # For a workflow we also capture EVERY box's output (not just the final one) via --dump, so the scan's
+    # Assets explorer shows all the subdomains/hosts/URLs discovered along the way, not only the last step's.
+    dump_path = None
+    if job.get("argv") and str(job["argv"][0]) == "workflow":
+        dump_path = os.path.join(tempfile.gettempdir(), f"bc_dump_{job['id']}_{os.getpid()}.json")
+        cmd = cmd + ["--dump", dump_path]
     # a visible first step — tools emit their JSON to stdout at the end and are silent on stderr, so without
     # this the live-steps view would stay empty until (and unless) something prints to stderr.
     _emit(job["id"], _scrub("$ boxcutter " + " ".join(str(a) for a in job["argv"]), secret_vals), phase="run")
@@ -401,10 +416,44 @@ def run_job(job: dict, secrets: dict) -> dict:
         error = f"exit {proc.returncode}"
     if report:
         report = _scrub(report, secret_vals)
+    # read the workflow var dump -> every box's produced hosts/URLs, so the server can store them all as assets
+    assets: list = []
+    if dump_path:
+        try:
+            with open(dump_path, encoding="utf-8") as fh:
+                assets = _assets_from_dump(json.load(fh))
+        except Exception:  # noqa: BLE001 - no dump / unreadable -> just the final envelope's items
+            pass
+        finally:
+            try:
+                os.remove(dump_path)
+            except OSError:
+                pass
+    if assets:
+        assets = [_scrub(a, secret_vals) for a in assets]
     if not cancelled:                     # a cancelled job already emitted "cancelled by server" above
         n = len(envelope.get("data") or []) if isinstance(envelope, dict) else 0
         _emit(job["id"], f"failed — {error}" if error else f"finished — {n} result item(s)", phase="run")
-    return {"envelope": envelope, "report": report, "error": error, "cancelled": cancelled}
+    return {"envelope": envelope, "report": report, "error": error, "cancelled": cancelled, "assets": assets}
+
+
+def _assets_from_dump(dumped: dict) -> list:
+    """Flatten a workflow var dump ({varname: [values]}) into the de-duped list of string hosts/URLs every box
+    produced. Box-output vars are named ``n_<id>``; finding dicts are skipped (the envelope carries those)."""
+    seen: set = set()
+    out: list = []
+    for var, val in (dumped or {}).items():
+        if not isinstance(var, str) or not var.startswith("n_"):
+            continue
+        for x in (val if isinstance(val, list) else [val]):
+            if isinstance(x, str):
+                s = x.strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    out.append(s[:2048])
+                    if len(out) >= 50000:
+                        return out
+    return out
 
 
 def worker(idx: int) -> None:

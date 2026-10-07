@@ -34,6 +34,7 @@ _ADDED_COLUMNS = [
     ("scanitem", "stage_no", "INTEGER", "0"),
     ("scanitem", "asset_type", "VARCHAR(16)", "''"),     # Assets explorer (domain/subdomain/url/ip/...)
     ("jobevent", "node", "VARCHAR(64)", "''"),           # live canvas: which workflow box this event belongs to
+    ("job", "active_node", "VARCHAR(64)", "''"),         # the box a job is currently inside (step markers)
 ]
 
 

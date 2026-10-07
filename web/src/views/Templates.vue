@@ -28,6 +28,7 @@ const CATALOG = {
     { name: 'visual-driver', desc: 'Drive a browser by screen coordinates' },
     { name: 'vision-verify', desc: 'Confirm JS execution (reflected/DOM XSS)' },
     { name: 'nuclei', desc: 'Nuclei vulnerability scan' },
+    { name: 'nuclei-dast', desc: 'Nuclei DAST mode (active fuzzing, -dast)' },
     { name: 'sqlmap', desc: 'SQL-injection testing (sqlmap)' },
     { name: 'blind-oracle', desc: 'Blind SQLi / command-injection probes' },
     { name: 'bola-walk', desc: 'BOLA/IDOR cross-account authz diff' },

@@ -101,14 +101,27 @@ function toggleAuto() { autoArrange.value = !autoArrange.value; if (autoArrange.
 
 // right-click on the canvas -> a TWO-LEVEL context menu: pick a group, then a box (with its info) from that
 // group's submenu. `group` is the currently-opened group (null = show only the group list).
-const ctx = reactive({ open: false, cx: 0, cy: 0, wx: 0, wy: 0, group: '' })
+const ctx = reactive({ open: false, cx: 0, cy: 0, wx: 0, wy: 0, group: '', up: false, maxh: 400 })
 const activeGroup = computed(() => grouped.value.find(g => g.group === ctx.group) || null)
+// keep the menu on-screen: clamp its left edge, and anchor it from the top OR bottom (flip up near the bottom
+// edge) with a max-height that fits the available space, so it never spills off-screen and scrolls when tall.
+const ctxMenuStyle = computed(() => ({
+  left: ctx.cx + 'px', maxHeight: ctx.maxh + 'px',
+  [ctx.up ? 'bottom' : 'top']: ctx.cy + 'px',
+}))
 function onContextMenu(e) {
   if (props.live) return                                  // read-only: no add-box menu
   const r = canvas.value.getBoundingClientRect()
-  ctx.cx = e.clientX; ctx.cy = e.clientY                  // menu sits at the cursor (fixed positioning)
   ctx.wx = (e.clientX - r.left - pan.x) / zoom.value      // world coords (undo pan + zoom) for the new box
   ctx.wy = (e.clientY - r.top - pan.y) / zoom.value
+  const vw = window.innerWidth, vh = window.innerHeight
+  ctx.cx = Math.max(8, Math.min(e.clientX, vw - 320))     // keep the ~310px-wide menu fully on-screen
+  const below = vh - e.clientY - 12
+  if (below < 280 && e.clientY > vh / 2) {                // near the bottom: anchor to the bottom, grow upward
+    ctx.up = true; ctx.cy = vh - e.clientY; ctx.maxh = e.clientY - 12
+  } else {
+    ctx.up = false; ctx.cy = e.clientY; ctx.maxh = below
+  }
   ctx.group = ''                                          // always start at the group list
   ctx.open = true
 }
@@ -418,10 +431,16 @@ function connect(from, to) {
     warn(`${fromTool} outputs findings — it can only feed a flow box (filter, limit, aggregate, hosts), not ${toTool}.`)
     return
   }
+  // AUTO fan-out: a wire into a heavy per-target tool (nuclei/sqlmap/zap/harvest/…) defaults to fan-out, so its
+  // work is distributed across the whole fleet without you toggling anything. Light/batch/domain tools stay a
+  // single step. Only on the box's FIRST wire-in (avoids creating a fan-in across a split, which can't compile);
+  // you can always toggle any wire. Findings/other types can't be fanned out as targets.
+  const auto = fanoutOf(toTool) && ['urls', 'items', 'endpoints'].includes(outKind(from)) && !edges.some(e => e.to === to)
   // fan-in allowed: a box may have several incoming edges; it runs on the union of its upstreams' URLs.
-  edges.push({ from, to })
+  edges.push(auto ? { from, to, split: true, item_filter: 'all' } : { from, to })
   structural()
 }
+const fanoutOf = (tool) => !!props.catalog.find(t => t.name === tool)?.fanout
 
 onMounted(() => {
   for (const n of (props.initial?.nodes || [])) {
@@ -445,8 +464,8 @@ onBeforeUnmount(() => {
       <button v-if="!live" class="gc-addbtn" @click="paletteOpen = !paletteOpen">{{ paletteOpen ? '✕ Close' : '➕ Add a box' }}</button>
       <span v-if="!live" class="muted" style="font-size:12px">A box with no wire in runs on the <b>scan Target</b> (the
         host/URL/domain you give the scan) · a wired box runs on what feeds it · drag a box's right dot onto
-        another's left dot to wire · a box can take several inputs · click a wire to toggle <b>fan-out</b>
-        (split the downstream work across the fleet).</span>
+        another's left dot to wire · a box can take several inputs · a wire into a heavy scanner
+        <b>auto fan-outs</b> across the fleet (click any wire to toggle chain ↔ fan-out).</span>
       <span v-else class="muted" style="font-size:12px">Live run — <b style="color:var(--bad)">red</b> = running,
         <b style="color:var(--good)">green</b> = done, grey = waiting. Click a box for its logs across every agent.</span>
       <span class="gc-zoom">
@@ -580,8 +599,7 @@ onBeforeUnmount(() => {
 
     <teleport to="body">
       <div v-if="ctx.open" class="gc-ctxbackdrop" @click="closeCtx" @contextmenu.prevent="closeCtx"></div>
-      <div v-if="ctx.open" class="gc-ctxmenu" :style="{ left: ctx.cx + 'px', top: ctx.cy + 'px' }"
-           @contextmenu.prevent>
+      <div v-if="ctx.open" class="gc-ctxmenu" :style="ctxMenuStyle" @contextmenu.prevent>
         <!-- STEP 1: pick a group -->
         <template v-if="!activeGroup">
           <div class="gc-ctxhint">Add a box — pick a group</div>

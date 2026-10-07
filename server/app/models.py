@@ -130,6 +130,9 @@ class Job(SQLModel, table=True):
     # agent echoes this token; result/event posts whose token doesn't match the current job are rejected.
     token: str = Field(default="", max_length=32)
     status: str = Field(default="pending", index=True, max_length=24)  # pending|claimed|running|done|failed|cancelled
+    # the workflow box this job is CURRENTLY inside (from the engine's step markers), so the live log lines it
+    # streams can be attributed to that box for the per-box log view. Transient; "" between/after steps.
+    active_node: str = Field(default="", max_length=64)
     runner_id: Optional[int] = Field(default=None, foreign_key="runner.id")
     attempts: int = 0
     argv_json: str = _text("[]")                             # the exact boxcutter command run for this target

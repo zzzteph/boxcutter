@@ -49,6 +49,7 @@ TOOL_FLAGS: dict[str, list[str]] = {
                     "--verify", "-D", "-H", "-X"],
     "nmap": ["--debug", "--json", "--jsonl", "--output", "--ports", "--table", "--timeout", "--top-ports"],
     "nuclei": ["--debug", "--header", "--json", "--jsonl", "--opt-args", "--output", "--table", "--tags", "-H"],
+    "nuclei-dast": ["--debug", "--header", "--json", "--jsonl", "--opt-args", "--output", "--table", "--tags", "-H"],
     "path-bust": ["--codes", "--debug", "--depth", "--extensions", "--full", "--header", "--json", "--jsonl",
                   "--method", "--output", "--table", "--timeout", "--wordlist", "-H"],
     "path-fuzz": ["--codes", "--debug", "--extensions", "--full", "--header", "--json", "--jsonl", "--method",

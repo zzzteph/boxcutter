@@ -79,7 +79,8 @@ _TOOL_GROUP = {
     "katana-crawl": "Crawl", "zap-crawl": "Crawl", "js-endpoints": "Crawl", "js-files": "Crawl",
     "extract-domains": "Crawl", "harvest": "Crawl",
     "browser-login": "Crawl", "browser-actions": "Crawl", "visual-driver": "Crawl", "vision-verify": "Crawl",
-    "nuclei": "Vuln scanners", "sqlmap": "Vuln scanners", "blind-oracle": "Vuln scanners",
+    "nuclei": "Vuln scanners", "nuclei-dast": "Vuln scanners", "sqlmap": "Vuln scanners",
+    "blind-oracle": "Vuln scanners",
     "bola-walk": "Vuln scanners", "mass-assign": "Vuln scanners", "dirb": "Vuln scanners",
     "dirsearch": "Vuln scanners", "zap-scan-url": "Vuln scanners", "zap-scan-full": "Vuln scanners",
     "zap-scan-openapi": "Vuln scanners",
@@ -104,7 +105,8 @@ _TOOL_PRODUCES = {
     "harvest": "crawled requests (URLs)", "browser-login": "a login session (cookies/token)",
     "browser-actions": "browser action results", "visual-driver": "screenshots + page state",
     "vision-verify": "XSS-confirmation findings",
-    "nuclei": "vulnerability findings", "sqlmap": "SQL-injection findings", "blind-oracle": "injection findings",
+    "nuclei": "vulnerability findings", "nuclei-dast": "DAST vulnerability findings",
+    "sqlmap": "SQL-injection findings", "blind-oracle": "injection findings",
     "bola-walk": "BOLA/IDOR findings", "mass-assign": "mass-assignment findings",
     "dirb": "discovered paths (findings)", "dirsearch": "discovered paths (findings)",
     "zap-scan-url": "ZAP findings", "zap-scan-full": "ZAP findings", "zap-scan-openapi": "ZAP findings",
@@ -136,7 +138,8 @@ _TOOL_ACCEPTS = {
     "wayback-domains": "a domain", "katana-crawl": "a URL", "zap-crawl": "a URL",
     "js-endpoints": "a JavaScript file URL", "js-files": "a URL", "extract-domains": "a URL or page",
     "harvest": "a URL", "browser-login": "a login URL", "browser-actions": "a URL", "visual-driver": "a URL",
-    "vision-verify": "a URL", "nuclei": "a URL or host", "sqlmap": "a URL", "blind-oracle": "a URL with params",
+    "vision-verify": "a URL", "nuclei": "a URL or host", "nuclei-dast": "a URL (fuzzable endpoint)",
+    "sqlmap": "a URL", "blind-oracle": "a URL with params",
     "bola-walk": "a URL", "mass-assign": "a URL", "dirb": "a base URL", "dirsearch": "a base URL",
     "zap-scan-url": "a URL", "zap-scan-full": "a URL", "zap-scan-openapi": "an OpenAPI spec URL",
     "path-fuzz": "a URL with a FUZZ marker", "path-bust": "a base URL", "fuzz": "a URL",
@@ -144,6 +147,18 @@ _TOOL_ACCEPTS = {
     "swagger-endpoints": "an OpenAPI spec URL", "swagger-specs": "a host or URL", "graphql-detect": "a host or URL",
     "graphql-audit": "a GraphQL endpoint URL", "http-request": "a URL",
     "aggregate": "wired items", "filter": "wired items", "limit": "wired items", "hosts": "wired items",
+}
+
+
+# Heavy, PER-TARGET tools that benefit from fan-out (one job per discovered item, spread across the whole fleet).
+# A wire INTO one of these auto-defaults to fan-out. Light/batch/domain tools (subfinder, dns-brute, httpx,
+# dnsx, liveless, wayback, smart-enum, …) are NOT here — they run efficiently as a single in-process step and
+# fanning them out per-item would be wrong (e.g. dns-brute wants a whole domain).
+_FANOUT_DEFAULT = {
+    "nuclei", "nuclei-dast", "sqlmap", "blind-oracle", "bola-walk", "mass-assign", "fuzz", "path-fuzz",
+    "path-bust", "dirb", "dirsearch", "zap-scan-url", "zap-scan-full", "zap-scan-openapi", "katana-crawl",
+    "zap-crawl", "harvest", "browser-login", "browser-actions", "visual-driver", "vision-verify", "screenshot",
+    "scan-secrets", "git-extract", "api-map", "graphql-audit", "js-endpoints",
 }
 
 
@@ -158,6 +173,7 @@ def tool_catalog(user: User = Depends(current_user)):
              "terminal": k == "findings", "description": TOOL_DESC.get(n, "") or _SYNTH_DESC.get(n, ""),
              "produces": _TOOL_PRODUCES.get(n, ""),   # specific noun for what this box outputs (vs. the raw kind)
              "accepts": _TOOL_ACCEPTS.get(n, ""),      # what this box needs as its input/target
+             "fanout": n in _FANOUT_DEFAULT,           # a wire INTO this box auto-defaults to fan-out
              "flags": TOOL_FLAGS.get(n, [])}      # accepted CLI flags, for live arg validation in the builder
             for n, k in sorted(TOOL_KIND.items(), key=lambda kv: gkey(kv[0]))]
 

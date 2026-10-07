@@ -42,6 +42,7 @@ TOOLS = {
     "visual-driver": "Drive a browser by SCREEN COORDINATES with human-like mouse motion + typing; returns a coordinate-grid screenshot each call.",
     "vision-verify": "Load a URL in headless chromium and report whether JS actually EXECUTED (alert/console/canary captured) vs merely reflected - confirms reflected/DOM XSS and screenshots the proof.",
     "nuclei": "Run Nuclei vulnerability scanner against a target.",
+    "nuclei-dast": "Run Nuclei in DAST mode (active fuzzing templates, nuclei -dast) against a URL.",
     "sqlmap": "Run sqlmap SQL injection scanner against a target URL.",
     "blind-oracle": "Detect blind SQL / OS-command injection across a request's parameters via boolean + time-based differential probes (session-aware, delay-scaling confirmation, non-destructive).",
     "bola-walk": "Two-session cross-account authorization diff (BOLA/IDOR): walk an object id and report where identity B reads an access-controlled object that isn't B's. 3-way (unauth/A/B) test, non-destructive.",

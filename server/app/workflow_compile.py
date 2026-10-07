@@ -27,7 +27,8 @@ TOOL_KIND: dict[str, str] = {
     "httpx": "items", "js-endpoints": "items", "js-files": "urls", "extract-domains": "urls",
     "katana-crawl": "urls", "liveless": "items",
     "mass-assign": "findings",
-    "nmap": "endpoints", "nuclei": "findings", "path-bust": "findings", "path-fuzz": "findings",
+    "nmap": "endpoints", "nuclei": "findings", "nuclei-dast": "findings",
+    "path-bust": "findings", "path-fuzz": "findings",
     "ping-scan": "urls", "scan-secrets": "findings", "screenshot": "screenshots", "smart-enum": "items",
     "sqlmap": "findings", "subfinder": "urls", "swagger-endpoints": "urls", "swagger-parser": "items",
     "swagger-specs": "urls", "vision-verify": "findings", "visual-driver": "items", "wayback": "urls",
@@ -37,6 +38,9 @@ TOOL_KIND: dict[str, str] = {
     "aggregate": "urls", "filter": "urls", "limit": "urls", "hosts": "urls",
 }
 _FLOW_TOOLS = {"aggregate", "filter", "limit", "hosts"}
+# builder box -> (real engine tool, extra opt-arg forwarded to the binary). Lets a box be a preset of another
+# tool without the engine needing a new module: nuclei-dast = nuclei with the binary's native `-dast` flag.
+_TOOL_ALIAS = {"nuclei-dast": ("nuclei", "-dast")}
 _VALID_SEVERITIES = ("critical", "high", "medium", "low", "info")
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
@@ -131,15 +135,16 @@ class WorkflowError(ValueError):
     """A graph that can't be compiled (bad name, unknown tool, cycle, illegal wiring, ...)."""
 
 
-def _full_args(node: dict) -> str:
+def _full_args(node: dict, extra_opt: str = "") -> str:
     """The step's args string: the box's own tool args, plus ``--opt-args '<value>'`` (verbatim passthrough to the
-    underlying binary) when the box set an opt-args value. The value is shlex-quoted so it stays ONE token that
-    the tool wrapper forwards to the scanner intact (e.g. nuclei's native ``-severity critical,high``). Not applied
-    to flow pseudo-tools (their ``args`` means something else, e.g. limit's count)."""
+    underlying binary) when the box set an opt-args value or the box is an alias with a preset flag (``extra_opt``,
+    e.g. nuclei-dast -> ``-dast``). The value is shlex-quoted so it stays ONE token the tool wrapper forwards to
+    the scanner intact. Not applied to flow pseudo-tools (their ``args`` means something else, e.g. limit's N)."""
     args = node.get("args", "") or ""
-    opt = node.get("optargs", "") or ""
-    if opt and node.get("tool") not in _FLOW_TOOLS:
-        args = (args + " --opt-args " + shlex.quote(opt)).strip()
+    opt = (node.get("optargs", "") or "").strip()
+    combined = ((extra_opt + " " + opt).strip() if extra_opt else opt)
+    if combined and node.get("tool") not in _FLOW_TOOLS:
+        args = (args + " --opt-args " + shlex.quote(combined)).strip()
     return args.strip()
 
 
@@ -242,9 +247,10 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None,
                                   "set": fvar})                                             # cap to N
         else:
             save = "findings" if node["kind"] == "findings" else _var(nid)
-            full_args = _full_args(node)                # tool args + any --opt-args passthrough
+            real_tool, alias_opt = _TOOL_ALIAS.get(node["tool"], (node["tool"], ""))
+            full_args = _full_args(node, alias_opt)     # tool args + preset (alias) + any --opt-args passthrough
             if not parents:                            # root: runs on the workflow target
-                step: dict = {"tool": node["tool"], "target": "${target}"}
+                step: dict = {"tool": real_tool, "target": "${target}"}
                 if full_args:
                     step["args"] = full_args
                 step["save"] = save
@@ -254,7 +260,7 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None,
                 # the UNION of every upstream's URLs and its output accumulates (save collects across steps).
                 for pid in parents:
                     pvar = _var(pid)
-                    inner: dict = {"tool": node["tool"], "target": "${" + pvar + ".item}"}
+                    inner: dict = {"tool": real_tool, "target": "${" + pvar + ".item}"}
                     if full_args:
                         inner["args"] = full_args
                     inner["save"] = save
@@ -266,7 +272,7 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None,
             # box has no list to re-feed). save merges+dedups so it converges; the engine's `repeat` bounds it.
             if node.get("repeat") and node["kind"] != "findings":
                 vv = save                              # the box's own output var (_var(nid))
-                rinner: dict = {"tool": node["tool"], "target": "${" + vv + ".item}"}
+                rinner: dict = {"tool": real_tool, "target": "${" + vv + ".item}"}
                 if full_args:
                     rinner["args"] = full_args
                 rinner["save"] = vv

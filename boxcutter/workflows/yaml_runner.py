@@ -144,6 +144,27 @@ def _passes_guard(step: dict, variables: dict, dbg) -> bool:
     return True
 
 
+def _emit_box_count(step: dict, variables: dict, dbg) -> None:
+    """After a box runs, log how many results it produced (+ a few samples) — visible in the live/per-box log so
+    you can see what each step found. Reads the box's save var; skips the shared ``findings`` var (its count is
+    cumulative across boxes and findings already stream via --show-findings)."""
+    var = step.get("save") or step.get("set")
+    if not var and step.get("do"):
+        d0 = step["do"][0] if step["do"] else {}
+        var = d0.get("save") or d0.get("set")
+    if not var or var == "findings":
+        return
+    val = variables.get(var)
+    if not isinstance(val, list):
+        return
+    label = step.get("tool") or (step.get("do") or [{}])[0].get("tool") or "step"
+    sample = ", ".join(str(x) for x in val[:5] if isinstance(x, str))
+    msg = f"{label}: produced {len(val)} result(s)"
+    if sample:
+        msg += f" — {sample}" + (" …" if len(val) > 5 else "")
+    dbg(msg)
+
+
 def _step_event(dbg, phase: str, node: str, step: dict) -> None:
     """Emit a machine-readable box boundary so a live viewer can light up which box is running. A UI-built
     workflow tags each top-level step with its graph box id (``node``); this prints ``[[bc:step start <id>
@@ -163,6 +184,7 @@ def _run_step(step: dict, variables: dict, args, dbg) -> None:
         _run_step_body(step, variables, args, dbg)
     finally:
         if node:
+            _emit_box_count(step, variables, dbg)       # "<tool>: produced N result(s)" — attributed to this box
             _step_event(dbg, "end", node, step)
 
 

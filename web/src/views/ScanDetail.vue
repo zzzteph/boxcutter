@@ -89,13 +89,13 @@ const nodeStates = computed(() => {
   for (const n of (g.nodes || [])) {
     const st = stageByNo[ns?.[n.id] ?? 0] || stageByNo[0] || null
     const jobs = (st && st.jobs) || { total: 0, done: 0, running: 0, failed: 0 }
+    // A box is RUNNING only if a live step marker says so (so a single running stage doesn't paint every box
+    // red). It's DONE when its stage finished or it emitted an end marker; otherwise it's still waiting.
     let state = 'pending'
     if (runningByNode[n.id]) state = 'running'
     else if (jobs.total > 0 && jobs.done >= jobs.total) state = (jobs.failed >= jobs.total && jobs.failed > 0) ? 'failed' : 'done'
-    else if (ended.has(n.id) && jobs.total > 0 && !jobs.running) state = 'done'
-    else if (jobs.running > 0) state = 'running'
-    out[n.id] = { state, running: runningByNode[n.id] || (state === 'running' ? (jobs.running || 1) : 0),
-                  done: jobs.done, total: jobs.total }
+    else if (ended.has(n.id) && !runningByNode[n.id]) state = 'done'
+    out[n.id] = { state, running: runningByNode[n.id] || 0, done: jobs.done, total: jobs.total }
   }
   return out
 })

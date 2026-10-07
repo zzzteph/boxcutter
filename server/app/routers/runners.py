@@ -61,7 +61,8 @@ def _spec_params_to_argv(spec: dict) -> list:
 # per-kind flags that make boxcutter narrate live progress to stderr (see each subcommand's --help)
 # Flags that make the engine narrate to stderr so the live-steps view fills in AS the scan runs. AI agents get
 # --debug too, so their tool-by-tool progress (not just their own phase lines) streams into the live log.
-_PROGRESS_FLAGS = {"tool": ("--debug",), "workflow": ("--steps", "--show-findings"), "ai_agent": ("--debug",)}
+_PROGRESS_FLAGS = {"tool": ("--debug",), "workflow": ("--steps", "--show-findings", "--debug"),
+                   "ai_agent": ("--debug",)}
 
 
 def _workflow_files(tmpl: Template | None) -> dict:
@@ -75,6 +76,20 @@ def _workflow_files(tmpl: Template | None) -> dict:
         spec = json.loads(tmpl.spec_json or "{}")
     except Exception:  # noqa: BLE001
         return {}
+    # Prefer RECOMPILING from the saved graph: it re-tags every step with its box id (so the live canvas gets
+    # step markers even for workflows saved before that existed) and picks up any compiler fixes. Segment names
+    # are deterministic, so they still match the stored pipeline that build_argv resolves per stage.
+    graph = spec.get("graph")
+    if graph:
+        try:
+            from ..seed import WORKFLOWS as _BUILTINS
+            from ..workflow_compile import compile_pipeline
+            segs, _ = compile_pipeline(graph, reserved_names=set(_BUILTINS))
+            files = {f"{s['name']}.yaml": s["yaml"] for s in segs if s.get("name") and s.get("yaml")}
+            if files:
+                return files
+        except Exception:  # noqa: BLE001 - fall back to the stored compiled file(s)
+            pass
     pipeline = spec.get("pipeline")
     if pipeline:
         return {f"{s['name']}.yaml": s["yaml"] for s in pipeline if s.get("name") and s.get("yaml")}
@@ -259,11 +274,18 @@ def job_event(job_id: int, body: EventIn, runner: Runner = Depends(current_runne
         raise HTTPException(404)
     if job.status == "claimed":
         job.status = "running"
-        session.add(job)
     node, phase, line = "", body.phase, body.line or ""
     m = _STEP_RE.search(line)
     if m:
-        node, phase, line = m.group(2), "step:" + m.group(1), ""   # a box marker, not a human log line
+        kind, nd = m.group(1), m.group(2)
+        phase, node, line = "step:" + kind, nd, ""         # a box marker, not a human log line
+        if kind == "start":
+            job.active_node = nd                            # the box this job is now inside
+        elif kind == "end" and job.active_node == nd:
+            job.active_node = ""
+    else:
+        node = job.active_node or ""                        # attribute this log line to the box currently running
+    session.add(job)
     session.add(JobEvent(job_id=job_id, scan_id=job.scan_id, phase=phase, agent=body.agent, node=node,
                          line=line[:4000], reasoning=(body.reasoning or None)))
     session.commit()
@@ -274,6 +296,7 @@ class ResultIn(BaseModel):
     envelope: dict = {}
     report: str | None = None
     error: str | None = None
+    assets: list = []              # every box's produced hosts/URLs (workflow --dump), stored as scan items
     token: str = ""
 
 
@@ -313,6 +336,12 @@ def job_result(job_id: int, body: ResultIn, runner: Runner = Depends(current_run
             upsert_item(session, job.scan_id, kind, target.value, value,
                         label=str(f.get("title", ""))[:400] if isinstance(f, dict) else "",
                         cls=str(f.get("cls", ""))[:120] if isinstance(f, dict) else "",
+                        run_no=job.run_no, stage_no=job.stage_no)
+    # assets: every box's produced hosts/URLs (from a workflow --dump), so the Assets explorer shows ALL the
+    # discovery, not just the final step's output. Deduped by fingerprint; classified by type at upsert.
+    for v in (body.assets or [])[:50000]:
+        if isinstance(v, str) and v.strip():
+            upsert_item(session, job.scan_id, kind, target.value, v.strip(),
                         run_no=job.run_no, stage_no=job.stage_no)
     if body.error:                                # retry a failed job up to the cap, else mark it failed
         job.status = "pending" if job.attempts < settings.job_max_attempts else "failed"
