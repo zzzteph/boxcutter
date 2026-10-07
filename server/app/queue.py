@@ -245,26 +245,31 @@ def promote_stage(session: Session, scan: Scan, from_stage: int, stage: Stage) -
 
 
 def _advance_or_finish(session: Session, scan: Scan) -> bool:
-    """Called once a running scan has no unfinished jobs: the current stage LEVEL (frontier) has fully drained.
-    Promote to the next declared level that actually has input, or — if none does — mark the scan done. Returns
-    True only when the scan is now DONE (so the caller runs the end-of-scan reconcile/notify exactly once).
+    """Called once a running scan has no unfinished jobs: everything enqueued so far has drained. Promote every
+    declared stage whose SOURCE stage has already run (and so is drained) and that hasn't been enqueued yet, then
+    — if nothing new could be promoted — mark the scan done. Returns True only when the scan is now DONE (so the
+    caller runs the end-of-scan reconcile/notify exactly once).
 
-    A level can hold several stages (a BRANCH: e.g. web-full AND wayback-scan both consuming recon's hosts). The
-    whole level is promoted together, and the scan advances if ANY branch in it got work — so a branch is never
-    dropped just because a sibling branch happened to be promoted first."""
-    frontier = session.exec(select(func.max(Job.stage_no)).where(
-        Job.scan_id == scan.id, Job.run_no == scan.run_no)).one() or 0
-    later = session.exec(select(Stage).where(
-        Stage.scan_id == scan.id, Stage.stage_no > frontier).order_by(Stage.stage_no)).all()
-    # Walk the declared levels in order; promote every stage at a level, then advance if the level produced any
-    # work. Skip an empty level (e.g. chaining off a findings-only stage) and fall through, so the pipeline never
-    # stalls on an empty hand-off.
-    for level in sorted({s.stage_no for s in later}):
-        promoted = sum(promote_stage(session, scan, from_stage=level - 1, stage=s)
-                       for s in later if s.stage_no == level)
-        if promoted > 0:
-            log_activity(session, "stage_advanced", f"Scan '{scan.name}' → stage {level}", scan_id=scan.id)
-            return False                        # advanced; the scan keeps running
+    Stages form a TREE: each stage consumes one upstream (``from_stage``; -1 means the default stage_no-1 linear
+    hand-off). Several stages can share the SAME from_stage — a fan-out BRANCH that runs them in parallel (recon
+    -> nuclei AND recon -> sqlmap). Promoting in waves (only off already-drained sources each call) keeps a
+    branch's children from starting before the branch itself has produced anything."""
+    # stages that already ran this run (have >=1 job). Stage 0 (the seed template) always counts.
+    enqueued = {0} | {sn for (sn,) in session.exec(select(Job.stage_no).where(
+        Job.scan_id == scan.id, Job.run_no == scan.run_no).distinct()).all()}
+    stages = session.exec(select(Stage).where(Stage.scan_id == scan.id).order_by(Stage.stage_no)).all()
+    promoted_any = False
+    for st in stages:
+        if st.stage_no in enqueued:
+            continue
+        src = st.from_stage if (st.from_stage is not None and st.from_stage >= 0) else st.stage_no - 1
+        if src not in enqueued:                 # its source hasn't run/drained yet — a later wave will reach it
+            continue
+        if promote_stage(session, scan, from_stage=src, stage=st) > 0:
+            promoted_any = True
+            log_activity(session, "stage_advanced", f"Scan '{scan.name}' → stage {st.stage_no}", scan_id=scan.id)
+    if promoted_any:
+        return False                            # advanced; the scan keeps running
     scan.status = "done"
     scan.finished_at = datetime.now(timezone.utc)
     session.add(scan)

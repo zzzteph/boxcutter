@@ -150,15 +150,13 @@ _TOOL_ACCEPTS = {
 }
 
 
-# Heavy, PER-TARGET tools that benefit from fan-out (one job per discovered item, spread across the whole fleet).
-# A wire INTO one of these auto-defaults to fan-out. Light/batch/domain tools (subfinder, dns-brute, httpx,
-# dnsx, liveless, wayback, smart-enum, …) are NOT here — they run efficiently as a single in-process step and
-# fanning them out per-item would be wrong (e.g. dns-brute wants a whole domain).
-_FANOUT_DEFAULT = {
-    "nuclei", "nuclei-dast", "sqlmap", "blind-oracle", "bola-walk", "mass-assign", "fuzz", "path-fuzz",
-    "path-bust", "dirb", "dirsearch", "zap-scan-url", "zap-scan-full", "zap-scan-openapi", "katana-crawl",
-    "zap-crawl", "harvest", "browser-login", "browser-actions", "visual-driver", "vision-verify", "screenshot",
-    "scan-secrets", "git-extract", "api-map", "graphql-audit", "js-endpoints",
+# A wire INTO a box auto-defaults to FAN-OUT (distribute per-item across the fleet) UNLESS the box is one of
+# these: a tool that needs a whole DOMAIN/range (subfinder, dns-brute, dnsx, wayback, ping-scan — per-item would
+# be wrong) or a flow box (shapes data in-process). Everything else — liveness, httpx, harvest, nuclei, sqlmap,
+# screenshots, crawlers, … — fans out, so a recon → scan graph distributes automatically.
+_NO_FANOUT = {
+    "subfinder", "dns-brute", "dnsx", "wayback", "wayback-domains", "ping-scan",
+    "aggregate", "filter", "limit", "hosts",
 }
 
 
@@ -173,7 +171,7 @@ def tool_catalog(user: User = Depends(current_user)):
              "terminal": k == "findings", "description": TOOL_DESC.get(n, "") or _SYNTH_DESC.get(n, ""),
              "produces": _TOOL_PRODUCES.get(n, ""),   # specific noun for what this box outputs (vs. the raw kind)
              "accepts": _TOOL_ACCEPTS.get(n, ""),      # what this box needs as its input/target
-             "fanout": n in _FANOUT_DEFAULT,           # a wire INTO this box auto-defaults to fan-out
+             "fanout": n not in _NO_FANOUT,            # a wire INTO this box auto-defaults to fan-out
              "flags": TOOL_FLAGS.get(n, [])}      # accepted CLI flags, for live arg validation in the builder
             for n, k in sorted(TOOL_KIND.items(), key=lambda kv: gkey(kv[0]))]
 
@@ -238,7 +236,8 @@ def save_workflow(body: WorkflowGraphIn, user: User = Depends(current_user),
     # node_stage maps each box -> its stage, so the scan's live canvas can colour boxes by stage state.
     stored = {"name": spec["name"], "yaml": seg0["yaml"], "graph": graph, "node_stage": node_stage}
     if len(segs) > 1:
-        stored["pipeline"] = [{"name": s["name"], "yaml": s["yaml"], "item_filter": s["item_filter"]} for s in segs]
+        stored["pipeline"] = [{"name": s["name"], "yaml": s["yaml"], "item_filter": s["item_filter"],
+                               "from_stage": s.get("from_stage", i - 1)} for i, s in enumerate(segs)]
     if body.template_id is not None:
         t = session.get(Template, body.template_id)
         if not t or (t.owner_id != user.id and user.role != "admin"):

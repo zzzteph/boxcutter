@@ -417,11 +417,12 @@ def compile_pipeline(graph: dict, reserved_names: set[str] | None = None) -> lis
     for i in ids:
         comps.setdefault(comp[i], []).append(i)
 
-    # ---- chain the components via the split edges; require a single linear pipeline ----
-    downstream: dict[str, str] = {}
-    upstream: dict[str, str] = {}
+    # ---- link the components via the split edges into a TREE of stages (fan-out may BRANCH: one stage can feed
+    # several downstream stages that run in parallel; each downstream is fed by exactly one upstream) ----
+    children: dict[str, list] = {}                   # producing component -> [consuming components]
+    upstream: dict[str, str] = {}                    # consuming component -> its (single) producing component
     boundary_filter: dict[str, str] = {}             # consuming component -> item_filter
-    producers: dict[str, set] = {}                   # producing component -> node ids feeding its boundary
+    producers: dict[str, set] = {}                   # producing component -> node ids feeding any boundary out
     for src, dst, filt in split_edges:
         cs, cd = comp[src], comp[dst]
         if cs == cd:
@@ -429,29 +430,32 @@ def compile_pipeline(graph: dict, reserved_names: set[str] | None = None) -> lis
         if internal_parents[dst]:
             raise WorkflowError(f"'{tool_of[dst]}' is a fan-out target, so it can't also be wired from a box in "
                                 "its own stage — give it only the fan-out input")
-        if downstream.get(cs, cd) != cd:
-            raise WorkflowError("a stage can only fan out into ONE downstream stage — keep the split a chain")
         if upstream.get(cd, cs) != cs:
-            raise WorkflowError("a stage can only receive a fan-out from ONE upstream stage — keep it a chain")
-        downstream[cs] = cd
+            raise WorkflowError("a stage can't merge two fan-outs — a box can only receive its fan-out from one "
+                                "upstream stage")
         upstream[cd] = cs
         boundary_filter[cd] = filt
+        children.setdefault(cs, [])
+        if cd not in children[cs]:
+            children[cs].append(cd)
         producers.setdefault(cs, set()).add(src)
 
-    heads = [c for c in comps if c not in upstream]
-    if len(heads) != 1:
-        raise WorkflowError("the fan-out must be one chain with a single starting stage")
+    roots = [c for c in comps if c not in upstream]
+    if len(roots) != 1:
+        raise WorkflowError("the fan-out must have a single starting stage (one group of boxes runs on the target)")
+    # breadth-first from the root so every stage gets a unique index and its parent (from_stage) is numbered first
     order_comps: list[str] = []
-    seen: set = set()
-    c = heads[0]
-    while c is not None:
-        if c in seen:
+    comp_index: dict[str, int] = {}
+    queue = [roots[0]]
+    while queue:
+        c = queue.pop(0)
+        if c in comp_index:
             raise WorkflowError("the fan-out stages form a loop — connections must flow one way")
-        seen.add(c)
+        comp_index[c] = len(order_comps)
         order_comps.append(c)
-        c = downstream.get(c)
-    if len(seen) != len(comps):
-        raise WorkflowError("every box must be part of the fan-out chain (no disconnected groups)")
+        queue.extend(children.get(c, []))
+    if len(order_comps) != len(comps):
+        raise WorkflowError("every box must be connected into the fan-out (no disconnected groups)")
 
     # ---- compile each component into its own workflow segment ----
     reserved = set(reserved_names or ())
@@ -468,14 +472,14 @@ def compile_pipeline(graph: dict, reserved_names: set[str] | None = None) -> lis
         sub_edges = [{"from": str(e.get("from", "")).strip(), "to": str(e.get("to", "")).strip()}
                      for e in edges if isinstance(e, dict) and not e.get("split")
                      and str(e.get("from", "")).strip() in seg_ids and str(e.get("to", "")).strip() in seg_ids]
-        is_last = c not in downstream
-        emit = sorted(producers.get(c, set())) if not is_last else None
+        emit = sorted(producers.get(c, set())) if c in children else None
         sub_graph: dict = {"name": seg_name, "nodes": sub_nodes, "edges": sub_edges,
                            "help": str(graph.get("help", "") or "") if idx == 0 else f"{name} — stage {idx}"}
-        if is_last:
-            sub_graph["severities"] = graph.get("severities")         # findings filter lives on the terminal stage
+        if c not in children:
+            sub_graph["severities"] = graph.get("severities")         # findings filter lives on a terminal stage
         spec = compile_graph(sub_graph, reserved_names=None, emit_items=emit)
         segments.append({"name": seg_name, "spec": spec,
                          "yaml": json.dumps(spec, ensure_ascii=False, indent=2),
-                         "item_filter": boundary_filter.get(c, "all")})
+                         "item_filter": boundary_filter.get(c, "all"),
+                         "from_stage": comp_index[upstream[c]] if c in upstream else -1})
     return segments, node_stage

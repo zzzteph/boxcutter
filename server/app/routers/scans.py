@@ -117,8 +117,10 @@ def _builder_stages(session: Session, scan_id: int, template_id: int) -> int:
         if i == 0:
             continue
         item_filter = seg.get("item_filter") if seg.get("item_filter") in ("all", "urls") else "all"
-        session.add(Stage(scan_id=scan_id, stage_no=i, template_id=template_id, item_filter=item_filter))
-        top = i
+        frm = seg.get("from_stage", i - 1)               # which stage this one consumes (branches share a source)
+        session.add(Stage(scan_id=scan_id, stage_no=i, from_stage=frm, template_id=template_id,
+                          item_filter=item_filter))
+        top = max(top, i)
     if top:
         session.commit()
     return top

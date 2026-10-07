@@ -101,6 +101,10 @@ class Stage(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     scan_id: int = Field(foreign_key="scan.id", index=True)
     stage_no: int = Field(default=1)                          # >= 1; stage 0 is the scan's own template
+    # which stage's produced items this stage consumes. -1 = the default (the immediately-preceding stage_no-1,
+    # the old linear behaviour). Set explicitly for a fan-out BRANCH so several stages can consume the SAME
+    # upstream and run in parallel (recon -> nuclei AND recon -> sqlmap).
+    from_stage: int = Field(default=-1)
     template_id: int = Field(foreign_key="template.id")
     item_filter: str = Field(default="all", max_length=32)    # all | urls  (which upstream items become targets)
     created_at: datetime = Field(default_factory=now)
