@@ -127,6 +127,26 @@ _SYNTH_DESC = {"aggregate": "Collect, de-duplicate and sort everything wired int
                "hosts": "Collapse the wired-in URLs to their unique hostnames."}
 
 
+# What each box needs as its INPUT/target — so the builder can say "needs a domain / a URL" and you don't wire a
+# URL into a box that wants a bare domain. Flow boxes consume whatever is wired in.
+_TOOL_ACCEPTS = {
+    "subfinder": "a domain (example.com)", "dnsx": "a domain or host", "dns-brute": "a domain",
+    "ping-scan": "a host or IP", "nmap": "a host or IP", "httpx": "a host or URL", "liveless": "hosts or URLs",
+    "api-map": "a base URL", "smart-enum": "URLs", "screenshot": "a URL", "wayback": "a domain",
+    "wayback-domains": "a domain", "katana-crawl": "a URL", "zap-crawl": "a URL",
+    "js-endpoints": "a JavaScript file URL", "js-files": "a URL", "extract-domains": "a URL or page",
+    "harvest": "a URL", "browser-login": "a login URL", "browser-actions": "a URL", "visual-driver": "a URL",
+    "vision-verify": "a URL", "nuclei": "a URL or host", "sqlmap": "a URL", "blind-oracle": "a URL with params",
+    "bola-walk": "a URL", "mass-assign": "a URL", "dirb": "a base URL", "dirsearch": "a base URL",
+    "zap-scan-url": "a URL", "zap-scan-full": "a URL", "zap-scan-openapi": "an OpenAPI spec URL",
+    "path-fuzz": "a URL with a FUZZ marker", "path-bust": "a base URL", "fuzz": "a URL",
+    "scan-secrets": "a URL", "git-extract": "a URL exposing /.git", "swagger-parser": "an OpenAPI spec URL",
+    "swagger-endpoints": "an OpenAPI spec URL", "swagger-specs": "a host or URL", "graphql-detect": "a host or URL",
+    "graphql-audit": "a GraphQL endpoint URL", "http-request": "a URL",
+    "aggregate": "wired items", "filter": "wired items", "limit": "wired items", "hosts": "wired items",
+}
+
+
 @router.get("/tool-catalog")
 def tool_catalog(user: User = Depends(current_user)):
     """The tools a custom workflow can wire together, each with its output KIND (findings = terminal, can't feed
@@ -137,6 +157,7 @@ def tool_catalog(user: User = Depends(current_user)):
     return [{"name": n, "kind": k, "group": _TOOL_GROUP.get(n, "Other"),
              "terminal": k == "findings", "description": TOOL_DESC.get(n, "") or _SYNTH_DESC.get(n, ""),
              "produces": _TOOL_PRODUCES.get(n, ""),   # specific noun for what this box outputs (vs. the raw kind)
+             "accepts": _TOOL_ACCEPTS.get(n, ""),      # what this box needs as its input/target
              "flags": TOOL_FLAGS.get(n, [])}      # accepted CLI flags, for live arg validation in the builder
             for n, k in sorted(TOOL_KIND.items(), key=lambda kv: gkey(kv[0]))]
 
@@ -173,7 +194,7 @@ def preview_workflow(body: WorkflowGraphIn, user: User = Depends(current_user)):
     if body.help is not None:
         graph["help"] = body.help
     try:
-        segs = compile_pipeline(graph, reserved_names=set(BUILTIN_WORKFLOWS))
+        segs, _node_stage = compile_pipeline(graph, reserved_names=set(BUILTIN_WORKFLOWS))
     except WorkflowError as e:
         raise HTTPException(400, str(e))
     return {"spec": segs[0]["spec"], "yaml": _preview_text(segs), "segments": len(segs)}
@@ -190,7 +211,7 @@ def save_workflow(body: WorkflowGraphIn, user: User = Depends(current_user),
     if body.help is not None:
         graph["help"] = body.help
     try:
-        segs = compile_pipeline(graph, reserved_names=set(BUILTIN_WORKFLOWS))
+        segs, node_stage = compile_pipeline(graph, reserved_names=set(BUILTIN_WORKFLOWS))
     except WorkflowError as e:
         raise HTTPException(400, str(e))
     seg0 = segs[0]
@@ -198,7 +219,8 @@ def save_workflow(body: WorkflowGraphIn, user: User = Depends(current_user),
     # yaml = the stage-0 workflow file the runner writes; graph = the editable source. A fan-out graph also stores
     # its ordered segments under `pipeline` — the server turns these into real pipeline stages at scan time, so
     # the downstream work fans out across the fleet instead of running inside one process (see scans._builder_stages).
-    stored = {"name": spec["name"], "yaml": seg0["yaml"], "graph": graph}
+    # node_stage maps each box -> its stage, so the scan's live canvas can colour boxes by stage state.
+    stored = {"name": spec["name"], "yaml": seg0["yaml"], "graph": graph, "node_stage": node_stage}
     if len(segs) > 1:
         stored["pipeline"] = [{"name": s["name"], "yaml": s["yaml"], "item_filter": s["item_filter"]} for s in segs]
     if body.template_id is not None:

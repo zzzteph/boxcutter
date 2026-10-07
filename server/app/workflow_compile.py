@@ -210,6 +210,7 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None,
     for nid in order:
         node = by_id[nid]
         parents = incoming[nid]
+        start = len(steps)                             # tag every top-level step this box emits with its node id
         if node["tool"] in _FLOW_TOOLS:                # flow nodes: shape the parents' stream (no tool runs).
             # Work on WHATEVER the parents produce - urls, items, or findings:
             #   * findings in  -> filter/limit the shared `findings` set in place (keeps the finding objects);
@@ -224,54 +225,56 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None,
                 if node["tool"] == "limit":
                     sel += " | limit:" + str(_limit_count(node["args"]))
                 steps.append({"select": "${" + sel + "}", "set": "findings"})
-                continue
-            fvar = _var(nid)
-            for pid in parents:
-                if node["tool"] == "hosts":
-                    proj = _var(pid) + " | urls | hosts"
-                elif node["tool"] == "aggregate":
-                    proj = _var(pid) + " | urls" + _cond_chain(node)
-                else:                                     # filter / limit: keep the item kind (urls OR items)
-                    proj = _var(pid) + _cond_chain(node)
-                steps.append({"select": "${" + proj + "}", "save": fvar})
-            if parents and node["tool"] == "aggregate":
-                steps.append({"select": "${" + fvar + " | sort}", "set": fvar})            # dedup + sort
-            elif parents and node["tool"] == "limit":
-                steps.append({"select": "${" + fvar + " | limit:" + str(_limit_count(node["args"])) + "}",
-                              "set": fvar})                                                 # cap to N
-            continue
-        save = "findings" if node["kind"] == "findings" else _var(nid)
-        full_args = _full_args(node)                    # tool args + any --opt-args passthrough
-        if not parents:                                # root: runs on the workflow target
-            step: dict = {"tool": node["tool"], "target": "${target}"}
-            if full_args:
-                step["args"] = full_args
-            step["save"] = save
-            steps.append(step)
-        else:                                          # child: run per URL EACH parent produced. With several
-            # parents (fan-in), emit one for_each per parent, all saving into the SAME var, so the box runs on
-            # the UNION of every upstream's URLs and its output accumulates (save collects across steps).
-            for pid in parents:
-                pvar = _var(pid)
-                inner: dict = {"tool": node["tool"], "target": "${" + pvar + ".item}"}
+            else:
+                fvar = _var(nid)
+                for pid in parents:
+                    if node["tool"] == "hosts":
+                        proj = _var(pid) + " | urls | hosts"
+                    elif node["tool"] == "aggregate":
+                        proj = _var(pid) + " | urls" + _cond_chain(node)
+                    else:                                 # filter / limit: keep the item kind (urls OR items)
+                        proj = _var(pid) + _cond_chain(node)
+                    steps.append({"select": "${" + proj + "}", "save": fvar})
+                if parents and node["tool"] == "aggregate":
+                    steps.append({"select": "${" + fvar + " | sort}", "set": fvar})        # dedup + sort
+                elif parents and node["tool"] == "limit":
+                    steps.append({"select": "${" + fvar + " | limit:" + str(_limit_count(node["args"])) + "}",
+                                  "set": fvar})                                             # cap to N
+        else:
+            save = "findings" if node["kind"] == "findings" else _var(nid)
+            full_args = _full_args(node)                # tool args + any --opt-args passthrough
+            if not parents:                            # root: runs on the workflow target
+                step: dict = {"tool": node["tool"], "target": "${target}"}
                 if full_args:
-                    inner["args"] = full_args
-                inner["save"] = save
-                proj = pvar + " | urls" + _cond_chain(node)   # condition(s): grep the piped URLs first
-                steps.append({"for_each": "${" + proj + "}", "do": [inner]})
+                    step["args"] = full_args
+                step["save"] = save
+                steps.append(step)
+            else:                                      # child: run per URL EACH parent produced. With several
+                # parents (fan-in), emit one for_each per parent, all saving into the SAME var, so the box runs on
+                # the UNION of every upstream's URLs and its output accumulates (save collects across steps).
+                for pid in parents:
+                    pvar = _var(pid)
+                    inner: dict = {"tool": node["tool"], "target": "${" + pvar + ".item}"}
+                    if full_args:
+                        inner["args"] = full_args
+                    inner["save"] = save
+                    proj = pvar + " | urls" + _cond_chain(node)   # condition(s): grep the piped URLs first
+                    steps.append({"for_each": "${" + proj + "}", "do": [inner]})
 
-        # RECURSION: a box flagged 'repeat until stable' re-runs on its OWN growing output after the seed
-        # round(s) above, until it finds nothing new or `max` rounds. Only for URL/item producers (a findings
-        # box has no list to re-feed). save merges+dedups so it converges; the engine's `repeat` bounds it.
-        if node.get("repeat") and node["kind"] != "findings":
-            vv = save                                  # the box's own output var (_var(nid))
-            rinner: dict = {"tool": node["tool"], "target": "${" + vv + ".item}"}
-            if full_args:
-                rinner["args"] = full_args
-            rinner["save"] = vv
-            rproj = vv + " | urls" + _cond_chain(node)
-            steps.append({"repeat": "${" + vv + " | urls}", "max": node["repeat"]["max"],
-                          "do": [{"for_each": "${" + rproj + "}", "do": [rinner]}]})
+            # RECURSION: a box flagged 'repeat until stable' re-runs on its OWN growing output after the seed
+            # round(s) above, until it finds nothing new or `max` rounds. Only for URL/item producers (a findings
+            # box has no list to re-feed). save merges+dedups so it converges; the engine's `repeat` bounds it.
+            if node.get("repeat") and node["kind"] != "findings":
+                vv = save                              # the box's own output var (_var(nid))
+                rinner: dict = {"tool": node["tool"], "target": "${" + vv + ".item}"}
+                if full_args:
+                    rinner["args"] = full_args
+                rinner["save"] = vv
+                rproj = vv + " | urls" + _cond_chain(node)
+                steps.append({"repeat": "${" + vv + " | urls}", "max": node["repeat"]["max"],
+                              "do": [{"for_each": "${" + rproj + "}", "do": [rinner]}]})
+        for s in steps[start:]:                        # live canvas: map each emitted step back to its box
+            s["node"] = nid
 
     if emit_items:
         # PRODUCER SEGMENT of a fan-out pipeline: emit the union of the boundary producers' URLs/hosts as the
@@ -352,7 +355,8 @@ def compile_pipeline(graph: dict, reserved_names: set[str] | None = None) -> lis
 
     if not _has_split(edges):                     # ordinary single-process workflow — unchanged
         spec, text = compile_to_text(graph, reserved_names)
-        return [{"name": spec["name"], "spec": spec, "yaml": text, "item_filter": "all"}]
+        node_stage = {str(n.get("id", "")).strip(): 0 for n in nodes if n.get("id")}
+        return [{"name": spec["name"], "spec": spec, "yaml": text, "item_filter": "all"}], node_stage
 
     # ---- index boxes, classify edges (internal vs. the split boundaries) ----
     ids: list[str] = []
@@ -446,7 +450,10 @@ def compile_pipeline(graph: dict, reserved_names: set[str] | None = None) -> lis
     # ---- compile each component into its own workflow segment ----
     reserved = set(reserved_names or ())
     segments: list[dict] = []
+    node_stage: dict[str, int] = {}                    # box id -> stage index (for the live canvas)
     for idx, c in enumerate(order_comps):
+        for nid in comps[c]:
+            node_stage[nid] = idx
         seg_ids = set(comps[c])
         seg_name = name if idx == 0 else f"{name}-s{idx}"
         if seg_name in reserved:
@@ -465,4 +472,4 @@ def compile_pipeline(graph: dict, reserved_names: set[str] | None = None) -> lis
         segments.append({"name": seg_name, "spec": spec,
                          "yaml": json.dumps(spec, ensure_ascii=False, indent=2),
                          "item_filter": boundary_filter.get(c, "all")})
-    return segments
+    return segments, node_stage

@@ -10,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from sqlalchemy import func, update
 from sqlmodel import Session, select
 
+from .assets import classify as classify_asset
 from .models import Finding, ScanItem, Screenshot
 
 # Informational reconnaissance / reachability items (e.g. "host reachable") are not issues and must not render
@@ -70,8 +71,8 @@ def upsert_item(session: Session, scan_id: int, kind: str, target: str, value: s
         session.add(row)
         return False
     row = ScanItem(scan_id=scan_id, target=target, template_kind=kind, fingerprint=fp,
-                   value=value[:2048], label=(label or "")[:400], run_no=run_no, stage_no=stage_no,
-                   first_seen=at, last_seen=at)
+                   value=value[:2048], asset_type=classify_asset(value), label=(label or "")[:400],
+                   run_no=run_no, stage_no=stage_no, first_seen=at, last_seen=at)
     row.cls = (cls or "")[:120]      # 'cls' can't be a constructor kwarg (shadows __new__), same as Finding
     session.add(row)
     return True

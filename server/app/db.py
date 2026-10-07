@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from .config import DEV_SECRET, resolve_persisted_secret, settings
 
@@ -32,6 +32,8 @@ _ADDED_COLUMNS = [
     ("target", "stage_no", "INTEGER", "0"),
     ("job", "stage_no", "INTEGER", "0"),
     ("scanitem", "stage_no", "INTEGER", "0"),
+    ("scanitem", "asset_type", "VARCHAR(16)", "''"),     # Assets explorer (domain/subdomain/url/ip/...)
+    ("jobevent", "node", "VARCHAR(64)", "''"),           # live canvas: which workflow box this event belongs to
 ]
 
 
@@ -69,6 +71,8 @@ _ADDED_INDEXES = [
     ("ix_finding_scan_fp", "finding", "(scan_id, fingerprint)"),
     ("ix_finding_scan_sev", "finding", "(scan_id, severity)"),
     ("ix_jobevent_at", "jobevent", "(at)"),
+    ("ix_scanitem_scan_type", "scanitem", "(scan_id, asset_type)"),
+    ("ix_jobevent_scan_node", "jobevent", "(scan_id, node)"),
 ]
 
 
@@ -94,6 +98,30 @@ def _ensure_indexes() -> None:
                 pass
 
 
+def _backfill_asset_types() -> None:
+    """Classify pre-existing scan items (asset_type == '') so the Assets explorer works on old scans too. Batched
+    + committed per chunk so it never holds the write lock; bounded per startup, finishing over a few restarts on
+    a very large DB. Best-effort — a failure here must never stop the server coming up."""
+    from .assets import classify
+    try:
+        from .models import ScanItem
+        processed, cap = 0, 200_000
+        with Session(engine) as s:
+            while processed < cap:
+                rows = s.exec(select(ScanItem).where(ScanItem.asset_type == "").limit(2000)).all()
+                if not rows:
+                    break
+                for r in rows:
+                    r.asset_type = classify(r.value)
+                    s.add(r)
+                s.commit()
+                processed += len(rows)
+                if len(rows) < 2000:
+                    break
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def init_db() -> None:
     # secure-by-default: if SECRET_KEY wasn't provided, use a random secret persisted to the data dir
     if settings.secret_key == DEV_SECRET:
@@ -109,6 +137,7 @@ def init_db() -> None:
         with engine.connect() as conn:
             conn.exec_driver_sql("PRAGMA journal_mode=WAL")
             conn.exec_driver_sql("PRAGMA busy_timeout=5000")
+    _backfill_asset_types()
 
 
 def get_session():

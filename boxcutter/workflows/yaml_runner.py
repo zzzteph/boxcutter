@@ -144,9 +144,29 @@ def _passes_guard(step: dict, variables: dict, dbg) -> bool:
     return True
 
 
+def _step_event(dbg, phase: str, node: str, step: dict) -> None:
+    """Emit a machine-readable box boundary so a live viewer can light up which box is running. A UI-built
+    workflow tags each top-level step with its graph box id (``node``); this prints ``[[bc:step start <id>
+    <label>]]`` / ``end`` to stderr (via dbg, i.e. only under --steps/--debug, which the server always passes for
+    a workflow). Plain CLI runs without --steps simply don't emit it."""
+    label = step.get("tool") or (step.get("do") or [{}])[0].get("tool") or ("flow" if "select" in step else "step")
+    dbg(f"[[bc:step {phase} {node} {label}]]")
+
+
 def _run_step(step: dict, variables: dict, args, dbg) -> None:
     if not _passes_guard(step, variables, dbg):
         return
+    node = step.get("node")
+    if node:
+        _step_event(dbg, "start", node, step)
+    try:
+        _run_step_body(step, variables, args, dbg)
+    finally:
+        if node:
+            _step_event(dbg, "end", node, step)
+
+
+def _run_step_body(step: dict, variables: dict, args, dbg) -> None:
     if "for_each" in step:
         # Run the nested do: steps once per item. The current item is exposed as
         # ${<list>.item} - named after the list being iterated, so it's clear

@@ -10,8 +10,14 @@ import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'v
 const props = defineProps({
   initial: { type: Object, default: () => ({ nodes: [], edges: [] }) },
   catalog: { type: Array, default: () => [] },
+  // LIVE/read-only mode: render a saved graph as a running-scan monitor — no editing, boxes coloured by state.
+  live: { type: Boolean, default: false },
+  states: { type: Object, default: () => ({}) },   // { nodeId: {state, items, findings, running, done} }
+  selected: { type: String, default: '' },         // the box the parent has drilled into
 })
-const emit = defineEmits(['change'])
+const emit = defineEmits(['change', 'select'])
+const stateOf = (id) => props.states[id] || null
+function selectNode(n) { if (props.live) emit('select', n.id) }
 
 const BOX_W = 190
 const PORT_DY = 26            // wire anchor: this far below a box's top-left
@@ -98,6 +104,7 @@ function toggleAuto() { autoArrange.value = !autoArrange.value; if (autoArrange.
 const ctx = reactive({ open: false, cx: 0, cy: 0, wx: 0, wy: 0, group: '' })
 const activeGroup = computed(() => grouped.value.find(g => g.group === ctx.group) || null)
 function onContextMenu(e) {
+  if (props.live) return                                  // read-only: no add-box menu
   const r = canvas.value.getBoundingClientRect()
   ctx.cx = e.clientX; ctx.cy = e.clientY                  // menu sits at the cursor (fixed positioning)
   ctx.wx = (e.clientX - r.left - pan.x) / zoom.value      // world coords (undo pan + zoom) for the new box
@@ -172,6 +179,8 @@ const descOf = (tool) => props.catalog.find(t => t.name === tool)?.description |
 // a SPECIFIC noun for what the box produces (e.g. httpx -> "live HTTP services (URLs)") instead of the generic
 // output kind ("items"), which is shared by many unrelated tools. Falls back to the kind.
 const producesOf = (tool) => props.catalog.find(t => t.name === tool)?.produces || kindOf(tool) || 'items'
+// what the box needs as input (e.g. "a domain", "a URL") — so you know what to give it / wire into it.
+const acceptsOf = (tool) => props.catalog.find(t => t.name === tool)?.accepts || ''
 
 // ---- data-flow emulation: a REPRESENTATION (not a real scan) of the example values that flow between boxes,
 // so you can see what a box produces and what the next box down the wire will receive. Keyed off the data TYPE
@@ -360,14 +369,14 @@ function startPan(e) {
 
 // ---- move a box ----
 function startMove(e, n) {
-  if (e.button !== 0) return
+  if (e.button !== 0 || props.live) return                // live mode is read-only (no dragging boxes)
   const p = local(e)
   drag.mode = 'move'; drag.id = n.id; drag.ox = p.x - n.x; drag.oy = p.y - n.y
   window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', endDrag)
 }
 // ---- drag a wire from an output port ----
 function startWire(e, n) {
-  if (e.button !== 0) return
+  if (e.button !== 0 || props.live) return
   e.stopPropagation()
   const p = local(e)
   drag.mode = 'wire'; drag.fromId = n.id; drag.mx = p.x; drag.my = p.y
@@ -433,17 +442,19 @@ onBeforeUnmount(() => {
 <template>
   <div class="gc">
     <div class="gc-bar">
-      <button class="gc-addbtn" @click="paletteOpen = !paletteOpen">{{ paletteOpen ? '✕ Close' : '➕ Add a box' }}</button>
-      <span class="muted" style="font-size:12px">A box with no wire in runs on the <b>scan Target</b> (the
+      <button v-if="!live" class="gc-addbtn" @click="paletteOpen = !paletteOpen">{{ paletteOpen ? '✕ Close' : '➕ Add a box' }}</button>
+      <span v-if="!live" class="muted" style="font-size:12px">A box with no wire in runs on the <b>scan Target</b> (the
         host/URL/domain you give the scan) · a wired box runs on what feeds it · drag a box's right dot onto
         another's left dot to wire · a box can take several inputs · click a wire to toggle <b>fan-out</b>
         (split the downstream work across the fleet).</span>
+      <span v-else class="muted" style="font-size:12px">Live run — <b style="color:var(--bad)">red</b> = running,
+        <b style="color:var(--good)">green</b> = done, grey = waiting. Click a box for its logs across every agent.</span>
       <span class="gc-zoom">
-        <button class="gc-zbtn" :class="{ on: autoArrange }"
+        <button v-if="!live" class="gc-zbtn" :class="{ on: autoArrange }"
                 title="Keep the graph auto-arranged on every change (off = place boxes by hand)"
                 @click="toggleAuto">auto {{ autoArrange ? 'on' : 'off' }}</button>
         <button class="gc-zbtn gc-tidy" title="Auto-arrange the boxes into tidy left→right layers now" @click="autoLayout">⤢ Tidy</button>
-        <button class="gc-zbtn" :class="{ on: showFlow }"
+        <button v-if="!live" class="gc-zbtn" :class="{ on: showFlow }"
                 title="Show an example of the data flowing in and out of each box (a representation by type, not a real scan)"
                 @click="showFlow = !showFlow">flow {{ showFlow ? 'on' : 'off' }}</button>
         <button class="gc-zbtn" title="Zoom out" @click="zoomBy(-0.1)">−</button>
@@ -451,7 +462,7 @@ onBeforeUnmount(() => {
         <button class="gc-zbtn" title="Zoom in" @click="zoomBy(0.1)">+</button>
       </span>
     </div>
-    <div class="gc-legend">
+    <div v-if="!live" class="gc-legend">
       <span class="muted" style="font-size:11px">port types:</span>
       <span v-for="(c, k) in KIND_COLOR" :key="k" class="gc-leg" :title="kindHelp(k)">
         <span class="gc-legdot" :class="'gc-port-' + (KIND_SHAPE[k] || 'circle')" :style="{ background: c, borderColor: c }"></span>{{ k }}
@@ -494,28 +505,37 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-for="n in nodes" :key="n.id" class="gc-node" :data-id="n.id"
-           :style="{ left: n.x + 'px', top: n.y + 'px', width: BOX_W + 'px', borderLeftColor: colorOf(n.tool), borderLeftWidth: '3px' }">
+           :class="[live ? 'gc-live gc-st-' + (stateOf(n.id)?.state || 'pending') : '', { 'gc-sel': live && selected === n.id }]"
+           :style="{ left: n.x + 'px', top: n.y + 'px', width: BOX_W + 'px', borderLeftColor: colorOf(n.tool), borderLeftWidth: '3px' }"
+           @click="selectNode(n)">
         <div class="gc-in" :class="kindShape(inKind(n.id))" :style="{ borderColor: kindColor(inKind(n.id)) }"
              :title="'input (' + inKind(n.id) + '): ' + kindHelp(inKind(n.id))"></div>
         <div v-if="!isTerminal(n.tool)" class="gc-out" :class="kindShape(outKind(n.id))"
              :style="{ background: kindColor(outKind(n.id)), borderColor: kindColor(outKind(n.id)) }"
-             :title="'output (' + outKind(n.id) + '): ' + kindHelp(outKind(n.id)) + ' — drag to wire'"
+             :title="'output (' + outKind(n.id) + '): ' + kindHelp(outKind(n.id)) + (live ? '' : ' — drag to wire')"
              @pointerdown="startWire($event, n)"></div>
         <div class="gc-node-head" @pointerdown="startMove($event, n)">
           <span class="gc-tool">{{ n.tool }}</span>
-          <span class="gc-kind" :class="isTerminal(n.tool) ? 'terminal' : 'chain'"
+          <span v-if="live && stateOf(n.id)" class="gc-statepill" :class="'gc-sp-' + (stateOf(n.id).state || 'pending')">{{ stateOf(n.id).state || 'pending' }}</span>
+          <span v-else class="gc-kind" :class="isTerminal(n.tool) ? 'terminal' : 'chain'"
                 :style="isTerminal(n.tool) ? null : { background: colorOf(n.tool) }"
                 :title="'outputs ' + producesOf(n.tool) + ' (' + (kindOf(n.tool) || 'items') + ') — ' + kindHelp(kindOf(n.tool) || 'items')">{{ kindOf(n.tool) || 'items' }}</span>
-          <button class="danger ghost icon gc-x" title="Remove" @pointerdown.stop @click="removeNode(n.id)">✕</button>
+          <button v-if="!live" class="danger ghost icon gc-x" title="Remove" @pointerdown.stop @click="removeNode(n.id)">✕</button>
         </div>
         <div class="gc-io"
              title="A box with no wire in runs on the scan's Target (the host/URL/domain you give the scan in New Scan). A wired box runs on what the boxes feeding it produced.">
-          in: {{ hasInput(n.id) ? 'wired input' : 'scan Target' }} →
+          in: {{ hasInput(n.id) ? 'wired input' : 'scan Target' }}<span v-if="acceptsOf(n.tool)" class="gc-needs"> · needs {{ acceptsOf(n.tool) }}</span> →
           out: {{ producesOf(n.tool) }}{{ isTerminal(n.tool) ? ' (terminal)' : '' }}
         </div>
         <div v-if="descOf(n.tool)" class="gc-desc" :title="descOf(n.tool)">{{ descOf(n.tool) }}</div>
+        <!-- LIVE: real counts this box produced + how many agents are on it -->
+        <div v-if="live && stateOf(n.id)" class="gc-livecounts">
+          <span v-if="stateOf(n.id).running" class="gc-lc-run">▶ {{ stateOf(n.id).running }} running</span>
+          <span v-if="stateOf(n.id).total" class="gc-lc-item">{{ stateOf(n.id).done }}/{{ stateOf(n.id).total }} assets</span>
+          <span class="muted" style="font-size:10px">click for logs</span>
+        </div>
         <!-- data-flow emulation: example values this box takes in and gives out (by type, propagated along wires) -->
-        <div v-if="showFlow" class="gc-flow">
+        <div v-if="!live && showFlow" class="gc-flow">
           <div class="gc-flowrow" :title="'receives ' + takeInfo(n.id).kind + ' — e.g. ' + takeInfo(n.id).eg.join(', ')">
             <span class="gc-flowtag" :style="{ background: kindColor(takeInfo(n.id).kind) }">in</span>
             <span class="gc-floweg">{{ egText(takeInfo(n.id).eg) }}</span>
@@ -526,7 +546,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <!-- filter box: several keep/reject conditions, ALL must pass -->
-        <div v-if="n.tool === 'filter'" class="gc-conds" @pointerdown.stop
+        <div v-if="!live && n.tool === 'filter'" class="gc-conds" @pointerdown.stop
              title="keep (contains) / reject (excludes) — all conditions must pass">
           <div v-for="(c, i) in condsOf(n)" :key="i" class="gc-cond">
             <button class="gc-mode" @click="toggleCondRow(n, i)">{{ c.mode === 'excludes' ? 'excludes' : 'contains' }}</button>
@@ -535,20 +555,20 @@ onBeforeUnmount(() => {
           </div>
           <button class="gc-addc" @click="addCond(n)">+ condition</button>
         </div>
-        <div v-if="!isTerminal(n.tool)" class="gc-rep" @pointerdown.stop
+        <div v-if="!live && !isTerminal(n.tool)" class="gc-rep" @pointerdown.stop
              title="re-run this box on its own newly-discovered URLs until nothing new is found (bounded)">
           <button class="gc-mode" :class="{ on: repeatOf(n) }" @click="toggleRepeat(n)">
             ↻ repeat{{ repeatOf(n) ? ' until stable' : '' }}</button>
           <input v-if="repeatOf(n)" class="gc-repmax" type="number" min="1" max="10" :value="repeatOf(n).max"
                  title="max rounds" @input="setRepeatMax(n, $event.target.value)" />
         </div>
-        <input v-if="n.tool !== 'filter'" class="gc-args" :value="n.args"
+        <input v-if="!live && n.tool !== 'filter'" class="gc-args" :value="n.args"
                :placeholder="n.tool === 'limit' ? 'max items (e.g. 100)' : 'tool args (e.g. --timeout 60)'"
                @pointerdown.stop @input="setArgs(n, $event.target.value)" />
-        <div v-if="argIssues(n).length" class="gc-argwarn" @pointerdown.stop>
+        <div v-if="!live && argIssues(n).length" class="gc-argwarn" @pointerdown.stop>
           ⚠ {{ n.tool }} doesn't accept {{ argIssues(n).join(', ') }} — put tool-native flags in
           <b>opt-args</b> below</div>
-        <input v-if="optArgsSupported(n.tool)" class="gc-args gc-optargs" :value="n.optargs"
+        <input v-if="!live && optArgsSupported(n.tool)" class="gc-args gc-optargs" :value="n.optargs"
                placeholder="opt-args → passed to the tool verbatim (e.g. -severity critical,high)"
                title="Forwarded verbatim to the underlying scanner binary — put its native flags here"
                @pointerdown.stop @input="setOptArgs(n, $event.target.value)" />
@@ -580,6 +600,7 @@ onBeforeUnmount(() => {
             <span class="gc-ctxthead"><span class="gc-ctxtname">{{ t.name }}</span>
               <span class="gc-chipk">out: {{ t.produces || t.kind }}</span></span>
             <span class="gc-ctxtdesc">{{ t.description || 'no description' }}</span>
+            <span v-if="t.accepts" class="gc-ctxtneeds">needs: {{ t.accepts }}</span>
           </button>
         </template>
       </div>
@@ -654,12 +675,36 @@ onBeforeUnmount(() => {
   position: absolute; border: 1px solid var(--line, #ccc); border-radius: 8px; background: var(--panel, #fff);
   color: var(--text, #16181d); box-shadow: 0 1px 3px rgba(0,0,0,.12); user-select: none; cursor: default;
 }
+/* ---- live/read-only monitor: colour boxes by run state (red=running, green=done, grey=waiting) ---- */
+.gc-live, .gc-live .gc-node-head { cursor: pointer; }
+.gc-st-running { border-color: var(--bad, #ed4245);
+  box-shadow: 0 0 0 2px var(--bad, #ed4245), 0 0 14px rgba(237, 66, 69, .5); animation: gcpulse 1.1s ease-in-out infinite; }
+.gc-st-done { border-color: var(--good, #3ba55d); box-shadow: 0 0 0 1px var(--good, #3ba55d); }
+.gc-st-failed { border-color: var(--bad, #ed4245); box-shadow: 0 0 0 1px var(--bad, #ed4245); border-style: dashed; }
+.gc-st-pending { opacity: .85; }
+.gc-sel { outline: 2px solid var(--primary, #8ab4f8); outline-offset: 2px; }
+@keyframes gcpulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--bad, #ed4245), 0 0 6px rgba(237, 66, 69, .35); }
+  50% { box-shadow: 0 0 0 2px var(--bad, #ed4245), 0 0 18px rgba(237, 66, 69, .7); }
+}
+.gc-statepill { font-size: 10px; font-weight: 700; padding: 0 7px; border-radius: 999px;
+  text-transform: uppercase; letter-spacing: .03em; }
+.gc-sp-running { background: var(--bad, #ed4245); color: #fff; }
+.gc-sp-done { background: var(--good, #3ba55d); color: #fff; }
+.gc-sp-pending { background: var(--outline, #8f9099); color: #fff; }
+.gc-sp-failed { background: var(--bad, #ed4245); color: #fff; }
+.gc-livecounts { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 10px 8px; font-size: 10.5px; align-items: center; }
+.gc-lc-run { color: var(--bad, #ed4245); font-weight: 600; }
+.gc-lc-find { color: var(--bad, #ed4245); }
+.gc-lc-item { color: var(--on-surface-variant, #c5c6cf); }
 .gc-node-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; cursor: grab; }
 .gc-node-head:active { cursor: grabbing; }
 .gc-tool { font-weight: 700; font-size: 13px; color: var(--text, #16181d); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gc-kind { font-size: 11px; line-height: 1.5; padding: 0 7px; border-radius: 999px; background: var(--accent, #5865f2); color: #fff; }
 .gc-kind.terminal { background: var(--muted-strong, #6b7280); }
 .gc-io { padding: 0 10px 6px; font-size: 11px; color: var(--muted, #5a6172); }
+.gc-needs { color: var(--on-surface-variant, #8f9099); }
+.gc-ctxtneeds { font-size: 10.5px; color: var(--on-surface-variant, #c5c6cf); }
 .gc-x { margin-left: auto; }
 /* inputs need an explicit dark background + border, or light theme text sits on the browser's default white */
 .gc-args, .gc-condv, .gc-repmax {

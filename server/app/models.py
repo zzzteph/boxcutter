@@ -165,13 +165,16 @@ class ScanItem(SQLModel, table=True):
     """A non-finding result: a URL, host, endpoint or plain string a workflow/tool emits instead of an issue
     (a crawl, a path-bust, an enum). Kept out of Finding so the findings table stays a list of ISSUES, while
     this data is still listable and downloadable one-per-line instead of being dropped on the floor."""
-    __table_args__ = (Index("ix_scanitem_scan_fp", "scan_id", "fingerprint"),)
+    __table_args__ = (Index("ix_scanitem_scan_fp", "scan_id", "fingerprint"),
+                      Index("ix_scanitem_scan_type", "scan_id", "asset_type"))
     id: Optional[int] = Field(default=None, primary_key=True)
     scan_id: int = Field(foreign_key="scan.id", index=True)
     target: str = Field(default="", max_length=1024)
     template_kind: str = Field(default="", max_length=32)
     fingerprint: str = Field(default="", max_length=128)      # of the normalized value; dedupes across reruns
     value: str = Field(default="", max_length=2048)           # the URL / host / item itself
+    # discovered-asset type (domain|subdomain|url|ip|endpoint|other), computed at ingest for the Assets explorer
+    asset_type: str = Field(default="", max_length=16)
     label: str = Field(default="", max_length=400)            # the engine's title for it, when it had one
     cls: str = Field(default="", max_length=120)
     stage_no: int = Field(default=0, index=True)              # the pipeline stage that produced it (for promotion)
@@ -242,6 +245,7 @@ class JobEvent(SQLModel, table=True):
     seq: int = 0
     phase: str = Field(default="", max_length=64)
     agent: str = Field(default="", max_length=64)
+    node: str = Field(default="", max_length=64)        # live canvas: which workflow box (graph node id) this is
     line: str = _text("")
     reasoning: Optional[str] = Field(default=None, sa_column=Column(Text))
     at: datetime = Field(default_factory=now, index=True)     # indexed for age-based log retention pruning

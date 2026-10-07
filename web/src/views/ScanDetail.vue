@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api, apiBase, token } from '../api'
 import { durationLabel, fmtDuration, timeAgo } from '../util'
 import Select from '../components/Select.vue'
+import GraphCanvas from '../components/GraphCanvas.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -40,7 +41,81 @@ const detail = ref(null)                 // heavy per-finding data (evidence/rep
 // scan that actually produced some, so an ordinary vuln scan looks exactly as it did before.
 const items = ref([]); const iTotal = ref(0); const iOffset = ref(0)
 const iq = ref(''); const iSort = ref('value'); const iDir = ref('asc')
+const assetType = ref('')                 // '' = all; else domain|subdomain|url|ip|endpoint|other
+const assetCounts = ref({})               // per-type totals, for the Assets tabs
 const hasItems = () => !!(scan.value && scan.value.items_total > 0)
+const ASSET_TABS = [
+  { key: '', label: 'All' }, { key: 'domain', label: 'Domains' }, { key: 'subdomain', label: 'Subdomains' },
+  { key: 'url', label: 'URLs' }, { key: 'ip', label: 'IPs' }, { key: 'endpoint', label: 'Endpoints' },
+  { key: 'other', label: 'Other' }, { key: 'screenshots', label: 'Screenshots' },
+]
+function assetTabCount(k) {
+  if (k === 'screenshots') return (scan.value && scan.value.screenshots_total) || 0
+  if (k === '') return Object.values(assetCounts.value).reduce((a, b) => a + b, 0)
+  return assetCounts.value[k] || 0
+}
+// a tab is shown only if it has results (keeps the bar tidy); 'All' always shows when there are any items
+const visibleAssetTabs = computed(() => ASSET_TABS.filter(t =>
+  t.key === '' ? hasItems() : assetTabCount(t.key) > 0))
+function setAssetType(k) {
+  assetType.value = k; iOffset.value = 0
+  if (k === 'screenshots') loadShots(); else loadItems()
+}
+
+// ---- live workflow canvas: the scan's graph, boxes coloured by run state, click a box for its logs ----
+const catalog = ref([])
+const selectedNode = ref('')
+const boxEvents = ref([])                 // the selected box's events across all agents (fetched on click)
+const graph = computed(() => scan.value?.template?.spec?.graph || null)
+const nodeStage = computed(() => scan.value?.template?.spec?.node_stage || {})
+const hasGraph = computed(() => !!(graph.value && (graph.value.nodes || []).length))
+
+// per-box run state, derived from the per-stage job progress + the live step markers in the event stream
+const nodeStates = computed(() => {
+  const g = graph.value
+  if (!g) return {}
+  const ns = nodeStage.value
+  const stageByNo = {}
+  for (const s of (scan.value?.pipeline || [])) stageByNo[s.stage_no] = s
+  const activeByJob = {}; const ended = new Set()
+  for (const e of events.value) {
+    if (!e.node) continue
+    if (e.phase === 'step:start') activeByJob[e.job_id] = e.node
+    else if (e.phase === 'step:end') { ended.add(e.node); if (activeByJob[e.job_id] === e.node) delete activeByJob[e.job_id] }
+  }
+  const runningByNode = {}
+  if (isLive()) for (const j in activeByJob) { const nd = activeByJob[j]; runningByNode[nd] = (runningByNode[nd] || 0) + 1 }
+  const out = {}
+  for (const n of (g.nodes || [])) {
+    const st = stageByNo[ns?.[n.id] ?? 0] || stageByNo[0] || null
+    const jobs = (st && st.jobs) || { total: 0, done: 0, running: 0, failed: 0 }
+    let state = 'pending'
+    if (runningByNode[n.id]) state = 'running'
+    else if (jobs.total > 0 && jobs.done >= jobs.total) state = (jobs.failed >= jobs.total && jobs.failed > 0) ? 'failed' : 'done'
+    else if (ended.has(n.id) && jobs.total > 0 && !jobs.running) state = 'done'
+    else if (jobs.running > 0) state = 'running'
+    out[n.id] = { state, running: runningByNode[n.id] || (state === 'running' ? (jobs.running || 1) : 0),
+                  done: jobs.done, total: jobs.total }
+  }
+  return out
+})
+const selectedTool = computed(() => (graph.value?.nodes || []).find(n => n.id === selectedNode.value)?.tool || '')
+async function onBoxSelect(nodeId) {
+  selectedNode.value = nodeId
+  boxEvents.value = []
+  try { boxEvents.value = await api.get(`/scans/${id}/events?node=${encodeURIComponent(nodeId)}`) }
+  catch (e) { /* transient */ }
+}
+function closeBox() { selectedNode.value = ''; boxEvents.value = [] }
+const boxLog = computed(() => {
+  const out = []
+  for (const e of boxEvents.value) {
+    if (['step:start', 'step:end'].includes(e.phase)) continue
+    out.push((e.agent ? '[' + e.agent + '] ' : '') + e.line)
+    if (e.reasoning) out.push('    ↳ ' + e.reasoning)
+  }
+  return out.join('\n')
+})
 
 // screenshots — captured pages (url + full PNG + thumbnail); panel only for scans that made some
 const shots = ref([]); const shTotal = ref(0); const shotFull = ref(null)
@@ -96,6 +171,7 @@ function findingsUrl() {
 function itemsUrl() {
   let u = `/scans/${id}/items?limit=${ILIMIT}&offset=${iOffset.value}&sort=${iSort.value}&dir=${iDir.value}`
   if (iq.value) u += `&q=${encodeURIComponent(iq.value)}`
+  if (assetType.value) u += `&type=${assetType.value}`
   if (selJob.value) u += `&target=${encodeURIComponent(selJob.value.target)}`
   return u
 }
@@ -111,6 +187,7 @@ async function exportItems() {
   // one entry per line, ready to pipe back into a tool — same filters/sort as the list on screen
   let u = `${apiBase()}/scans/${id}/items/export?sort=${iSort.value}&dir=${iDir.value}`
   if (iq.value) u += `&q=${encodeURIComponent(iq.value)}`
+  if (assetType.value) u += `&type=${assetType.value}`
   if (selJob.value) u += `&target=${encodeURIComponent(selJob.value.target)}`
   try {
     const r = await fetch(u, { headers: { Authorization: 'Bearer ' + token() } })
@@ -161,7 +238,7 @@ async function exportFindings(fmt) {
 async function loadScan() { scan.value = await api.get('/scans/' + id) }
 async function loadJobs() { const r = await api.get(jobsUrl()); jobs.value = r.items; jobsTotal.value = r.total; jobCounts.value = r.counts }
 async function loadFindings() { const r = await api.get(findingsUrl()); findings.value = r.items; fTotal.value = r.total }
-async function loadItems() { const r = await api.get(itemsUrl()); items.value = r.items; iTotal.value = r.total }
+async function loadItems() { const r = await api.get(itemsUrl()); items.value = r.items; iTotal.value = r.total; assetCounts.value = r.counts || {} }
 async function loadShots() {
   let u = `/scans/${id}/screenshots?limit=60`
   if (selJob.value) u += `&target=${encodeURIComponent(selJob.value.target)}`
@@ -220,6 +297,9 @@ function pushEvents(list) {
     if (e.cursor != null && e.cursor <= cursor.value) continue   // already seen — events arrive in id order
     events.value.push(e)
     if (e.cursor != null && e.cursor > cursor.value) cursor.value = e.cursor
+    // live-append to the open box's log panel when the event belongs to that box
+    if (selectedNode.value && e.node === selectedNode.value && !['step:start', 'step:end'].includes(e.phase))
+      boxEvents.value.push(e)
   }
   const over = events.value.length - MAX_EVENTS
   if (over > 0) events.value.splice(0, over)          // drop oldest; the full history stays in the DB
@@ -264,6 +344,8 @@ onMounted(async () => {
   await Promise.all([loadScan(), loadJobs(), loadFindings()]).catch(() => {})
   if (hasItems()) await loadItems().catch(() => {})
   if (hasShots()) await loadShots().catch(() => {})
+  if (!hasItems() && hasShots()) assetType.value = 'screenshots'   // screenshots-only scan opens on that tab
+  if (hasGraph.value) api.get('/templates/tool-catalog').then(c => { catalog.value = c }).catch(() => {})
   loadTargets().catch(() => {})
   // seed only the MOST RECENT events (not the whole history) so opening a big scan doesn't replay thousands
   const seed = await api.get('/scans/' + id + '/events?tail=200').catch(() => [])
@@ -302,8 +384,24 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
       <span class="muted">{{ scan.findings_resolved }} resolved</span>
     </div>
 
-    <!-- pipeline -->
-    <div v-if="pipelineLevels.length" class="card" style="margin-top:16px">
+    <!-- LIVE workflow canvas: the plan + what's running right now (box turns red; click it for its logs) -->
+    <div v-if="hasGraph" class="card" style="margin-top:16px">
+      <h2 style="margin:0 0 8px">Workflow</h2>
+      <GraphCanvas v-if="catalog.length" live :initial="graph" :catalog="catalog" :states="nodeStates"
+                   :selected="selectedNode" @select="onBoxSelect" />
+      <div v-else class="muted" style="font-size:12px">loading…</div>
+      <div v-if="selectedNode" class="boxlog">
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <b>{{ selectedTool }} <span class="muted" style="font-weight:400">· box {{ selectedNode }}</span></b>
+          <button class="ghost sm" @click="closeBox">✕ Close</button>
+        </div>
+        <div class="muted" style="font-size:12px;margin:2px 0 6px">Logs for this box across every agent/target that ran it.</div>
+        <div class="log" style="max-height:280px">{{ boxLog || 'no logs for this box yet' }}</div>
+      </div>
+    </div>
+
+    <!-- pipeline (fallback for a non-graph workflow; the live canvas replaces it for builder workflows) -->
+    <div v-if="pipelineLevels.length && !hasGraph" class="card" style="margin-top:16px">
       <h2 style="margin:0 0 4px">Pipeline</h2>
       <div class="muted" style="font-size:12px;margin-bottom:10px">Each stage runs on the items the one before it
         produced, fanning out across the fleet. Stage 0 runs on your targets.</div>
@@ -328,12 +426,12 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
       </div>
     </div>
 
-    <!-- assets -->
+    <!-- tasks: the per-target jobs (what each agent ran) -->
     <div class="row" style="justify-content:space-between;align-items:flex-end;margin-top:18px">
-      <h2 style="margin:0">Assets <span class="muted" style="font-weight:400">({{ jobsTotal }})</span></h2>
+      <h2 style="margin:0">Tasks <span class="muted" style="font-weight:400">({{ jobsTotal }})</span></h2>
       <Select v-model="jobStatus" :options="jobStatusOpts" auto right @change="onJobStatus" />
     </div>
-    <div class="muted" style="font-size:12px;margin:4px 0">Click an asset to see its findings, command, and live steps.</div>
+    <div class="muted" style="font-size:12px;margin:4px 0">Each target's job — click one to see its findings, command, and live steps.</div>
     <div class="card tablecard">
     <table class="reflow rows">
       <thead><tr><th>Asset</th><th>Status</th><th>Command</th><th>Duration</th></tr></thead>
@@ -468,63 +566,66 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
       <button class="ghost" :disabled="fOffset + FLIMIT >= fTotal" @click="fPage(1)">Next →</button>
     </div>
 
-    <!-- items: results that aren't findings (recon domains, crawled URLs) — only for scans that made some -->
-    <template v-if="hasItems()">
+    <!-- DISCOVERED ASSETS: everything the scan enumerated, grouped by type (domains / subdomains / URLs / IPs /
+         endpoints / screenshots) — each tab sortable, searchable and exportable -->
+    <template v-if="hasItems() || hasShots()">
       <div class="row" style="justify-content:space-between;align-items:flex-end;margin-top:20px;gap:8px">
-        <h2 style="margin:0">Items <span class="muted" style="font-weight:400">({{ iTotal }})</span>
+        <h2 style="margin:0">Discovered assets
           <span v-if="selJob" class="chip">{{ selJob.target }} <a @click.prevent="selectAsset(selJob)" href="#">✕</a></span>
         </h2>
-        <div class="row" style="gap:8px">
+        <div v-if="assetType !== 'screenshots'" class="row" style="gap:8px">
           <input v-model="iq" placeholder="search…" style="width:auto;max-width:150px" @keyup.enter="applyItemFilters" @input="applyItemFilters" />
-          <button class="ghost" title="Download as a .txt file, one entry per line" @click="exportItems">⬇ TXT</button>
+          <button class="ghost" title="Download this tab as .txt, one entry per line" @click="exportItems">⬇ TXT</button>
         </div>
       </div>
-      <div class="muted" style="font-size:12px;margin-bottom:4px">
-        Results this scan produced that aren't findings — domains, hosts, URLs. TXT gives you one per line.
+      <div class="atabs">
+        <button v-for="t in visibleAssetTabs" :key="t.key" class="atab" :class="{ on: assetType === t.key }"
+                @click="setAssetType(t.key)">{{ t.label }} <span class="acount">{{ assetTabCount(t.key) }}</span></button>
       </div>
-      <div class="card tablecard">
-        <table class="reflow rows">
-          <thead><tr>
-            <th class="sortable" @click="setISort('value')">Value{{ iSortInd('value') }}</th>
-            <th class="sortable" @click="setISort('target')">Asset{{ iSortInd('target') }}</th>
-            <th class="sortable" @click="setISort('last_seen')">Seen{{ iSortInd('last_seen') }}</th>
-          </tr></thead>
-          <tbody>
-            <tr v-for="it in items" :key="it.id">
-              <td data-label="Value" style="word-break:break-all">
-                <a v-if="/^https?:\/\//.test(it.value)" :href="it.value" target="_blank" rel="noopener">{{ it.value }}</a>
-                <code v-else>{{ it.value }}</code>
-                <span v-if="it.label && it.label !== it.value" class="muted" style="font-size:12px"> · {{ it.label }}</span>
-              </td>
-              <td data-label="Asset">{{ it.target }}</td>
-              <td data-label="Seen" class="muted" style="white-space:nowrap" :title="it.last_seen">{{ timeAgo(it.last_seen) }}</td>
-            </tr>
-            <tr v-if="!items.length"><td colspan="3" class="muted">No items match.</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div v-if="iTotal > ILIMIT" class="row pager">
-        <button class="ghost" :disabled="iOffset === 0" @click="iPage(-1)">← Prev</button>
-        <span class="muted">{{ iOffset + 1 }}–{{ Math.min(iOffset + ILIMIT, iTotal) }} of {{ iTotal }}</span>
-        <button class="ghost" :disabled="iOffset + ILIMIT >= iTotal" @click="iPage(1)">Next →</button>
-      </div>
-    </template>
 
-    <!-- screenshots: captured pages (url + full PNG + thumbnail) — only for scans that made some -->
-    <template v-if="hasShots()">
-      <div class="row" style="justify-content:space-between;align-items:flex-end;margin-top:20px;gap:8px">
-        <h2 style="margin:0">Screenshots <span class="muted" style="font-weight:400">({{ shTotal }})</span>
-          <span v-if="selJob" class="chip">{{ selJob.target }} <a @click.prevent="selectAsset(selJob)" href="#">✕</a></span>
-        </h2>
-      </div>
-      <div class="muted" style="font-size:12px;margin-bottom:6px">Click a thumbnail for the full-size capture.</div>
-      <div class="shots">
-        <figure v-for="s in shots" :key="s.id" class="shot" @click="openShot(s)">
-          <img :src="'data:image/png;base64,' + s.thumbnail" :alt="s.url" loading="lazy" />
-          <figcaption :title="s.url">{{ s.title || s.url }}</figcaption>
-        </figure>
-        <div v-if="!shots.length" class="muted">No screenshots yet.</div>
-      </div>
+      <!-- screenshots tab -> thumbnail grid -->
+      <template v-if="assetType === 'screenshots'">
+        <div class="muted" style="font-size:12px;margin-bottom:6px">Click a thumbnail for the full-size capture.</div>
+        <div class="shots">
+          <figure v-for="s in shots" :key="s.id" class="shot" @click="openShot(s)">
+            <img :src="'data:image/png;base64,' + s.thumbnail" :alt="s.url" loading="lazy" />
+            <figcaption :title="s.url">{{ s.title || s.url }}</figcaption>
+          </figure>
+          <div v-if="!shots.length" class="muted">No screenshots yet.</div>
+        </div>
+      </template>
+
+      <!-- any other tab -> the sortable asset table -->
+      <template v-else>
+        <div class="card tablecard">
+          <table class="reflow rows">
+            <thead><tr>
+              <th class="sortable" @click="setISort('value')">Value{{ iSortInd('value') }}</th>
+              <th v-if="assetType === ''">Type</th>
+              <th class="sortable" @click="setISort('target')">Source{{ iSortInd('target') }}</th>
+              <th class="sortable" @click="setISort('last_seen')">Seen{{ iSortInd('last_seen') }}</th>
+            </tr></thead>
+            <tbody>
+              <tr v-for="it in items" :key="it.id">
+                <td data-label="Value" style="word-break:break-all">
+                  <a v-if="/^https?:\/\//.test(it.value)" :href="it.value" target="_blank" rel="noopener">{{ it.value }}</a>
+                  <code v-else>{{ it.value }}</code>
+                  <span v-if="it.label && it.label !== it.value" class="muted" style="font-size:12px"> · {{ it.label }}</span>
+                </td>
+                <td v-if="assetType === ''" data-label="Type"><span class="atype">{{ it.asset_type }}</span></td>
+                <td data-label="Source">{{ it.target }}</td>
+                <td data-label="Seen" class="muted" style="white-space:nowrap" :title="it.last_seen">{{ timeAgo(it.last_seen) }}</td>
+              </tr>
+              <tr v-if="!items.length"><td :colspan="assetType === '' ? 4 : 3" class="muted">No assets match.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="iTotal > ILIMIT" class="row pager">
+          <button class="ghost" :disabled="iOffset === 0" @click="iPage(-1)">← Prev</button>
+          <span class="muted">{{ iOffset + 1 }}–{{ Math.min(iOffset + ILIMIT, iTotal) }} of {{ iTotal }}</span>
+          <button class="ghost" :disabled="iOffset + ILIMIT >= iTotal" @click="iPage(1)">Next →</button>
+        </div>
+      </template>
     </template>
 
     <!-- full-size screenshot lightbox -->
@@ -544,6 +645,17 @@ onUnmounted(() => { clearInterval(timer); if (es) es.close() })
 </template>
 
 <style scoped>
+/* discovered-assets type tabs */
+.atabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.atab { font-size: 12.5px; padding: 4px 11px; border: 1px solid var(--line, var(--border, #ddd)); border-radius: 999px;
+  background: var(--panel-2, var(--card, #fff)); color: var(--text); cursor: pointer; }
+.atab.on { background: var(--accent, #5865f2); color: #fff; border-color: var(--accent, #5865f2); }
+.acount { font-size: 11px; opacity: .8; margin-left: 2px; }
+.atype { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--panel-2, #eee);
+  border: 1px solid var(--line, #ddd); color: var(--muted); }
+/* per-box live log drawer under the workflow canvas */
+.boxlog { margin-top: 12px; border-top: 1px solid var(--line, var(--border, #ddd)); padding-top: 10px; }
+
 .shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
 .shot { margin: 0; cursor: pointer; border: 1px solid var(--border, #ddd); border-radius: 6px; overflow: hidden; background: var(--card, #fff); }
 .shot img { display: block; width: 100%; height: 140px; object-fit: cover; object-position: top; }

@@ -557,10 +557,12 @@ _ITEM_SORTS = {"value": ScanItem.value, "target": ScanItem.target, "last_seen": 
                "first_seen": ScanItem.first_seen}
 
 
-def _item_conds(scan_id, target, q):
+def _item_conds(scan_id, target, q, asset_type=None):
     conds = [ScanItem.scan_id == scan_id]
     if target:
         conds.append(ScanItem.target == target)
+    if asset_type:
+        conds.append(ScanItem.asset_type == asset_type)
     if q:
         like = f"%{q}%"
         conds.append(or_(ScanItem.value.ilike(like), ScanItem.label.ilike(like), ScanItem.target.ilike(like)))
@@ -573,34 +575,44 @@ def _item_order(sort, dir):
 
 
 @router.get("/{scan_id}/items")
-def scan_items(scan_id: int, target: str | None = None, q: str | None = None, sort: str = "value",
-               dir: str = "asc", limit: int = 100, offset: int = 0, user: User = Depends(current_user),
-               session: Session = Depends(get_session)):
-    """The scan's non-finding results, filtered/sorted/paged like the findings table. Same shape:
-    {items, total, limit, offset}."""
+def scan_items(scan_id: int, target: str | None = None, q: str | None = None, type: str | None = None,
+               sort: str = "value", dir: str = "asc", limit: int = 100, offset: int = 0,
+               user: User = Depends(current_user), session: Session = Depends(get_session)):
+    """The scan's discovered assets (non-finding results), filtered/sorted/paged. `type` restricts to one asset
+    type (domain|subdomain|url|ip|endpoint|other). `counts` is the per-type breakdown for the current
+    target/search (ignoring `type`), so the Assets explorer can label its tabs. Shape:
+    {items, total, counts, limit, offset}."""
     scan = session.get(Scan, scan_id)
     if not scan or not _perm(session, scan, user):
         raise HTTPException(404)
     limit, offset = _clamp(limit, offset)
-    conds = _item_conds(scan_id, target, q)
+    # per-type counts (same target/search filter, WITHOUT the type filter) so every tab shows its total
+    base = _item_conds(scan_id, target, q)
+    counts = {t: 0 for t in ("domain", "subdomain", "url", "ip", "endpoint", "other")}
+    for atype, c in session.exec(select(ScanItem.asset_type, func.count()).where(*base)
+                                 .group_by(ScanItem.asset_type)).all():
+        counts[atype if atype in counts else "other"] = counts.get(atype if atype in counts else "other", 0) + c
+    conds = _item_conds(scan_id, target, q, type)
     total = session.exec(select(func.count()).select_from(ScanItem).where(*conds)).one()
     rows = session.exec(select(ScanItem).where(*conds).order_by(_item_order(sort, dir), ScanItem.id.asc())
                         .offset(offset).limit(limit)).all()
     return {"items": [{"id": i.id, "value": i.value, "label": i.label, "target": i.target, "cls": i.cls,
-                       "first_seen": i.first_seen, "last_seen": i.last_seen} for i in rows],
-            "total": total, "limit": limit, "offset": offset}
+                       "asset_type": i.asset_type or "other", "first_seen": i.first_seen, "last_seen": i.last_seen}
+                      for i in rows],
+            "total": total, "counts": counts, "limit": limit, "offset": offset}
 
 
 @router.get("/{scan_id}/items/export")
-def items_export(scan_id: int, target: str | None = None, q: str | None = None, sort: str = "value",
-                 dir: str = "asc", user: User = Depends(current_user),
+def items_export(scan_id: int, target: str | None = None, q: str | None = None, type: str | None = None,
+                 sort: str = "value", dir: str = "asc", user: User = Depends(current_user),
                  session: Session = Depends(get_session)):
     """Download the filtered items as plain text, ONE PER LINE — the format you can pipe straight back into a
-    tool. Honours the same filters/sort as the list; up to 100k lines."""
+    tool. Honours the same filters/sort/type as the list (so you can export just the subdomains); up to 100k
+    lines."""
     scan = session.get(Scan, scan_id)
     if not scan or not _perm(session, scan, user):
         raise HTTPException(404)
-    rows = session.exec(select(ScanItem.value).where(*_item_conds(scan_id, target, q))
+    rows = session.exec(select(ScanItem.value).where(*_item_conds(scan_id, target, q, type))
                         .order_by(_item_order(sort, dir), ScanItem.id.asc()).limit(100_000)).all()
     body = "\n".join(v for v in rows if v)
     return Response(body + ("\n" if body else ""), media_type="text/plain; charset=utf-8",
@@ -811,22 +823,28 @@ def scan_jobs(scan_id: int, status: str | None = None, q: str | None = None, run
 
 
 @router.get("/{scan_id}/events")
-def scan_events(scan_id: int, since: int = 0, tail: int = 0, user: User = Depends(current_user),
-                session: Session = Depends(get_session)):
+def scan_events(scan_id: int, since: int = 0, tail: int = 0, node: str | None = None,
+                user: User = Depends(current_user), session: Session = Depends(get_session)):
     """Live-log events. `since` streams forward from a cursor (the poll fallback). `tail=N` returns only the
     most RECENT N events — the page seeds with this so opening a scan with a huge backlog doesn't replay the
-    whole history (it then streams only new events from the newest id)."""
+    whole history. `node=<boxId>` returns that workflow box's events across ALL agents/jobs (for the live
+    canvas's per-box log drill-down), most-recent-first-capped and returned oldest-first for display."""
     scan = session.get(Scan, scan_id)
     if not scan or not _perm(session, scan, user):
         raise HTTPException(404)
-    if tail and tail > 0:
+    if node:
+        rows = session.exec(select(JobEvent).where(
+            JobEvent.scan_id == scan_id, JobEvent.node == node)
+            .order_by(JobEvent.id.desc()).limit(500)).all()
+        rows = list(reversed(rows))
+    elif tail and tail > 0:
         rows = session.exec(select(JobEvent).where(JobEvent.scan_id == scan_id)
                             .order_by(JobEvent.id.desc()).limit(min(tail, 1000))).all()
         rows = list(reversed(rows))                  # newest N, returned oldest-first for display
     else:
         rows = session.exec(select(JobEvent).where(
             JobEvent.scan_id == scan_id, JobEvent.id > since).order_by(JobEvent.id).limit(500)).all()
-    return [{"cursor": e.id, "job_id": e.job_id, "phase": e.phase, "agent": e.agent,
+    return [{"cursor": e.id, "job_id": e.job_id, "phase": e.phase, "agent": e.agent, "node": e.node,
              "line": e.line, "reasoning": e.reasoning, "at": e.at} for e in rows]
 
 
@@ -850,7 +868,7 @@ async def sse_event_gen(scan_id: int, since: int):
         with Session(engine) as s:
             rows = s.exec(select(JobEvent).where(
                 JobEvent.scan_id == scan_id, JobEvent.id > cursor).order_by(JobEvent.id).limit(300)).all()
-            batch = [{"cursor": e.id, "job_id": e.job_id, "phase": e.phase, "agent": e.agent,
+            batch = [{"cursor": e.id, "job_id": e.job_id, "phase": e.phase, "agent": e.agent, "node": e.node,
                       "line": e.line, "reasoning": e.reasoning} for e in rows]
         if batch:
             cursor = batch[-1]["cursor"]

@@ -6,6 +6,7 @@ never stored on the runner and never logged."""
 from __future__ import annotations
 
 import json
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -244,6 +245,12 @@ class EventIn(BaseModel):
     token: str = ""
 
 
+# A UI-built workflow narrates box boundaries as `[[bc:step start <nodeId> <label>]]` on stderr (see
+# yaml_runner._step_event). We lift the box id + phase onto the event so the live canvas can light it up, and
+# blank the marker's own line so it never shows as log text.
+_STEP_RE = re.compile(r"\[\[bc:step (start|end) (\S+)(?: (\S+))?\]\]")
+
+
 @router.post("/runner/jobs/{job_id}/event")
 def job_event(job_id: int, body: EventIn, runner: Runner = Depends(current_runner),
               session: Session = Depends(get_session)):
@@ -253,8 +260,12 @@ def job_event(job_id: int, body: EventIn, runner: Runner = Depends(current_runne
     if job.status == "claimed":
         job.status = "running"
         session.add(job)
-    session.add(JobEvent(job_id=job_id, scan_id=job.scan_id, phase=body.phase, agent=body.agent,
-                         line=body.line[:4000], reasoning=(body.reasoning or None)))
+    node, phase, line = "", body.phase, body.line or ""
+    m = _STEP_RE.search(line)
+    if m:
+        node, phase, line = m.group(2), "step:" + m.group(1), ""   # a box marker, not a human log line
+    session.add(JobEvent(job_id=job_id, scan_id=job.scan_id, phase=phase, agent=body.agent, node=node,
+                         line=line[:4000], reasoning=(body.reasoning or None)))
     session.commit()
     return {"ok": True}
 
