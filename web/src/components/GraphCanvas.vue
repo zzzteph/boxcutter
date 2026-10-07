@@ -251,6 +251,11 @@ const findEdge = (from, to) => edges.find(e => e.from === from && e.to === to)
 function toggleSplit(from, to) {
   const e = findEdge(from, to)
   if (!e) return
+  const toTool = nodeById(to)?.tool
+  if (!e.split && isFlow(toTool)) {           // can't fan OUT into a flow box — it combines items in one process
+    warn(`${toTool} combines items in one process — a fan-out can't feed it. Put the fan-out AFTER it.`)
+    return
+  }
   e.split = !e.split
   if (e.split && !e.item_filter) e.item_filter = 'all'
   structural()
@@ -512,15 +517,24 @@ onBeforeUnmount(() => {
       <!-- per-wire control: toggle CHAIN <-> FAN-OUT, and (when fanned out) how items feed the next stage -->
       <div v-for="p in edgePaths" :key="'e' + p.from + '>' + p.to" class="gc-elabel"
            :style="{ left: p.mx + 'px', top: p.my + 'px' }">
-        <button class="gc-split" :class="{ on: p.split }" @click="toggleSplit(p.from, p.to)"
-          :title="p.split ? 'Fan-out: the boxes after this become their own stage and run as separate jobs across the whole fleet. Click for a single-process chain.' : 'Chain: runs in one process on one agent. Click to FAN OUT the downstream work across the fleet.'">
-          {{ p.split ? '⑂ fan-out' : '→ chain' }}</button>
-        <select v-if="p.split" class="gc-efilter" :value="p.filter"
-          title="which of this stage's items become the next stage's targets"
-          @change="setEdgeFilter(p.from, p.to, $event.target.value)">
-          <option value="all">all items</option>
-          <option value="urls">URLs only</option>
-        </select>
+        <!-- LIVE: a fan-out wire is a HUB — the upstream jobs' results merge, then split into N jobs. Show the
+             regroup with real numbers (done/total) so the merge→fan is visible; a chain wire shows nothing. -->
+        <template v-if="live">
+          <span v-if="p.split" class="gc-hub"
+                title="Fan-out hub: the results of the boxes before this merge into one deduped set, then split into jobs spread across the fleet.">
+            ⑂ merge → {{ (stateOf(p.to) || {}).done || 0 }}/{{ (stateOf(p.to) || {}).total || 0 }} jobs</span>
+        </template>
+        <template v-else>
+          <button class="gc-split" :class="{ on: p.split }" @click="toggleSplit(p.from, p.to)"
+            :title="p.split ? 'Fan-out: the boxes before this merge into one deduped set (a hub), then split into separate jobs across the whole fleet. Click for a single-process chain.' : 'Chain: runs in one process on one agent. Click to FAN OUT the downstream work across the fleet.'">
+            {{ p.split ? '⑂ fan-out' : '→ chain' }}</button>
+          <select v-if="p.split" class="gc-efilter" :value="p.filter"
+            title="which of this stage's items become the next stage's targets"
+            @change="setEdgeFilter(p.from, p.to, $event.target.value)">
+            <option value="all">all items</option>
+            <option value="urls">URLs only</option>
+          </select>
+        </template>
       </div>
 
       <div v-for="n in nodes" :key="n.id" class="gc-node" :data-id="n.id"
@@ -684,6 +698,8 @@ onBeforeUnmount(() => {
   background: var(--panel-2); color: var(--muted); cursor: pointer; white-space: nowrap; line-height: 1.6; }
 .gc-split.on { background: var(--primary, #8ab4f8); color: var(--on-primary, #06264d);
   border-color: var(--primary, #8ab4f8); font-weight: 600; }
+.gc-hub { font-size: 10px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap;
+  background: var(--primary, #8ab4f8); color: var(--on-primary, #06264d); border: 1px solid var(--primary, #8ab4f8); }
 .gc-efilter { font-size: 10.5px; padding: 1px 3px; border-radius: 6px; border: 1px solid var(--line);
   background: var(--panel-2); color: var(--text); }
 .gc-warn { font-size: 12px; padding: 7px 11px; border: 1px solid var(--bad, #ed4245); border-radius: 8px;

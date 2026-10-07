@@ -391,6 +391,9 @@ def compile_pipeline(graph: dict, reserved_names: set[str] | None = None) -> lis
             if TOOL_KIND.get(tool_of[src]) == "findings":
                 raise WorkflowError(f"'{tool_of[src]}' produces findings — it can't feed a fan-out boundary "
                                     "(only a box that enumerates hosts/URLs can be split across the fleet)")
+            if tool_of[dst] in _FLOW_TOOLS:
+                raise WorkflowError(f"a fan-out can't feed '{tool_of[dst]}' — flow boxes (aggregate/filter/"
+                                    "limit/hosts) combine items in ONE process, so put the fan-out AFTER them")
             filt = str(e.get("item_filter") or e.get("filter") or "all")
             split_edges.append((src, dst, filt if filt in ("all", "urls") else "all"))
         else:
