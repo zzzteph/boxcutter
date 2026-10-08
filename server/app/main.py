@@ -18,7 +18,7 @@ from sqlmodel import Session
 from .activity import cap_job_events, prune_logs
 from .config import settings
 from .db import engine, init_db
-from .queue import requeue_stale, run_due_schedules
+from .queue import reconcile_drained_scans, requeue_stale, run_due_schedules
 from .routers import (admin, auth, console, keys, operator, runners, scans, schedules,
                       templates)
 from .seed import seed
@@ -30,6 +30,7 @@ async def _sweeper() -> None:
         try:
             with Session(engine) as s:
                 requeue_stale(s)
+                reconcile_drained_scans(s)    # unstick any running scan whose jobs all finished (advance/finish)
                 run_due_schedules(s)          # fire any recurring (scheduled) scans that are due
                 cycle += 1
                 if cycle % 20 == 0:      # ~ every 10 min: trim log rows past retention + cap each job's live log

@@ -12,6 +12,7 @@ from ..security import current_user
 from ..seed import TOOLS as TOOL_DESC, WORKFLOWS as BUILTIN_WORKFLOWS
 from ..tool_flags import TOOL_FLAGS
 from ..workflow_compile import TOOL_KIND, WorkflowError, compile_pipeline
+from ..workflow_compile import _FLOW_TOOLS as FLOW_TOOLS
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
@@ -90,6 +91,7 @@ _TOOL_GROUP = {
     "graphql-detect": "GraphQL", "graphql-audit": "GraphQL",
     "http-request": "Generic",
     "aggregate": "Flow", "filter": "Flow", "limit": "Flow", "hosts": "Flow",
+    "uniq-urls": "Flow", "js-urls": "Flow", "param-urls": "Flow", "dedup-params": "Flow",
 }
 _GROUP_ORDER = ["Recon", "Crawl", "Vuln scanners", "Fuzzing", "Secrets", "API specs", "GraphQL",
                 "Flow", "Generic", "Other"]
@@ -117,7 +119,8 @@ _TOOL_PRODUCES = {
     "graphql-detect": "GraphQL endpoint URLs", "graphql-audit": "GraphQL findings",
     "http-request": "an HTTP response",
     "aggregate": "merged URL set", "filter": "filtered items", "limit": "first N items",
-    "hosts": "unique hostnames",
+    "hosts": "unique hostnames", "uniq-urls": "unique URLs", "js-urls": "JavaScript file URLs",
+    "param-urls": "URLs with parameters", "dedup-params": "deduped parameter URLs",
 }
 # descriptions for synthetic flow pseudo-tools (not in the engine's tool list, so not in TOOL_DESC)
 _SYNTH_DESC = {"aggregate": "Collect, de-duplicate and sort everything wired into it into one URL set; the "
@@ -126,7 +129,13 @@ _SYNTH_DESC = {"aggregate": "Collect, de-duplicate and sort everything wired int
                          "reject). Boxes after it get only the kept URLs.",
                "limit": "Cap the wired-in URLs to the first N (put N in the box's args field; default 100) - to "
                         "bound cost on a huge recon set.",
-               "hosts": "Collapse the wired-in URLs to their unique hostnames."}
+               "hosts": "Collapse the wired-in URLs to their unique hostnames.",
+               "uniq-urls": "Merge the wired-in items into one de-duplicated URL set (order preserved). Use it to "
+                            "combine several producers into unique URLs.",
+               "js-urls": "Keep only the JavaScript file URLs from what's wired in (feed js-endpoints / secrets).",
+               "param-urls": "Keep only the URLs that carry query parameters — the useful feed for a fuzzer.",
+               "dedup-params": "Collapse parameterised URLs by path + param-name set (one per shape, values "
+                               "ignored) so a fuzzer tests each shape once instead of thousands of near-dupes."}
 
 
 # What each box needs as its INPUT/target — so the builder can say "needs a domain / a URL" and you don't wire a
@@ -147,6 +156,8 @@ _TOOL_ACCEPTS = {
     "swagger-endpoints": "an OpenAPI spec URL", "swagger-specs": "a host or URL", "graphql-detect": "a host or URL",
     "graphql-audit": "a GraphQL endpoint URL", "http-request": "a URL",
     "aggregate": "wired items", "filter": "wired items", "limit": "wired items", "hosts": "wired items",
+    "uniq-urls": "wired items", "js-urls": "wired items", "param-urls": "wired items",
+    "dedup-params": "wired items",
 }
 
 
@@ -156,8 +167,7 @@ _TOOL_ACCEPTS = {
 # screenshots, crawlers, … — fans out, so a recon → scan graph distributes automatically.
 _NO_FANOUT = {
     "subfinder", "dns-brute", "dnsx", "wayback", "wayback-domains", "ping-scan",
-    "aggregate", "filter", "limit", "hosts",
-}
+} | FLOW_TOOLS
 
 
 @router.get("/tool-catalog")
@@ -171,6 +181,7 @@ def tool_catalog(user: User = Depends(current_user)):
              "terminal": k == "findings", "description": TOOL_DESC.get(n, "") or _SYNTH_DESC.get(n, ""),
              "produces": _TOOL_PRODUCES.get(n, ""),   # specific noun for what this box outputs (vs. the raw kind)
              "accepts": _TOOL_ACCEPTS.get(n, ""),      # what this box needs as its input/target
+             "flow": n in FLOW_TOOLS,                  # a flow/shaping box (no args, can't be a fan-out target)
              "fanout": n not in _NO_FANOUT,            # a wire INTO this box auto-defaults to fan-out
              "flags": TOOL_FLAGS.get(n, [])}      # accepted CLI flags, for live arg validation in the builder
             for n, k in sorted(TOOL_KIND.items(), key=lambda kv: gkey(kv[0]))]

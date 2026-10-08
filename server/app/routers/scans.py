@@ -126,6 +126,22 @@ def _builder_stages(session: Session, scan_id: int, template_id: int) -> int:
     return top
 
 
+def _resync_builder_stages(session: Session, scan: Scan) -> None:
+    """On a full rerun, rebuild the scan's pipeline from the seed WORKFLOW template as it is NOW — so edits made
+    to the workflow after the scan was first created (e.g. adding liveness/nuclei stages) actually take effect.
+    Only when the seed template is a workflow AND every existing Stage is builder-derived (points at the seed):
+    if any stage points elsewhere the user added manual pipeline stages, so we leave them untouched."""
+    tmpl = session.get(Template, scan.template_id)
+    if not tmpl or tmpl.kind != "workflow":
+        return
+    existing = session.exec(select(Stage).where(Stage.scan_id == scan.id)).all()
+    if any(s.template_id != scan.template_id for s in existing):
+        return                                           # has manual (non-builder) stages — don't clobber them
+    session.execute(delete(Stage).where(Stage.scan_id == scan.id))
+    session.commit()
+    _builder_stages(session, scan.id, scan.template_id)   # recreate from the current workflow
+
+
 def _perm(session: Session, scan: Scan, user: User):
     # single shared group: any authenticated user can view and act on any scan
     return "write"
@@ -961,5 +977,11 @@ def stop(scan_id: int, user=Depends(current_user), session=Depends(get_session))
 @router.post("/{scan_id}/rerun")
 def rerun(scan_id: int, stage: int = 0, user=Depends(current_user), session=Depends(get_session)):
     """Rerun the whole pipeline (default), or just from `stage` onward — re-running that stage on the targets it
-    already holds and letting the cascade continue to later stages, without redoing the stages before it."""
+    already holds and letting the cascade continue to later stages, without redoing the stages before it. A full
+    rerun (stage 0) re-syncs the pipeline from the current workflow, so edits to the workflow since the scan was
+    created take effect."""
+    if stage <= 0:
+        scan = session.get(Scan, scan_id)
+        if scan:
+            _resync_builder_stages(session, scan)
     return _set_status(scan_id, "running", user, session, bump_run=True, from_stage=max(0, stage))

@@ -36,8 +36,20 @@ TOOL_KIND: dict[str, str] = {
     "zap-scan-openapi": "findings", "zap-scan-url": "findings",
     # flow-control pseudo-tools (not real binaries): handled specially by the compiler, not run as a tool.
     "aggregate": "urls", "filter": "urls", "limit": "urls", "hosts": "urls",
+    "uniq-urls": "urls", "js-urls": "urls", "param-urls": "urls", "dedup-params": "urls",
 }
-_FLOW_TOOLS = {"aggregate", "filter", "limit", "hosts"}
+_FLOW_TOOLS = {"aggregate", "filter", "limit", "hosts", "uniq-urls", "js-urls", "param-urls", "dedup-params"}
+# how each projection flow box shapes the items wired into it (applied per upstream, then a cross-input dedup):
+#   aggregate  -> all URLs, sorted + deduped
+#   uniq-urls  -> URLs, order-preserving unique
+#   hosts      -> unique hostnames
+#   js-urls    -> only JavaScript file URLs
+#   param-urls -> only URLs that carry query parameters (good feeder for fuzzing)
+#   dedup-params -> param URLs collapsed by path + param-name set (one representative per shape)
+_FLOW_PROJ = {
+    "hosts": " | urls | hosts", "aggregate": " | urls", "uniq-urls": " | urls",
+    "js-urls": " | urls | js", "param-urls": " | urls | params", "dedup-params": " | urls | dedup",
+}
 # builder box -> (real engine tool, extra opt-arg forwarded to the binary). Lets a box be a preset of another
 # tool without the engine needing a new module: nuclei-dast = nuclei with the binary's native `-dast` flag.
 _TOOL_ALIAS = {"nuclei-dast": ("nuclei", "-dast")}
@@ -232,19 +244,17 @@ def compile_graph(graph: dict, reserved_names: set[str] | None = None,
                 steps.append({"select": "${" + sel + "}", "set": "findings"})
             else:
                 fvar = _var(nid)
+                suffix = _FLOW_PROJ.get(node["tool"], "")   # projection; filter/limit keep the item kind (no proj)
                 for pid in parents:
-                    if node["tool"] == "hosts":
-                        proj = _var(pid) + " | urls | hosts"
-                    elif node["tool"] == "aggregate":
-                        proj = _var(pid) + " | urls" + _cond_chain(node)
-                    else:                                 # filter / limit: keep the item kind (urls OR items)
-                        proj = _var(pid) + _cond_chain(node)
+                    proj = _var(pid) + suffix + _cond_chain(node)
                     steps.append({"select": "${" + proj + "}", "save": fvar})
                 if parents and node["tool"] == "aggregate":
-                    steps.append({"select": "${" + fvar + " | sort}", "set": fvar})        # dedup + sort
+                    steps.append({"select": "${" + fvar + " | sort}", "set": fvar})         # dedup + sort
                 elif parents and node["tool"] == "limit":
                     steps.append({"select": "${" + fvar + " | limit:" + str(_limit_count(node["args"])) + "}",
                                   "set": fvar})                                             # cap to N
+                elif parents and node["tool"] != "filter":   # hosts / uniq-urls / js-urls / param-urls / dedup-params
+                    steps.append({"select": "${" + fvar + " | unique}", "set": fvar})       # dedup across inputs
         else:
             save = "findings" if node["kind"] == "findings" else _var(nid)
             real_tool, alias_opt = _TOOL_ALIAS.get(node["tool"], (node["tool"], ""))

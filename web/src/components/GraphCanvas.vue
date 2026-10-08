@@ -144,8 +144,8 @@ const groupOf = (tool) => props.catalog.find(t => t.name === tool)?.group || 'Ot
 const colorOf = (tool) => GROUP_COLOR[groupOf(tool)] || GROUP_COLOR.Other
 
 // ---- wiring compatibility (#6) + fan-out boundaries (#3) ----
-const FLOW = new Set(['aggregate', 'filter', 'limit', 'hosts'])
-const isFlow = (tool) => FLOW.has(tool)
+const FLOW = new Set(['aggregate', 'filter', 'limit', 'hosts'])   // fallback if the catalog hasn't loaded
+const isFlow = (tool) => !!props.catalog.find(t => t.name === tool)?.flow || FLOW.has(tool)
 // the EFFECTIVE output kind of a box: a normal box is its catalog kind; a flow box is 'findings' only when every
 // input it has is findings (it filters the findings set), else it passes URLs/items. Mirrors the compiler so the
 // canvas rejects exactly the wirings the server would.

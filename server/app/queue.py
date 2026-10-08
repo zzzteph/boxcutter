@@ -289,3 +289,32 @@ def maybe_finish_scan(session: Session, scan_id: int) -> bool:
     if scan and scan.status == "running":
         return _advance_or_finish(session, scan)
     return False
+
+
+def reconcile_drained_scans(session: Session) -> int:
+    """Sweeper safety net: recover any RUNNING scan whose jobs have all finished but which never advanced to its
+    next stage or got marked done — e.g. the final result post raced/crashed, or a restart dropped it. For each
+    such scan, run the normal advance-or-finish (promote the next stage, or finish + reconcile findings). Without
+    this a pipeline could stall forever between stages with nothing left to re-trigger it."""
+    n = 0
+    for sid in list(session.exec(select(Scan.id).where(Scan.status == "running")).all()):
+        # skip a scan still working, or one too fresh to have any jobs yet (mid-enqueue at creation)
+        if not session.exec(select(Job.id).where(Job.scan_id == sid).limit(1)).first():
+            continue
+        if session.exec(select(Job.id).where(
+                Job.scan_id == sid, Job.status.in_(_INFLIGHT + ("pending",))).limit(1)).first():
+            continue
+        if maybe_finish_scan(session, sid):          # it finished -> reconcile findings states + notify, once
+            from .diff import reconcile_run
+            from .notify import notify
+            scan = session.get(Scan, sid)
+            stats = reconcile_run(session, scan.id, scan.run_no, scan.last_run_at)
+            log_activity(session, "scan_done", f"Scan '{scan.name}' done — "
+                         f"{stats['new']} new, {stats['open']} open, {stats['resolved']} resolved", scan_id=scan.id)
+            try:
+                notify("scan_done", {"scan_id": scan.id, "scan": scan.name, "run_no": scan.run_no, **stats},
+                       f"[boxcutter] scan '{scan.name}' done")
+            except Exception:  # noqa: BLE001
+                pass
+        n += 1
+    return n
