@@ -1,30 +1,45 @@
-/* boxcutter-ui — Google Material Design 3 (dark). Design tokens + plain CSS, no component library (per spec).
-   Elevation over borders, state layers + ripple on interactive elements, outlined fields, tonal containers.
-   Kept deliberately clean/light — generous spacing, subtle depth, colour reserved for chips & status. */
+/* boxcutter-ui — Shrewd Security / weakpass gold-on-black theme. Design tokens + plain CSS, no component library.
+   The token NAMES are unchanged from the old MD3 theme, so every component re-skins just by remapping the VALUES
+   here: antique-gold accent #b28739 on near-black #111110, off-white ink, Inter for UI + a mono stack for data. */
+
+/* ---- Inter (self-hosted; served from /public/fonts) ---- */
+@font-face{font-family:"Inter";font-style:normal;font-weight:300;font-display:swap;src:url("/fonts/inter/Inter-Light.woff2") format("woff2")}
+@font-face{font-family:"Inter";font-style:normal;font-weight:400;font-display:swap;src:url("/fonts/inter/Inter-Regular.woff2") format("woff2")}
+@font-face{font-family:"Inter";font-style:normal;font-weight:500;font-display:swap;src:url("/fonts/inter/Inter-Medium.woff2") format("woff2")}
+@font-face{font-family:"Inter";font-style:normal;font-weight:600;font-display:swap;src:url("/fonts/inter/Inter-SemiBold.woff2") format("woff2")}
+@font-face{font-family:"Inter";font-style:normal;font-weight:700;font-display:swap;src:url("/fonts/inter/Inter-Bold.woff2") format("woff2")}
+@font-face{font-family:"Inter";font-style:normal;font-weight:800;font-display:swap;src:url("/fonts/inter/Inter-ExtraBold.woff2") format("woff2")}
+
 :root {
-  /* color roles (MD3 dark) */
-  --primary: #8ab4f8; --on-primary: #06264d; --primary-container: #0842a0; --on-primary-container: #d3e3fd;
-  --secondary-container: #303f5a; --on-secondary-container: #dae2f9;
-  --tertiary: #c58af9; --tertiary-container: #3f2e57; --on-tertiary-container: #ebddff;
-  --error: #f2b8b5; --on-error: #601410; --error-container: #8c1d18; --on-error-container: #f9dedc;
+  /* accent = antique gold; "primary" keeps its name so every component inherits the gold */
+  --primary: #b28739; --on-primary: #17130a; --primary-container: #2a2113; --on-primary-container: #d8b56a;
+  --secondary-container: #2a2416; --on-secondary-container: #e4d7b0;
+  --tertiary: #d99a3f; --tertiary-container: #2e2515; --on-tertiary-container: #ead3a0;
+  --error: #d9635f; --on-error: #120404; --error-container: #3a1715; --on-error-container: #f2c0be;
 
-  --surface: #131316; --surface-dim: #0d0e11;
-  --sc-lowest: #0c0d10; --sc-low: #1a1b1f; --sc: #1e1f23; --sc-high: #282a2e; --sc-highest: #33353a;
-  --on-surface: #e4e2e6; --on-surface-variant: #c5c6cf; --outline: #8f9099; --outline-variant: #43474e;
-  --inverse-surface: #e4e2e6; --scrim: rgba(0,0,0,.6);
+  /* near-black surfaces (bg / panel / raised / sink) */
+  --surface: #111110; --surface-dim: #0c0b0a;
+  --sc-lowest: #0c0b0a; --sc-low: #181614; --sc: #201d19; --sc-high: #2a2620; --sc-highest: #352f28;
+  --on-surface: #f2f2f2; --on-surface-variant: #a7a29a; --outline: #6d685f; --outline-variant: #3a352e;
+  --inverse-surface: #f2f2f2; --scrim: rgba(0,0,0,.6);
 
-  /* status / severity accents (flat, no glow) */
-  --ok: #6dd58c; --warn: #fdb022; --danger: #f04438; --info: #94a3b8;
-  --crit: #f04438; --high: #f79009; --med: #fdb022; --low: #32d583;
+  /* gold accent helpers (from the brand book) */
+  --accent: #b28739; --accent-bright: #d4af61; --accent-ink: #d8b56a; --wash: rgba(178,135,57,.10);
+  --glow: 0 0 16px rgba(178,135,57,.22);
 
-  --primary-fnt: Roboto, "Helvetica Neue", Arial, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --mono: "Roboto Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  /* status / severity — a warm gold→red ramp that sits on the black */
+  --ok: #78b58a; --warn: #d99a3f; --danger: #d9635f; --info: #a7a29a;
+  --crit: #cf4c44; --high: #d85f4a; --med: #d99a3f; --low: #c9a24c;
 
-  /* MD elevation levels (dark: soft shadows) */
-  --e1: 0 1px 2px rgba(0,0,0,.3), 0 1px 3px 1px rgba(0,0,0,.15);
-  --e2: 0 1px 2px rgba(0,0,0,.3), 0 2px 6px 2px rgba(0,0,0,.15);
-  --e3: 0 4px 8px 3px rgba(0,0,0,.15), 0 1px 3px rgba(0,0,0,.3);
-  --radius-xl: 20px; --radius-l: 16px; --radius: 12px; --radius-s: 8px; --radius-xs: 4px;
+  --primary-fnt: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", "Fira Code", "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* elevation (dark: soft shadows) */
+  --e1: 0 1px 2px rgba(0,0,0,.4), 0 1px 3px 1px rgba(0,0,0,.25);
+  --e2: 0 1px 2px rgba(0,0,0,.4), 0 2px 8px 2px rgba(0,0,0,.3);
+  --e3: 0 10px 30px rgba(0,0,0,.5), 0 1px 3px rgba(0,0,0,.4);
+  /* boxy, terminal-ish radii (was pill) */
+  --radius-xl: 8px; --radius-l: 12px; --radius: 10px; --radius-s: 7px; --radius-xs: 5px;
   --maxw: 1440px;
 }
 * { box-sizing: border-box; }
@@ -32,7 +47,11 @@ html, body, #app { margin: 0; min-height: 100%; }
 body {
   background: var(--surface); color: var(--on-surface);
   font: 14px/1.5 var(--primary-fnt); -webkit-font-smoothing: antialiased;
+  /* fixed radial gold-wash from the top, like weakpass.com */
+  background-image: radial-gradient(130% 90% at 50% -12%, color-mix(in srgb, var(--accent) 7%, var(--surface)) 0%, var(--surface) 58%);
+  background-attachment: fixed;
 }
+::selection { background: var(--accent); color: var(--on-primary); }
 a { color: var(--primary); text-decoration: none; }
 a:hover { text-decoration: underline; }
 h1 { font-size: 24px; font-weight: 400; letter-spacing: 0; margin: 0 0 4px; }
@@ -40,31 +59,40 @@ h2 { font-size: 16px; font-weight: 500; letter-spacing: .1px; }
 code, .mono { font-family: var(--mono); }
 
 /* ---- buttons: filled / tonal / outlined / text, with state layer + ripple ---- */
+/* default button = gold OUTLINE that fills gold + glows on hover (weakpass look); .primary is the solid CTA */
 button, .btn {
   position: relative; overflow: hidden; isolation: isolate;
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-  height: 40px; padding: 0 24px; border: none; border-radius: var(--radius-xl);
-  background: var(--primary); color: var(--on-primary); cursor: pointer;
-  font: 500 14px/1 var(--primary-fnt); letter-spacing: .1px;
-  transition: box-shadow .2s, background .2s, border-color .2s, opacity .2s;
+  height: 40px; padding: 0 18px; border: 1px solid var(--accent); border-radius: var(--radius-xl);
+  background: transparent; color: var(--accent); cursor: pointer;
+  font: 600 13.5px/1 var(--primary-fnt); letter-spacing: .05em; text-transform: uppercase;
+  transition: box-shadow .15s, background .15s, color .15s, border-color .15s, opacity .2s;
   -webkit-tap-highlight-color: transparent;
 }
-button::after, .btn::after {            /* state layer (hover/focus/press overlay) */
+button::after, .btn::after {            /* state layer (hover overlay); background fill is set per-variant */
   content: ""; position: absolute; inset: 0; background: currentColor; opacity: 0;
   transition: opacity .15s; z-index: -1;
 }
-button:hover::after, .btn:hover::after { opacity: .08; }
-button:focus-visible, .btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-button.primary, .btn.primary { background: var(--primary); color: var(--on-primary); box-shadow: var(--e1); }
-button.primary:hover, .btn.primary:hover { box-shadow: var(--e2); }
-button.tonal, .btn.tonal { background: var(--secondary-container); color: var(--on-secondary-container); }
-button.ghost, .btn.ghost, button.text, .btn.text { background: transparent; color: var(--primary); padding: 0 12px; }
-button.outlined, .btn.outlined { background: transparent; color: var(--primary); border: 1px solid var(--outline-variant); }
-button.danger, .btn.danger { background: var(--error-container); color: var(--on-error-container); }
-button.danger.ghost, .btn.danger.ghost { background: transparent; color: var(--error); }
-button.sm, .btn.sm { height: 32px; padding: 0 16px; font-size: 13px; }
-button.icon { height: 36px; width: 36px; padding: 0; border-radius: 50%; }
-button:disabled, .btn:disabled { background: rgba(227,226,230,.12); color: rgba(227,226,230,.38); cursor: not-allowed; box-shadow: none; }
+button:hover, .btn:hover { background: var(--accent); color: var(--on-primary); box-shadow: var(--glow); }
+button:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary, .btn.primary { background: var(--accent); color: var(--on-primary); border-color: var(--accent); }
+button.primary:hover, .btn.primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); box-shadow: var(--glow); }
+/* tonal / ghost / text: quieter, no brackets/uppercase, gold on hover */
+button.tonal, .btn.tonal { background: var(--secondary-container); color: var(--on-secondary-container);
+  border-color: var(--outline-variant); text-transform: none; letter-spacing: 0; font-weight: 500; }
+button.tonal:hover, .btn.tonal:hover { background: var(--secondary-container); color: var(--accent-ink); border-color: var(--accent); box-shadow: none; }
+button.ghost, .btn.ghost, button.text, .btn.text { background: transparent; color: var(--on-surface-variant);
+  border-color: transparent; padding: 0 12px; text-transform: none; letter-spacing: 0; font-weight: 500; }
+button.ghost:hover, .btn.ghost:hover, button.text:hover, .btn.text:hover { background: transparent; color: var(--accent); box-shadow: none; }
+button.outlined, .btn.outlined { background: transparent; color: var(--accent); border: 1px solid var(--outline-variant); }
+button.danger, .btn.danger { background: transparent; color: var(--error); border-color: var(--error); text-transform: none; letter-spacing: 0; }
+button.danger:hover, .btn.danger:hover { background: var(--error); color: var(--on-error); box-shadow: none; }
+button.danger.ghost, .btn.danger.ghost { background: transparent; color: var(--error); border-color: transparent; }
+button.danger.ghost:hover, .btn.danger.ghost:hover { background: transparent; color: var(--error); }
+button.sm, .btn.sm { height: 32px; padding: 0 14px; font-size: 12.5px; }
+button.icon { height: 36px; width: 36px; padding: 0; border-radius: 50%; border-color: transparent; color: var(--on-surface-variant); }
+button.icon:hover { background: var(--wash); color: var(--accent); box-shadow: none; }
+button:disabled, .btn:disabled { background: transparent; color: var(--outline); border-color: var(--outline-variant); cursor: not-allowed; box-shadow: none; opacity: .55; }
 button:disabled::after { opacity: 0; }
 /* ripple injected by main.js */
 .ripple { position: absolute; border-radius: 50%; transform: scale(0); animation: ripple .5s linear;
@@ -126,10 +154,12 @@ label { display: block; color: var(--on-surface-variant); margin: 14px 0 6px; fo
 /* ---- top app bar ---- */
 .nav {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 10px 24px; background: var(--sc); position: sticky; top: 0; z-index: 10; box-shadow: var(--e2);
+  padding: 10px 24px; background: color-mix(in srgb, var(--sc) 90%, transparent); position: sticky; top: 0; z-index: 10;
+  box-shadow: var(--e2); border-bottom: 1px solid var(--outline-variant);
+  backdrop-filter: blur(9px); -webkit-backdrop-filter: blur(9px);
 }
-.nav .brand { font-size: 20px; font-weight: 500; letter-spacing: .1px; color: var(--on-surface); margin-right: 8px; }
-.nav .brand::before { content: "◑ "; color: var(--primary); }
+.nav .brand { font-size: 19px; font-weight: 800; letter-spacing: .06em; color: var(--on-surface); margin-right: 8px; font-family: var(--mono); }
+.nav .brand::before { content: "◑ "; color: var(--primary); text-shadow: var(--glow); }
 .nav a { position: relative; color: var(--on-surface-variant); padding: 8px 14px; border-radius: var(--radius-xl);
   font-weight: 500; font-size: 14px; white-space: nowrap; transition: background .15s, color .15s; }
 .nav a:hover { color: var(--on-surface); background: rgba(255,255,255,.06); text-decoration: none; }
@@ -162,9 +192,9 @@ td.crit { color: var(--crit); font-weight: 500; }
 .tag { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: var(--radius-s);
   font-size: 11px; font-weight: 600; letter-spacing: .3px; text-transform: uppercase; white-space: nowrap; }
 .tag::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 6px; }
-.kind-tool     { color: #8ab4f8; background: rgba(138,180,248,.16); }
-.kind-workflow { color: #81c995; background: rgba(129,201,149,.16); }
-.kind-ai_agent { color: #c58af9; background: rgba(197,138,249,.16); }
+.kind-tool     { color: var(--accent-ink); background: var(--wash); }
+.kind-workflow { color: #d99a3f; background: rgba(217,154,63,.14); }
+.kind-ai_agent { color: var(--accent-bright); background: rgba(212,175,97,.15); }
 .tag.plain { color: var(--on-surface-variant); background: var(--sc-high); }
 
 /* ---- badges / states ---- */
@@ -192,7 +222,7 @@ td.crit { color: var(--crit); font-weight: 500; }
 /* ---- tables ---- */
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 12px 12px; border-bottom: 1px solid var(--outline-variant); vertical-align: top; }
-th { color: var(--on-surface-variant); font-weight: 500; font-size: 12px; letter-spacing: .3px; }
+th { color: var(--on-surface-variant); font-weight: 600; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
 table.rows tbody tr { transition: background .12s; }
 table.rows tbody tr:hover { background: rgba(255,255,255,.04); }
 th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }

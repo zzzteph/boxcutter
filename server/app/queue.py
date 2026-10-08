@@ -255,8 +255,8 @@ def _advance_or_finish(session: Session, scan: Scan) -> bool:
     -> nuclei AND recon -> sqlmap). Promoting in waves (only off already-drained sources each call) keeps a
     branch's children from starting before the branch itself has produced anything."""
     # stages that already ran this run (have >=1 job). Stage 0 (the seed template) always counts.
-    enqueued = {0} | {sn for (sn,) in session.exec(select(Job.stage_no).where(
-        Job.scan_id == scan.id, Job.run_no == scan.run_no).distinct()).all()}
+    enqueued = {0} | set(session.exec(select(Job.stage_no).where(
+        Job.scan_id == scan.id, Job.run_no == scan.run_no).distinct()).all())
     stages = session.exec(select(Stage).where(Stage.scan_id == scan.id).order_by(Stage.stage_no)).all()
     promoted_any = False
     for st in stages:
