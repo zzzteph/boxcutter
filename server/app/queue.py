@@ -19,6 +19,7 @@ from sqlalchemy import func, update
 from sqlmodel import Session, select
 
 from .activity import log_activity
+from .cron import CronError, next_runs
 from .config import settings
 from .models import Job, Runner, Scan, Scheduler, Target, Template
 from .pipeline import SEED, PlanError, build_plan, children, select_targets
@@ -276,7 +277,7 @@ def fire_scheduler(session: Session, sch: Scheduler, now: datetime | None = None
         sch.scan_id = scan.id
     jobs = start_run(session, scan)
     sch.last_run_at = now
-    sch.next_run_at = now + timedelta(seconds=sch.interval_seconds)
+    sch.next_run_at = next_run(sch, now)
     session.add(sch)
     session.commit()
     log_activity(session, "scheduled_run", f"Scheduler '{sch.name}' started run #{scan.run_no} ({jobs} jobs)",
@@ -284,18 +285,29 @@ def fire_scheduler(session: Session, sch: Scheduler, now: datetime | None = None
     return jobs
 
 
+def next_run(sch: Scheduler, after: datetime | None = None) -> datetime | None:
+    """The scheduler's next cron tick after `after` (default now), or None if the expression is unusable."""
+    try:
+        return next_runs(sch.cron, sch.timezone, 1, after)[0]
+    except CronError:
+        return None
+
+
 def run_due_schedulers(session: Session) -> int:
-    """Fire every enabled scheduler that is due. A previous run that is still going is never stacked: the
-    scheduler re-checks in a few minutes instead."""
+    """Fire every enabled scheduler that is due. Runs never stack: if the previous run is still going when the
+    next tick comes, that tick is skipped (and logged) and the scheduler waits for the one after."""
     now = datetime.now(timezone.utc)
     fired = 0
     for sch in session.exec(select(Scheduler).where(Scheduler.enabled == True,  # noqa: E712
                                                     Scheduler.next_run_at <= now)).all():
         scan = session.get(Scan, sch.scan_id) if sch.scan_id else None
         if scan is not None and scan.status in ("running", "paused"):
-            sch.next_run_at = now + timedelta(seconds=min(sch.interval_seconds, 300))
+            sch.next_run_at = next_run(sch, now)
             session.add(sch)
             session.commit()
+            log_activity(session, "scheduled_run_skipped",
+                         f"Scheduler '{sch.name}': skipped a run — the previous one is still {scan.status}",
+                         scan_id=scan.id, severity="warn")
             continue
         try:
             fire_scheduler(session, sch, now)
@@ -304,7 +316,7 @@ def run_due_schedulers(session: Session) -> int:
             session.rollback()
             sch = session.get(Scheduler, sch.id)
             if sch is not None:
-                sch.next_run_at = now + timedelta(seconds=sch.interval_seconds)
+                sch.next_run_at = next_run(sch, now)
                 session.add(sch)
                 session.commit()
                 log_activity(session, "scheduler_failed", f"Scheduler '{sch.name}' could not start: {e}",

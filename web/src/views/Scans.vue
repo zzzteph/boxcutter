@@ -49,18 +49,18 @@ onUnmounted(() => clearInterval(timer))
         <b class="nm">{{ s.name }}</b><span class="state" :class="'st-' + s.status">{{ s.status }}</span>
       </div>
       <div class="muted" style="font-size:12px">
-        {{ s.template }}<span v-if="s.distributed"> · ⇉ {{ s.steps }} steps</span><span v-if="s.scheduler_id"> · ⟳ scheduled</span>
+        {{ s.template }}<span v-if="s.distributed"> · workflow, {{ s.steps }} steps</span><span v-if="s.scheduler_id"> · ⟳ scheduled</span>
       </div>
       <div class="muted" style="font-size:12px">run #{{ s.run_no }} · {{ s.assets }} target(s) ·
         {{ durationLabel(s) || timeAgo(s.created_at) }}</div>
-      <div v-if="s.jobs_total && s.status === 'running'" class="progress">
-        <div class="bar" :style="{ width: pct(s) + '%' }"></div>
-      </div>
       <div class="row" style="gap:6px;min-height:22px">
         <span v-for="sv in SEVS" :key="sv" v-show="s.findings_by_severity[sv]" class="badge" :class="'sev-' + sv">
           {{ s.findings_by_severity[sv] }} {{ sv }}</span>
         <span v-if="!s.findings_open" class="muted" style="font-size:12.5px">no open findings</span>
         <span v-if="s.findings_new" class="state-new" style="font-size:12.5px">{{ s.findings_new }} new</span>
+      </div>
+      <div v-if="s.jobs_total && ['running', 'paused'].includes(s.status)" class="edgebar" :title="pct(s) + '% done'">
+        <div :style="{ width: pct(s) + '%' }"></div>
       </div>
     </router-link>
   </div>
@@ -91,4 +91,7 @@ onUnmounted(() => clearInterval(timer))
 .fbar button.on { background: var(--primary-container); color: var(--accent-ink); }
 .fbar button:hover { box-shadow: none; color: var(--on-surface); background: var(--sc); }
 .badge { height: 20px; font-size: 11px; }
+.scancard { position: relative; overflow: hidden; padding-bottom: 22px; }
+.edgebar { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: var(--sc-high); }
+.edgebar > div { height: 100%; background: var(--accent); transition: width .4s; }
 </style>

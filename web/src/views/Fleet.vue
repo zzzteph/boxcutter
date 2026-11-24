@@ -62,7 +62,7 @@ onUnmounted(() => clearInterval(timer))
     <button class="primary" @click="mkToken">New enroll token</button>
   </div>
   <div class="muted">Every scanner runs jobs from every scan. More scanners (or more parallel jobs each) = faster scans,
-    especially for distributed workflows and pipelines.</div>
+    especially for workflows.</div>
   <div v-if="newToken" class="card" style="margin:12px 0">
     <b>Enroll token (shown once):</b> <code style="word-break:break-all">{{ newToken }}</code>
     <div class="muted" style="font-size:12px;margin-top:6px">Start a scanner on any host with it:</div>

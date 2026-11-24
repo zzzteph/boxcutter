@@ -1,64 +1,71 @@
 <script setup>
 // New scan in three plain steps on one page:
 //   1. What to scan   - paste targets (or upload a file); the kind is detected as you type
-//   2. What to do     - scan-type cards that fit those targets (see ScanTypePicker)
-//   3. When           - once now, or repeat on a schedule (that creates a scheduler)
+//   2. What to do     - a workflow (its graph is shown) or a single template, as cards that fit those targets
+//   3. When           - once now, or on a cron schedule (that creates a scheduler)
 // A sticky summary bar says exactly what will happen and starts it.
-// Query params pre-fill it: ?template=<id>&targets=a,b&repeat=1&distributed=1
-import { ref, computed, onMounted } from 'vue'
+// Query params pre-fill it: ?template=<id>&targets=a,b&repeat=1
+import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import ScanTypePicker from '../components/ScanTypePicker.vue'
-import Select from '../components/Select.vue'
-import { INTERVALS, KIND_LABEL, KIND_ONE, detectTargets, intervalLabel, resolveTemplate, targetLines } from '../util'
+import WorkflowGraph from '../components/WorkflowGraph.vue'
+import CronInput from '../components/CronInput.vue'
+import { KIND_LABEL, KIND_ONE, detectTargets, targetLines } from '../util'
+import { graphFromPlan } from '../workflow'
 
 const route = useRoute()
 const router = useRouter()
 
 const templates = ref([])
+const inputs = ref([])
 const stats = ref(null)
 const targetsText = ref('')
 const file = ref(null)
 const templateId = ref(null)
-const distributed = ref(false)
-const when = ref('now')                 // now | repeat
-const interval = ref(86400)
-const customHours = ref(24)
+const when = ref('now')                 // now | schedule
+const cron = ref('0 3 * * *')
+const tz = ref('')
+const cronOk = ref(false)
+const cronDesc = ref('')
 const firstNow = ref(true)
 const name = ref('')
 const showAdvanced = ref(false)
-const params = ref([])                  // [{flag, value}] extra engine flags for every job
+const params = ref([])
 const err = ref('')
 const busy = ref(false)
+const preview = ref(null)               // the chosen workflow's expanded plan, drawn as a graph
 
 const lines = computed(() => targetLines(targetsText.value))
 const detected = computed(() => detectTargets(lines.value))
 const kind = computed(() => (file.value && !lines.value.length) ? '' : detected.value.kind)
-const chosen = computed(() => resolveTemplate(templates.value, templateId.value, distributed.value))
-const base = computed(() => templates.value.find(t => t.id === templateId.value) || null)
-const nTargets = computed(() => file.value ? null : lines.value.length)
-const intervalOpts = [...INTERVALS, { value: -1, label: 'Custom…' }]
-const intervalSeconds = computed(() => interval.value === -1 ? Math.max(1, Number(customHours.value) || 1) * 3600 : interval.value)
+const chosen = computed(() => templates.value.find(t => t.id === templateId.value) || null)
+const inputLabels = computed(() => Object.fromEntries(inputs.value.map(i => [i.value, i.label])))
 const slots = computed(() => stats.value ? stats.value.slots_total : null)
-
 const detectLabel = computed(() => {
   const d = detected.value
   if (!d.total) return ''
-  const parts = Object.entries(d.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${(n === 1 ? KIND_ONE[k] : KIND_LABEL[k]) || k}`)
-  return parts.join(' · ')
+  return Object.entries(d.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${(n === 1 ? KIND_ONE[k] : KIND_LABEL[k]) || k}`).join(' · ')
 })
 const unknownCount = computed(() => detected.value.counts.unknown || 0)
-const ready = computed(() => !!chosen.value && (lines.value.length > 0 || !!file.value))
+const ready = computed(() => !!chosen.value && (lines.value.length > 0 || !!file.value) && (when.value === 'now' || cronOk.value))
 const summary = computed(() => {
   if (!chosen.value) return 'Pick what to run'
-  const what = (base.value ? base.value.title : chosen.value.title) + (chosen.value.kind === 'pipeline' && chosen.value.builtin ? ' (distributed)' : '')
   const on = file.value ? `targets from ${file.value.name}` : `${lines.value.length} target${lines.value.length === 1 ? '' : 's'}`
-  const t = when.value === 'repeat' ? intervalLabel(intervalSeconds.value).toLowerCase() + (firstNow.value ? ', starting now' : '') : 'now'
-  return `${what} on ${on} · ${t}`
+  const what = chosen.value.title + (chosen.value.kind === 'pipeline' ? ` (workflow, ${chosen.value.steps} steps)` : '')
+  const sched = (cronDesc.value || 'cron ' + cron.value).replace(/^At /, 'at ')
+  return `${what} on ${on} · ` + (when.value === 'schedule' ? `${sched} (${tz.value})${firstNow.value ? ', first run now' : ''}` : 'now')
+})
+
+watch(templateId, async (id) => {
+  preview.value = null
+  const t = templates.value.find(x => x.id === id)
+  if (!t || t.kind !== 'pipeline') return
+  try { const full = await api.get('/templates/' + id); if (templateId.value === id) preview.value = graphFromPlan(full.plan) }
+  catch (e) { /* preview is optional */ }
 })
 
 function onFile(ev) { file.value = (ev.target.files && ev.target.files[0]) || null }
-function clearFile() { file.value = null }
 function addParam() { params.value.push({ flag: '', value: '' }) }
 
 async function start() {
@@ -66,7 +73,7 @@ async function start() {
   err.value = ''
   busy.value = true
   const vars = { custom: params.value.filter(p => p.flag.trim()) }
-  const repeat = when.value === 'repeat' ? intervalSeconds.value : null
+  const sched = when.value === 'schedule'
   try {
     let r
     if (file.value) {
@@ -74,34 +81,24 @@ async function start() {
       fd.append('template_id', chosen.value.id)
       fd.append('name', name.value)
       fd.append('vars', JSON.stringify(vars))
-      if (repeat) { fd.append('repeat_seconds', repeat); fd.append('start_now', firstNow.value) }
+      if (sched) { fd.append('cron', cron.value); fd.append('timezone', tz.value); fd.append('start_now', firstNow.value) }
       fd.append('file', file.value)
       r = await api.postForm('/scans/upload', fd)
     } else {
       r = await api.post('/scans', { template_id: chosen.value.id, name: name.value, targets: lines.value, vars,
-        repeat_seconds: repeat, start_now: firstNow.value })
+        cron: sched ? cron.value : null, timezone: tz.value || 'UTC', start_now: firstNow.value })
     }
-    if (r.id) router.push('/scans/' + r.id)
-    else router.push('/schedulers')
+    router.push(r.id ? '/scans/' + r.id : '/schedulers')
   } catch (e) { err.value = e.message } finally { busy.value = false }
 }
 
 onMounted(async () => {
-  const [t, s] = await Promise.all([api.get('/templates'), api.get('/stats').catch(() => null)])
-  templates.value = t
-  stats.value = s
+  const [t, inp, s] = await Promise.all([api.get('/templates'), api.get('/templates/inputs'), api.get('/stats').catch(() => null)])
+  templates.value = t; inputs.value = inp; stats.value = s
   const q = route.query
   if (q.targets) targetsText.value = String(q.targets).split(',').join('\n')
-  if (q.repeat) when.value = 'repeat'
-  if (q.template) {
-    const pre = t.find(x => String(x.id) === String(q.template))
-    if (pre && pre.kind === 'pipeline' && pre.builtin && pre.variant_of) {
-      const b = t.find(x => x.name === pre.variant_of)
-      if (b) { templateId.value = b.id; distributed.value = true }
-    } else if (pre) templateId.value = pre.id
-  }
-  if (q.distributed) distributed.value = true
-  else if (!q.template && s && s.slots_total >= 2) distributed.value = true   // several scanners -> spread work
+  if (q.repeat) when.value = 'schedule'
+  if (q.template && t.some(x => String(x.id) === String(q.template))) templateId.value = Number(q.template)
 })
 </script>
 
@@ -117,7 +114,7 @@ onMounted(async () => {
       <div class="row" style="gap:6px">
         <span v-if="detectLabel" class="chip detect">Detected: {{ detectLabel }}</span>
         <span v-if="unknownCount" class="chip warnchip">{{ unknownCount }} line(s) don't look like a domain, URL or IP</span>
-        <span v-if="file" class="chip">📄 {{ file.name }} ({{ Math.ceil(file.size / 1024) }} KB) <a href="#" @click.prevent="clearFile">✕</a></span>
+        <span v-if="file" class="chip">📄 {{ file.name }} ({{ Math.ceil(file.size / 1024) }} KB) <a href="#" @click.prevent="file = null">✕</a></span>
       </div>
       <label class="btn ghost sm" style="margin:0">⬆ Upload a list
         <input type="file" accept=".txt,.csv,text/plain" style="display:none" @change="onFile" />
@@ -128,10 +125,16 @@ onMounted(async () => {
   <section class="step card">
     <div class="step-h"><span class="num">2</span><h2>What should it do?</h2></div>
     <div v-if="!templates.length" class="muted">Loading…</div>
-    <ScanTypePicker v-else :templates="templates" :kind="kind" v-model="templateId" v-model:distributed="distributed" />
-    <div v-if="chosen && chosen.kind === 'pipeline'" class="muted planline">
-      ⇉ {{ chosen.steps }} steps · every result is fanned out to the next step as separate jobs ·
-      <router-link :to="'/pipelines/' + chosen.id">see the steps</router-link>
+    <ScanTypePicker v-else :templates="templates" :kind="kind" v-model="templateId" />
+    <div v-if="chosen && chosen.kind === 'pipeline'" class="wfprev">
+      <div class="row" style="justify-content:space-between">
+        <b>How “{{ chosen.title }}” runs</b>
+        <router-link :to="'/workflows/' + chosen.id" class="muted" style="font-size:12.5px">open in the workflow builder →</router-link>
+      </div>
+      <div class="muted" style="font-size:12.5px;margin:2px 0 8px">Every box runs once per item it receives, as separate jobs on all
+        scanners; the wires show what each step hands to the next.</div>
+      <WorkflowGraph v-if="preview" :model-value="preview" mode="view" :height="380" :input-labels="inputLabels" />
+      <div v-else class="muted">loading the graph…</div>
     </div>
   </section>
 
@@ -139,34 +142,21 @@ onMounted(async () => {
     <div class="step-h"><span class="num">3</span><h2>When?</h2></div>
     <div class="seg">
       <button type="button" :class="{ on: when === 'now' }" @click="when = 'now'">Run once, now</button>
-      <button type="button" :class="{ on: when === 'repeat' }" @click="when = 'repeat'">Repeat on a schedule</button>
+      <button type="button" :class="{ on: when === 'schedule' }" @click="when = 'schedule'">On a schedule (cron)</button>
     </div>
-    <div v-if="when === 'repeat'" class="formgrid" style="margin-top:8px">
-      <div>
-        <label>How often</label>
-        <Select v-model="interval" :options="intervalOpts" />
+    <template v-if="when === 'schedule'">
+      <div style="margin-top:12px"><CronInput v-model:cron="cron" v-model:timezone="tz" @valid="(v, d) => { cronOk = v; cronDesc = d }" /></div>
+      <label class="chk"><input type="checkbox" v-model="firstNow" /> also run it right now</label>
+      <div class="muted" style="font-size:12.5px;margin-top:6px">
+        Creates a <router-link to="/schedulers">scheduler</router-link>. Each run is compared with the previous one, so you see
+        what is new, still open and fixed. If a run is still going at the next tick, that tick is skipped.
       </div>
-      <div v-if="interval === -1">
-        <label>Every N hours</label>
-        <input v-model.number="customHours" type="number" min="1" max="2160" />
-      </div>
-      <div>
-        <label>First run</label>
-        <div class="seg sm">
-          <button type="button" :class="{ on: firstNow }" @click="firstNow = true">Now</button>
-          <button type="button" :class="{ on: !firstNow }" @click="firstNow = false">After the first interval</button>
-        </div>
-      </div>
-    </div>
-    <div v-if="when === 'repeat'" class="muted" style="font-size:12.5px;margin-top:8px">
-      Creates a <router-link to="/schedulers">scheduler</router-link>. Each run is compared with the previous one, so you
-      see what is new, still open and fixed. A run never starts while the previous one is still going.
-    </div>
+    </template>
 
     <div class="formgrid" style="margin-top:6px">
       <div>
         <label>Name <span class="muted">(optional)</span></label>
-        <input v-model="name" :placeholder="base ? base.title + (lines[0] ? ' — ' + lines[0] : '') : 'e.g. Weekly perimeter'" />
+        <input v-model="name" :placeholder="chosen ? chosen.title + (lines[0] ? ' — ' + lines[0] : '') : 'e.g. Weekly perimeter'" />
       </div>
     </div>
 
@@ -192,7 +182,7 @@ onMounted(async () => {
       <div v-if="err" class="err">{{ err }}</div>
     </div>
     <button class="primary" :disabled="!ready || busy" @click="start">
-      {{ busy ? 'Starting…' : (when === 'repeat' ? 'Create scheduler' : 'Start scan') }}</button>
+      {{ busy ? 'Starting…' : (when === 'schedule' ? 'Create scheduler' : 'Start scan') }}</button>
   </div>
 </template>
 
@@ -204,14 +194,15 @@ onMounted(async () => {
   background: var(--accent); color: var(--on-primary); flex: none; }
 .detect { color: var(--accent-ink); background: var(--wash); }
 .warnchip { color: var(--warn); }
-.planline { font-size: 12.5px; margin-top: 10px; }
+.wfprev { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--outline-variant); }
 .seg { display: inline-flex; border: 1px solid var(--outline-variant); border-radius: var(--radius-xl); overflow: hidden; }
 .seg button { border: 0; border-radius: 0; height: 38px; text-transform: none; letter-spacing: 0; font-weight: 500;
   color: var(--on-surface-variant); background: transparent; }
 .seg button + button { border-left: 1px solid var(--outline-variant); }
 .seg button.on { background: var(--primary-container); color: var(--accent-ink); }
 .seg button:hover { box-shadow: none; color: var(--on-surface); background: var(--sc); }
-.seg.sm button { height: 40px; }
+.chk { display: inline-flex; gap: 8px; align-items: center; cursor: pointer; margin-top: 12px; }
+.chk input { width: auto; }
 .sumbar { position: sticky; bottom: 0; margin: 18px -28px -24px; padding: 14px 28px; display: flex; gap: 16px;
   align-items: center; justify-content: space-between; background: color-mix(in srgb, var(--sc) 94%, transparent);
   border-top: 1px solid var(--outline-variant); backdrop-filter: blur(8px); z-index: 5; }

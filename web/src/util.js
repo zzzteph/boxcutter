@@ -50,23 +50,6 @@ export function timeUntil(iso) {
   return 'in ' + Math.round(s / 86400) + 'd'
 }
 
-// ---- schedules ---------------------------------------------------------------------------------------------
-export const INTERVALS = [
-  { value: 3600, label: 'Every hour' },
-  { value: 6 * 3600, label: 'Every 6 hours' },
-  { value: 12 * 3600, label: 'Every 12 hours' },
-  { value: 86400, label: 'Every day' },
-  { value: 7 * 86400, label: 'Every week' },
-  { value: 30 * 86400, label: 'Every 30 days' },
-]
-export function intervalLabel(sec) {
-  const hit = INTERVALS.find(i => i.value === sec)
-  if (hit) return hit.label
-  if (sec % 86400 === 0) return `Every ${sec / 86400} days`
-  if (sec % 3600 === 0) return `Every ${sec / 3600} hours`
-  return `Every ${Math.round(sec / 60)} min`
-}
-
 // ---- targets -------------------------------------------------------------------------------------------------
 const HOST_RE = /^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/i
 const IP_RE = /^\d{1,3}(\.\d{1,3}){3}$/
@@ -112,7 +95,7 @@ export const KIND_LABEL = {
   unknown: 'unrecognised',
 }
 
-// which template `accepts` values fit a kind of input (a target kind, or what a previous pipeline step produces)
+// which template `accepts` values fit a kind of input (a target kind, or what a previous workflow step produces)
 const FITS = {
   domain: ['domain', 'host', 'spec', 'any'],
   url: ['url', 'host', 'endpoint', 'spec', 'graphql', 'js', 'any'],
@@ -136,13 +119,3 @@ export const ACCEPTS_LABEL = {
 export const PRODUCES_LABEL = { findings: 'findings', hosts: 'hostnames', urls: 'URLs', items: 'URLs & requests' }
 export const DEPTH_LABEL = { quick: 'Quick', standard: 'Standard', deep: 'Deep' }
 
-// the template that actually runs: the chosen one, or its built-in distributed variant when that is switched on
-export function resolveTemplate(templates, id, distributed) {
-  const t = templates.find(x => x.id === id)
-  if (!t) return null
-  if (distributed) {
-    const v = templates.find(x => x.kind === 'pipeline' && x.builtin && x.variant_of === t.name)
-    if (v) return v
-  }
-  return t
-}

@@ -171,11 +171,12 @@ def _spec(t: Template) -> dict:
         return {}
 
 
-def atomic_stage(t: Template, frm=None, input_name: str = "all", args: str = "") -> dict:
+def atomic_stage(t: Template, frm=None, input_name: str = "all", args: str = "", label: str = "") -> dict:
     spec = _spec(t)
-    return {"template_id": t.id, "template": t.name, "title": t.title or t.name, "kind": t.kind,
+    return {"template_id": t.id, "template": t.name, "title": label or t.title or t.name, "kind": t.kind,
             "engine": spec.get("name") or t.name, "params": spec.get("params") or [],
-            "produces": t.produces, "accepts": t.accepts,
+            "produces": t.produces, "accepts": t.accepts, "category": t.category,
+            "description": t.description,
             "from": list(frm if frm is not None else [SEED]), "input": input_name, "args": args or ""}
 
 
@@ -191,7 +192,7 @@ def build_plan(session: Session, template: Template) -> list[dict]:
 def flatten(session: Session, stages: list, _seen: set | None = None) -> list[dict]:
     """Validate a raw stage list and inline any nested pipeline. Returns the plan (stage dicts, indexed)."""
     if not isinstance(stages, list) or not stages:
-        raise PlanError("a pipeline needs at least one step")
+        raise PlanError("a workflow needs at least one step")
     seen = set(_seen or ())
     plan: list[dict] = []
     # raw stage index -> the plan indexes that represent its OUTPUT (an atomic stage: itself; an inlined
@@ -257,7 +258,7 @@ def flatten(session: Session, stages: list, _seen: set | None = None) -> list[di
                 plan.append(s)
             out_of[i] = [base + j for j in range(len(sub)) if j not in sub_parents]
         else:
-            plan.append(atomic_stage(t, frm, input_name, args))
+            plan.append(atomic_stage(t, frm, input_name, args, str(raw.get("label") or "").strip()[:80]))
             out_of[i] = [len(plan) - 1]
         if len(plan) > MAX_STAGES:
             raise PlanError(f"too many steps once expanded (max {MAX_STAGES})")

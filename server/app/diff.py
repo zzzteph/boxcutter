@@ -98,7 +98,7 @@ def fingerprint(target: str, kind: str, cls: str, severity: str, url: str, title
 
 
 def upsert_finding(session: Session, scan_id: int, kind: str, target: str, f: dict,
-                   run_no: int = 0) -> tuple[str, bool]:
+                   run_no: int = 0, stage: int = 0) -> tuple[str, bool]:
     """Insert or refresh a finding from one engine-envelope item; returns (fingerprint, created). A resolved
     finding that shows up again flips back to open. `last_seen` is bumped on every sighting — reconcile uses it
     to decide what this run saw. The (scan_id, fingerprint) lookup is indexed for fast ingestion at scale."""
@@ -119,7 +119,7 @@ def upsert_finding(session: Session, scan_id: int, kind: str, target: str, f: di
         severity=str(f.get("severity", "info")).title(), title=str(f.get("title", ""))[:300],
         url=f.get("url", ""),
         evidence=str(f.get("evidence", ""))[:2000], reproduce=str(f.get("reproduce", ""))[:2000],
-        raw_json=raw, state="new", first_seen=now, last_seen=now)
+        raw_json=raw, state="new", first_seen=now, last_seen=now, stage=stage)
     finding.cls = str(f.get("cls", "")).lower()   # 'cls' can't be a constructor kwarg (shadows __new__)
     session.add(finding)
     session.flush()                           # so a duplicate in the same result batch is seen as existing

@@ -138,8 +138,8 @@ NUCLEI_PASSES = [("exposures", "critical,high,medium,low"), ("misconfig", "criti
                  ("panel", "critical,high,medium")]
 
 
-def st(t: str, frm=(SEED,), inp: str | None = None, args: str = "") -> dict:
-    return {"t": t, "from": list(frm), "input": inp, "args": args}
+def st(t: str, frm=(SEED,), inp: str | None = None, args: str = "", label: str = "") -> dict:
+    return {"t": t, "from": list(frm), "input": inp, "args": args, "label": label}
 
 
 def graft(sub: list[dict], parents: list[int], offset: int) -> list[dict]:
@@ -158,7 +158,8 @@ def chain(base: list[dict], sub: list[dict], parents: list[int]) -> list[dict]:
 
 
 def _web_nuclei():
-    return [st("nuclei", inp="urls", args=f'--opt-args="-tags {tag} -severity {sev}"') for tag, sev in NUCLEI_PASSES]
+    return [st("nuclei", inp="urls", args=f'--opt-args="-tags {tag} -severity {sev}"', label=f"nuclei · {tag}")
+            for tag, sev in NUCLEI_PASSES]
 
 
 def _web(mode: str):
@@ -167,25 +168,25 @@ def _web(mode: str):
          st("js-endpoints", [0, 1], "js-urls")]                   # 2
     if mode == "scan":
         s += [st("endpoint-scan", [0, 1, 2], "param-urls"),       # 3
-              st("fuzz", [1], "writes", "--timeout 120"),         # 4
+              st("fuzz", [1], "writes", "--timeout 120", "Fuzz POST/PUT bodies"),  # 4
               st("swagger-specs", inp="urls"),                    # 5
               st("swagger-scan", [5], "urls")]                    # 6
     elif mode == "fuzz":
-        s += [st("fuzz", [0, 1, 2], "param-urls", "--timeout 120"),
-              st("fuzz", [1], "writes", "--timeout 120"),
+        s += [st("fuzz", [0, 1, 2], "param-urls", "--timeout 120", "Fuzz parameters"),
+              st("fuzz", [1], "writes", "--timeout 120", "Fuzz POST/PUT bodies"),
               st("swagger-specs", inp="urls"),
-              st("swagger-endpoints", [5], "urls", "--fuzzable"),
-              st("fuzz", [6], "urls", "--timeout 120")]
+              st("swagger-endpoints", [5], "urls", "--fuzzable", "OpenAPI endpoints (fuzzable)"),
+              st("fuzz", [6], "urls", "--timeout 120", "Fuzz API endpoints")]
     else:  # sqlmap
-        s += [st("sqlmap", [0, 1, 2], "param-urls"),
-              st("sqlmap", [1], "writes"),
+        s += [st("sqlmap", [0, 1, 2], "param-urls", label="sqlmap on parameters"),
+              st("sqlmap", [1], "writes", label="sqlmap on POST/PUT bodies"),
               st("swagger-specs", inp="urls"),
               st("swagger-endpoints", [5], "urls"),
-              st("sqlmap", [6], "urls")]
+              st("sqlmap", [6], "urls", label="sqlmap on API endpoints")]
     gd = len(s)
     s += [st("graphql-detect", inp="urls"),
           st("graphql-audit", [gd], "urls"),
-          st("scan-secrets", [0, 1], "js-urls")]
+          st("scan-secrets", [0, 1], "js-urls", label="Secrets in crawled JS")]
     return s
 
 
@@ -196,11 +197,12 @@ def _recon():
 
 def _secrets():
     return [st("katana-crawl", inp="urls"), st("harvest", inp="urls", args=HARVEST_DEEP),
-            st("wayback", inp="hosts"), st("scan-secrets", [0, 1, 2], "js-urls")]
+            st("wayback", inp="hosts"), st("scan-secrets", [0, 1, 2], "js-urls", label="Secrets in JS files")]
 
 
 def _wayback(consumer: str):
-    return [st("wayback", inp="hosts"), st("scan-secrets", [0], "js-urls"), st(consumer, [0], "param-urls")]
+    return [st("wayback", inp="hosts"), st("scan-secrets", [0], "js-urls", label="Secrets in archived JS"),
+            st(consumer, [0], "param-urls", label="Scan archived parameters" if consumer == "endpoint-scan" else "Fuzz archived parameters")]
 
 
 def _subs():
@@ -219,7 +221,7 @@ DISTRIBUTED: dict[str, list[dict]] = {
     "web-nuclei": _web_nuclei(),
     "web-crawl": [st("katana-crawl", inp="urls"), st("harvest", inp="urls", args=HARVEST_DEEP)],
     "spa-scan": [st("harvest", inp="urls", args=HARVEST_DEEP), st("endpoint-scan", [0], "param-urls"),
-                 st("fuzz", [0], "writes", "--timeout 120"), st("graphql-detect", inp="urls"),
+                 st("fuzz", [0], "writes", "--timeout 120", "Fuzz POST/PUT bodies"), st("graphql-detect", inp="urls"),
                  st("graphql-audit", [3], "urls"), st("scan-secrets", [0], "js-urls")],
     "recon": _recon(),
     "recon-http": _recon() + [st("httpx", [3], "hosts")],
@@ -231,7 +233,7 @@ DISTRIBUTED: dict[str, list[dict]] = {
     "wayback-scan": _wayback("endpoint-scan"),
     "wayback-fuzz": _wayback("fuzz"),
     "env-nuclei": chain(_subs() + [st("httpx", [0, 1], "hosts")], _web_nuclei(), [2]),
-    "env-takeover": _subs() + [st("nuclei", [0, 1], "hosts", '--opt-args="-tags takeover"')],
+    "env-takeover": _subs() + [st("nuclei", [0, 1], "hosts", '--opt-args="-tags takeover"', "nuclei · takeover")],
     "env-secrets": chain(_recon() + [st("httpx", [3], "hosts")], _secrets(), [4]),
     "env-wayback": _subs() + [st("wayback", [0, 1], "hosts"), st("endpoint-scan", [2], "param-urls")],
     "env-wayback-secrets": chain(_subs(), _secrets(), [0, 1]),
@@ -278,7 +280,7 @@ def seed_templates(s: Session) -> None:
         kind, title, cat, accepts, _produces, depth, desc = CATALOG[wf]
         spec = {"stages": [{"template_id": ids[x["t"]], "from": x["from"],
                             "input": x["input"] or DEFAULT_INPUT.get(CATALOG[x["t"]][3], "all"),
-                            "args": x["args"]} for x in stages]}
+                            "args": x["args"], "label": x.get("label", "")} for x in stages]}
         name = distributed_name(wf)
         wanted.add(name)
         _upsert(s, name, kind="pipeline", title=title, category=cat, accepts=accepts,

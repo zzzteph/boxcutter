@@ -7,9 +7,9 @@ const routes = [
   { path: '/scans/new', component: () => import('./views/NewScan.vue') },
   { path: '/scans/:id', component: () => import('./views/ScanDetail.vue') },
   { path: '/schedulers', component: () => import('./views/Schedulers.vue') },
-  { path: '/pipelines', component: () => import('./views/Pipelines.vue') },
-  { path: '/pipelines/new', component: () => import('./views/PipelineEditor.vue') },
-  { path: '/pipelines/:id', component: () => import('./views/PipelineEditor.vue') },
+  { path: '/workflows', component: () => import('./views/Workflows.vue') },
+  { path: '/workflows/new', component: () => import('./views/WorkflowBuilder.vue') },
+  { path: '/workflows/:id', component: () => import('./views/WorkflowBuilder.vue') },
   { path: '/findings', component: () => import('./views/Findings.vue') },
   { path: '/scanners', component: () => import('./views/Fleet.vue') },
   { path: '/scanners/:id', component: () => import('./views/RunnerDetail.vue') },
@@ -17,7 +17,8 @@ const routes = [
   { path: '/settings', component: () => import('./views/Settings.vue') },
   // old paths
   { path: '/monitoring', redirect: '/schedulers' },
-  { path: '/templates', redirect: '/pipelines' },
+  { path: '/templates', redirect: '/workflows' },
+  { path: '/pipelines', redirect: '/workflows' },
   { path: '/fleet', redirect: '/scanners' },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
 ]

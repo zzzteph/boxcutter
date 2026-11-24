@@ -63,7 +63,7 @@ boxcutter raw nuclei -u https://example.com -t cves
 `harvest` `js-endpoints` · `nuclei` `sqlmap` `fuzz` · `scan-secrets` · `swagger-specs` `swagger-endpoints` ·
 `graphql-detect` `graphql-audit`. Only the tools the bundled workflows use ship.
 
-**Workflows:** `web-full` `web-scan` `web-nuclei` `web-fuzz` `web-sqlmap` `spa-scan` `endpoint-scan` `web-crawl`
+**Templates** (YAML workflows of the engine): `web-full` `web-scan` `web-nuclei` `web-fuzz` `web-sqlmap` `spa-scan` `endpoint-scan` `web-crawl`
 `swagger-scan` `swagger-fuzz` `graphql-scan` `secrets-scan` `wayback-scan` `wayback-fuzz` `recon` `recon-http`
 `ip-discover` `env-scan` `env-nuclei` `env-takeover` `env-secrets` `env-wayback` `env-wayback-secrets`.
 
@@ -87,27 +87,30 @@ add more scanners (below).
 **New scan** is three steps on one page:
 
 1. **What to scan** — paste domains, URLs, IPs or CIDRs (or upload a list). The kind is detected as you type.
-2. **What to do** — scan-type cards that fit those targets: a short *Recommended* row, then groups (Websites,
-   Environment, Discovery, APIs, Secrets, Web archive, Network), a search box, and single tools folded under
-   *Advanced*. Each card says what it needs, what it gives and how heavy it is. For any workflow that has one,
-   **Distribute across scanners** runs its distributed version (on by default when you have 2+ job slots).
-3. **When** — run once now, or **repeat on a schedule** (hourly … monthly, or custom), which creates a scheduler.
+2. **What to do** — two tabs of cards that fit those targets: **Workflows** (multi-step, the work spreads over all
+   scanners) and **Templates** (one job per target: a bundled scan template or a single tool). A short
+   *Recommended* row comes first, then groups (Websites, Environment, Discovery, APIs, Secrets, Web archive,
+   Network) and a search box. Pick a workflow and its graph is drawn right there, so you see how it will run.
+3. **When** — run once now, or **on a schedule**: a cron expression with a time zone (presets for the usual ones),
+   checked live — "At 03:00 on Monday · next: Mon 30 Nov 03:00, …". That creates a scheduler.
 
 A summary bar says exactly what will run before you start it.
 
-**Schedulers** are named recurring scans: what, on what targets, how often. Each run is compared with the
-previous one, so findings are *new*, *open* or *resolved*. A run never starts while the previous one is still
-going. Pause, resume, run now or edit from the Schedulers page.
+**Workflows** are graphs of steps. Every step runs one template once per item it receives — each run a separate
+job that any scanner picks up — and hands what it finds (hostnames, URLs, URLs with parameters, JavaScript
+files, POST/PUT requests) to the steps wired after it, as soon as each job finishes. Build your own in the
+**workflow builder**: add steps from the palette, drag from a step's dot onto another step to wire them, pick
+what kind of results each step takes, name steps, nest other workflows. Every bundled template that loops over
+hosts or URLs also ships as a built-in workflow (21 of them, e.g. *Whole environment scan* as 23 steps) — open one
+to see its graph, duplicate it to change it.
 
-**Pipelines** chain scan types: step 1 runs on your targets; each next step takes the results of earlier steps,
-filtered by data type — *hostnames*, *URLs*, *URLs with parameters*, *JavaScript files*, *POST/PUT requests* —
-and runs on every one of them as a **separate job, shared by all scanners**. Results stream: the next step
-starts as soon as the first result arrives. Example: *Find subdomains* → *httpx* → *nuclei on each live site*.
-A step can read from several earlier steps (their union, de-duplicated) and can be another pipeline.
+**A scan's page** shows its workflow **live**: every step with its state, jobs, what it found and its findings,
+wires animated while data flows. Click a step for its own log and to filter findings / discovered assets / jobs
+to just that step.
 
-**Built-in distributed workflows**: every bundled workflow that loops over hosts or URLs also exists as a
-pipeline (21 of them, e.g. `env-scan` as 23 steps), so a big scan spreads over the whole fleet instead of
-running in one process. They are read-only; duplicate one to customise it.
+**Schedulers** are named recurring scans: what, on what targets, and a cron schedule. Each run is compared with
+the previous one, so findings are *new*, *open* or *resolved*. Runs never stack: if one is still going at the
+next tick, that tick is skipped (and logged). Pause, resume, run now or edit from the Schedulers page.
 
 **Notifications** (Settings): Telegram and Slack (incoming webhook) — new findings of the severities you pick,
 and a summary when a scan finishes. `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `SLACK_WEBHOOK_URL` pre-fill
@@ -118,8 +121,8 @@ no CORS).
 
 ## Scanners (agents)
 
-Every scanner pulls jobs from the server and runs them. More scanners = faster scans, especially distributed
-workflows and pipelines. On the server's **Scanners** page click **New enroll token**, then on any host:
+Every scanner pulls jobs from the server and runs them. More scanners = faster scans, especially
+workflows. On the server's **Scanners** page click **New enroll token**, then on any host:
 
 ```bash
 docker run -d --name boxcutter-agent \
@@ -173,4 +176,4 @@ Scanning is done by these projects. Credit to their authors:
 - [trufflehog](https://github.com/trufflesecurity/trufflehog): secret detection
 - [nmap](https://nmap.org/): host discovery
 
-boxcutter adds the CLI, the JSON envelope, the YAML workflows, the distributed pipeline engine and the UI.
+boxcutter adds the CLI, the JSON envelope, the YAML templates, the distributed workflow engine and the UI.

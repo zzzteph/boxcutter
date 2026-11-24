@@ -156,7 +156,8 @@ def job_result(job_id: int, body: ResultIn, runner: Runner = Depends(current_run
         # are listed in the scan's Assets AND flow into the next pipeline stage(s)
         as_finding = (env_kind == "findings") if env_kind else (isinstance(f, dict) and is_issue(f))
         if as_finding and isinstance(f, dict) and is_issue(f):
-            _, created = upsert_finding(session, job.scan_id, kind, target.value, f, run_no=job.run_no)
+            _, created = upsert_finding(session, job.scan_id, kind, target.value, f, run_no=job.run_no,
+                                        stage=job.stage)
             if created:
                 new_findings.append({"severity": str(f.get("severity", "info")).title(),
                                      "title": str(f.get("title", ""))[:200], "url": str(f.get("url", "")),

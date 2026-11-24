@@ -113,6 +113,7 @@ class Finding(SQLModel, table=True):
                       Index("ix_finding_scan_sev", "scan_id", "severity"))
     id: Optional[int] = Field(default=None, primary_key=True)
     scan_id: int = Field(index=True)
+    stage: int = 0                                               # the workflow step that first reported it
     target: str = Field(default="", max_length=1024)
     fingerprint: str = Field(index=True, max_length=128)
     template_kind: str = Field(default="", max_length=32)
@@ -149,14 +150,15 @@ class ScanItem(SQLModel, table=True):
 
 
 class Scheduler(SQLModel, table=True):
-    """A recurring scan: a name, how often, what to run and on what. It owns one Scan and re-runs it every
-    `interval_seconds`, so the findings diff over time (new / open / resolved)."""
+    """A recurring scan: a name, a cron schedule, what to run and on what. It owns one Scan and re-runs it on
+    every cron tick, so the findings diff over time (new / open / resolved)."""
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(max_length=200)
     template_id: int = Field(index=True)
     targets_text: str = _text("")                               # one target per line
     vars_json: str = _text("{}")
-    interval_seconds: int = 86400
+    cron: str = Field(default="0 3 * * *", max_length=120)       # 5-field cron expression
+    timezone: str = Field(default="UTC", max_length=64)          # IANA zone the cron is evaluated in
     enabled: bool = True
     scan_id: Optional[int] = Field(default=None, index=True)
     last_run_at: Optional[datetime] = None

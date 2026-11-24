@@ -58,6 +58,7 @@ class TemplateIn(BaseModel):
     description: str = ""
     kind: str = "pipeline"                 # pipeline | preset (a tool/workflow with fixed extra arguments)
     stages: list[dict] = []                # pipeline: [{template_id, from, input, args}]
+    layout: list = []                      # pipeline: [{x, y}] canvas position of each step (the builder)
     base_template_id: int | None = None    # preset: the tool/workflow it wraps
     params: list[dict] = []                # preset: [{flag, value}]
 
@@ -80,8 +81,8 @@ def _clean_stages(stages: list[dict]) -> list[dict]:
             frm = [SEED] if i == 0 else [i - 1]
         if not isinstance(frm, list):
             frm = [frm]
-        out.append({"template_id": s.get("template_id"), "from": frm,
-                    "input": s.get("input") or None, "args": str(s.get("args") or "").strip()})
+        out.append({"template_id": s.get("template_id"), "from": frm, "input": s.get("input") or None,
+                    "args": str(s.get("args") or "").strip(), "label": str(s.get("label") or "").strip()[:80]})
     return out
 
 
@@ -113,7 +114,9 @@ def _apply(session: Session, t: Template, body: TemplateIn) -> None:
             s["input"] = s["input"] or DEFAULT_INPUT.get(st.accepts if st else "any", "all")
             s["template_id"] = int(s["template_id"])
             s["from"] = [int(f) for f in s["from"]]
-        t.spec_json = json.dumps({"stages": stages})
+        layout = [{"x": float(p.get("x", 0)), "y": float(p.get("y", 0))} if isinstance(p, dict) else None
+                  for p in (body.layout or [])][:len(stages)]
+        t.spec_json = json.dumps({"stages": stages, "layout": layout})
     elif body.kind == "preset":
         base = session.get(Template, body.base_template_id or 0)
         if base is None or base.kind not in ("tool", "workflow"):
@@ -125,7 +128,7 @@ def _apply(session: Session, t: Template, body: TemplateIn) -> None:
         t.spec_json = json.dumps({"name": _spec(base).get("name") or base.name, "params": params,
                                   "base": base.name})
     else:
-        raise HTTPException(400, "kind must be pipeline or preset")
+        raise HTTPException(400, "kind must be pipeline (a workflow) or preset")
 
 
 @router.post("")

@@ -5,7 +5,7 @@ import asyncio
 import csv
 import io
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
@@ -17,13 +17,13 @@ from ..activity import log_activity
 from ..db import engine, get_session
 from ..models import Activity, Finding, Job, JobEvent, Scan, ScanItem, Scheduler, Target, Template
 from ..pipeline import INPUTS, SEED, PlanError
-from ..queue import enqueue_entry_stages, fire_scheduler, load_plan, maybe_finish_scan, on_scan_done, start_run
+from ..cron import CronError, describe as describe_cron, validate as validate_cron
+from ..queue import (enqueue_entry_stages, fire_scheduler, load_plan, maybe_finish_scan, next_run, on_scan_done,
+                     start_run)
 
 router = APIRouter(prefix="/scans", tags=["scans"])
 
 _CHUNK = 1000
-MIN_INTERVAL = 900                   # 15 min floor for schedulers
-MAX_INTERVAL = 90 * 24 * 3600
 
 
 def ingest_targets(session: Session, scan_id: int, lines, seen: set | None = None) -> int:
@@ -73,8 +73,9 @@ class ScanIn(BaseModel):
     template_id: int
     targets: list[str] = []
     vars: dict | None = None             # {custom: [{flag, value}]}
-    repeat_seconds: int | None = None    # set -> create a scheduler that re-runs this every N seconds
-    start_now: bool = True               # with repeat: run the first time now (else at the first interval)
+    cron: str | None = None              # set -> create a scheduler that re-runs this on that cron schedule
+    timezone: str = "UTC"                # IANA zone the cron is evaluated in
+    start_now: bool = True               # with cron: also run it right now (else wait for the first tick)
 
 
 def _default_name(tmpl: Template, first_target: str) -> str:
@@ -83,22 +84,24 @@ def _default_name(tmpl: Template, first_target: str) -> str:
 
 
 def _create(session: Session, name: str, tmpl: Template, lines, vars_: dict,
-            repeat_seconds: int | None, start_now: bool) -> dict:
+            cron: str | None, tz: str, start_now: bool) -> dict:
     lines = list(lines)
     first = next((ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")), "")
     name = (name or "").strip() or _default_name(tmpl, first)
     if not first:
         raise HTTPException(400, "add at least one target")
-    if repeat_seconds:
-        interval = max(MIN_INTERVAL, min(int(repeat_seconds), MAX_INTERVAL))
-        now = datetime.now(timezone.utc)
-        sch = Scheduler(name=name, template_id=tmpl.id, targets_text="\n".join(lines), interval_seconds=interval,
-                        vars_json=json.dumps(vars_), enabled=True,
-                        next_run_at=now if start_now else now + timedelta(seconds=interval))
+    if cron:
+        try:
+            expr = validate_cron(cron, tz)
+        except CronError as e:
+            raise HTTPException(400, str(e))
+        sch = Scheduler(name=name, template_id=tmpl.id, targets_text="\n".join(lines), cron=expr, timezone=tz,
+                        vars_json=json.dumps(vars_), enabled=True)
+        sch.next_run_at = next_run(sch)
         session.add(sch)
         session.commit()
         session.refresh(sch)
-        log_activity(session, "scheduler_created", f"Scheduler '{name}' created (every {interval // 60} min)")
+        log_activity(session, "scheduler_created", f"Scheduler '{name}' created ({describe_cron(expr)})")
         jobs = fire_scheduler(session, sch) if start_now else 0
         return {"id": sch.scan_id, "scheduler_id": sch.id, "jobs": jobs}
     scan = Scan(name=name[:255], template_id=tmpl.id, template_name=tmpl.title or tmpl.name, status="queued",
@@ -126,17 +129,18 @@ def _template_or_404(session: Session, tid: int) -> Template:
 @router.post("")
 def create_scan(body: ScanIn, session: Session = Depends(get_session)):
     tmpl = _template_or_404(session, body.template_id)
-    return _create(session, body.name, tmpl, body.targets, body.vars or {}, body.repeat_seconds, body.start_now)
+    return _create(session, body.name, tmpl, body.targets, body.vars or {}, body.cron, body.timezone, body.start_now)
 
 
 @router.post("/upload")
 def create_scan_upload(template_id: int = Form(...), name: str = Form(""), vars: str | None = Form(None),
-                       repeat_seconds: int | None = Form(None), start_now: bool = Form(True),
+                       cron: str | None = Form(None), timezone_: str = Form("UTC", alias="timezone"),
+                       start_now: bool = Form(True),
                        file: UploadFile = File(...), session: Session = Depends(get_session)):
     """Create a scan whose targets come from an uploaded file (one per line) - for very large lists."""
     tmpl = _template_or_404(session, template_id)
     text = io.TextIOWrapper(file.file, encoding="utf-8", errors="replace")
-    return _create(session, name, tmpl, text, _vars(vars), repeat_seconds, start_now)
+    return _create(session, name, tmpl, text, _vars(vars), cron, timezone_, start_now)
 
 
 # ---- list / detail ------------------------------------------------------------------------------------------
@@ -194,6 +198,8 @@ def _stages(session: Session, scan: Scan) -> list[dict]:
         jobs.setdefault(st, {})[status] = c
     items = dict(session.exec(select(ScanItem.stage, func.count()).where(
         ScanItem.scan_id == scan.id, ScanItem.run_no == scan.run_no).group_by(ScanItem.stage)).all())
+    found = dict(session.exec(select(Finding.stage, func.count()).where(
+        Finding.scan_id == scan.id, Finding.state != "resolved").group_by(Finding.stage)).all())
     done_state: dict[int, bool] = {}
     live = scan.status in ("running", "paused")
 
@@ -225,7 +231,8 @@ def _stages(session: Session, scan: Scan) -> list[dict]:
                     "jobs": {"total": total, "done": d.get("done", 0), "failed": d.get("failed", 0),
                              "cancelled": d.get("cancelled", 0), "pending": d.get("pending", 0),
                              "running": d.get("running", 0) + d.get("claimed", 0)},
-                    "items": items.get(i, 0)})
+                    "items": items.get(i, 0), "findings": found.get(i, 0),
+                    "description": st.get("description", "")})
     return out
 
 
@@ -244,8 +251,9 @@ def get_scan(scan_id: int, session: Session = Depends(get_session)):
     out.update({"targets": targets, "vars": vars_, "stages": _stages(session, scan),
                 "template_info": ({"id": tmpl.id, "title": tmpl.title or tmpl.name, "kind": tmpl.kind,
                                    "builtin": tmpl.builtin, "description": tmpl.description} if tmpl else None),
-                "scheduler": ({"id": sch.id, "name": sch.name, "interval_seconds": sch.interval_seconds,
-                               "enabled": sch.enabled, "next_run_at": sch.next_run_at} if sch else None)})
+                "scheduler": ({"id": sch.id, "name": sch.name, "cron": sch.cron, "timezone": sch.timezone,
+                               "schedule": describe_cron(sch.cron), "enabled": sch.enabled,
+                               "next_run_at": sch.next_run_at} if sch else None)})
     return out
 
 
@@ -450,8 +458,10 @@ _FINDING_SORTS = {"title": Finding.title, "target": Finding.target, "state": Fin
                   "last_seen": Finding.last_seen}
 
 
-def _finding_conds(scan_id, state, severity, target, q):
+def _finding_conds(scan_id, state, severity, target, q, stage=None):
     conds = [Finding.scan_id == scan_id]
+    if stage is not None:
+        conds.append(Finding.stage == stage)
     if state == "active":
         conds.append(Finding.state != "resolved")
     elif state in ("new", "open", "resolved"):
@@ -476,11 +486,11 @@ def _finding_order(sort, dir):
 
 @router.get("/{scan_id}/findings")
 def scan_findings(scan_id: int, state: str | None = None, severity: str | None = None, target: str | None = None,
-                  q: str | None = None, sort: str = "severity", dir: str = "asc", limit: int = 50,
-                  offset: int = 0, session: Session = Depends(get_session)):
+                  q: str | None = None, stage: int | None = None, sort: str = "severity", dir: str = "asc",
+                  limit: int = 50, offset: int = 0, session: Session = Depends(get_session)):
     _scan_or_404(session, scan_id)
     limit, offset = _clamp(limit, offset)
-    conds = _finding_conds(scan_id, state, severity, target, q)
+    conds = _finding_conds(scan_id, state, severity, target, q, stage)
     total = session.exec(select(func.count()).select_from(Finding).where(*conds)).one()
     rows = session.exec(select(Finding).where(*conds).order_by(_finding_order(sort, dir), Finding.id.desc())
                         .offset(offset).limit(limit)).all()
@@ -673,12 +683,14 @@ def scan_jobs(scan_id: int, status: str | None = None, q: str | None = None, sta
 
 
 @router.get("/{scan_id}/events")
-def scan_events(scan_id: int, since: int = 0, tail: int = 0, job_id: int | None = None,
+def scan_events(scan_id: int, since: int = 0, tail: int = 0, job_id: int | None = None, stage: int | None = None,
                 session: Session = Depends(get_session)):
     _scan_or_404(session, scan_id)
     conds = [JobEvent.scan_id == scan_id]
     if job_id is not None:
         conds.append(JobEvent.job_id == job_id)
+    if stage is not None:                      # one workflow step's log, across all its jobs
+        conds.append(JobEvent.job_id.in_(select(Job.id).where(Job.scan_id == scan_id, Job.stage == stage)))
     if tail and tail > 0:
         rows = list(reversed(session.exec(select(JobEvent).where(*conds)
                                           .order_by(JobEvent.id.desc()).limit(min(tail, 1000))).all()))

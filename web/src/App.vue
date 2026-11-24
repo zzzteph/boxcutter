@@ -32,7 +32,7 @@ onUnmounted(() => clearInterval(timer))
       <router-link to="/dashboard">Overview</router-link>
       <router-link to="/scans" :class="{ 'router-link-active': route.path.startsWith('/scans/') && route.path !== '/scans/new' }">Scans</router-link>
       <router-link to="/schedulers">Schedulers</router-link>
-      <router-link to="/pipelines">Pipelines</router-link>
+      <router-link to="/workflows">Workflows</router-link>
       <router-link to="/findings">Findings</router-link>
       <router-link to="/scanners">Scanners</router-link>
       <router-link to="/activity">Activity<span v-if="unseen" class="navbadge">{{ unseen > 99 ? '99+' : unseen }}</span></router-link>

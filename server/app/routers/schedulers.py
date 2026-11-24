@@ -1,20 +1,22 @@
-"""Schedulers: a named, recurring scan - what to run, on what, and how often. Each one owns a Scan that it
-re-runs every interval, so the findings diff over time (new / open / resolved)."""
+"""Schedulers: a named, recurring scan - what to run, on what, and a cron schedule. Each one owns a Scan that it
+re-runs on every tick, so the findings diff over time (new / open / resolved)."""
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from ..activity import log_activity
+from ..cron import CronError, describe, next_runs, validate
 from ..db import get_session
 from ..models import Scan, Scheduler, Target, Template
 from ..pipeline import SEED
-from ..queue import fire_scheduler
-from .scans import MAX_INTERVAL, MIN_INTERVAL, ingest_targets
+from ..queue import fire_scheduler, next_run
+from .scans import ingest_targets
 
 router = APIRouter(prefix="/schedulers", tags=["schedulers"])
 
@@ -25,8 +27,8 @@ def _out(session: Session, s: Scheduler) -> dict:
     targets = [ln for ln in (s.targets_text or "").splitlines() if ln.strip()]
     return {"id": s.id, "name": s.name, "template_id": s.template_id,
             "template": (tmpl.title or tmpl.name) if tmpl else "(deleted)",
-            "template_kind": tmpl.kind if tmpl else "", "interval_seconds": s.interval_seconds,
-            "enabled": s.enabled, "targets": targets, "targets_count": len(targets),
+            "template_kind": tmpl.kind if tmpl else "", "cron": s.cron, "timezone": s.timezone,
+            "schedule": describe(s.cron), "enabled": s.enabled, "targets": targets, "targets_count": len(targets),
             "vars": json.loads(s.vars_json or "{}"), "scan_id": s.scan_id,
             "scan_status": scan.status if scan else None, "run_no": scan.run_no if scan else 0,
             "last_run_at": s.last_run_at, "next_run_at": s.next_run_at, "created_at": s.created_at}
@@ -37,18 +39,33 @@ def list_schedulers(session: Session = Depends(get_session)):
     return [_out(session, s) for s in session.exec(select(Scheduler).order_by(Scheduler.id.desc())).all()]
 
 
+@router.get("/cron-preview")
+def cron_preview(expr: str, tz: str = "UTC"):
+    """Live check for the cron field: is it valid, what does it mean, when are the next runs."""
+    try:
+        e = validate(expr, tz)
+        return {"ok": True, "error": "", "cron": e, "description": describe(e),
+                "next": [d.isoformat() for d in next_runs(e, tz, 3)]}
+    except CronError as err:
+        return {"ok": False, "error": str(err), "cron": expr, "description": "", "next": []}
+
+
 class SchedulerIn(BaseModel):
     name: str | None = None
     template_id: int | None = None
     targets: list[str] | None = None
-    interval_seconds: int | None = None
+    cron: str | None = None
+    timezone: str | None = None
     enabled: bool | None = None
     vars: dict | None = None
     start_now: bool = False
 
 
-def _interval(v: int) -> int:
-    return max(MIN_INTERVAL, min(int(v), MAX_INTERVAL))
+def _cron(expr: str, tz: str) -> str:
+    try:
+        return validate(expr, tz)
+    except CronError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.post("")
@@ -59,16 +76,15 @@ def create_scheduler(body: SchedulerIn, session: Session = Depends(get_session))
     targets = [t.strip() for t in (body.targets or []) if t.strip()]
     if not targets:
         raise HTTPException(400, "add at least one target")
-    interval = _interval(body.interval_seconds or 86400)
-    now = datetime.now(timezone.utc)
+    tz = body.timezone or "UTC"
     sch = Scheduler(name=(body.name or tmpl.title or tmpl.name).strip()[:200], template_id=tmpl.id,
-                    targets_text="\n".join(targets), interval_seconds=interval,
-                    enabled=True if body.enabled is None else body.enabled, vars_json=json.dumps(body.vars or {}),
-                    next_run_at=now if body.start_now else now + timedelta(seconds=interval))
+                    targets_text="\n".join(targets), cron=_cron(body.cron or "0 3 * * *", tz), timezone=tz,
+                    enabled=True if body.enabled is None else body.enabled, vars_json=json.dumps(body.vars or {}))
+    sch.next_run_at = next_run(sch) if sch.enabled else None
     session.add(sch)
     session.commit()
     session.refresh(sch)
-    log_activity(session, "scheduler_created", f"Scheduler '{sch.name}' created (every {interval // 60} min)")
+    log_activity(session, "scheduler_created", f"Scheduler '{sch.name}' created ({describe(sch.cron)})")
     if body.start_now and sch.enabled:
         fire_scheduler(session, sch)
     return _out(session, sch)
@@ -87,7 +103,6 @@ def update_scheduler(sid: int, body: SchedulerIn, session: Session = Depends(get
     s = session.get(Scheduler, sid)
     if not s:
         raise HTTPException(404)
-    now = datetime.now(timezone.utc)
     scan = session.get(Scan, s.scan_id) if s.scan_id else None
     if body.name is not None and body.name.strip():
         s.name = body.name.strip()[:200]
@@ -100,16 +115,12 @@ def update_scheduler(sid: int, body: SchedulerIn, session: Session = Depends(get
         s.template_id = tmpl.id
         if scan:                               # takes effect on the next run
             scan.template_id, scan.template_name = tmpl.id, tmpl.title or tmpl.name
-    if body.interval_seconds is not None:
-        s.interval_seconds = _interval(body.interval_seconds)
-        if s.enabled:
-            base = s.last_run_at or now
-            if base.tzinfo is None:
-                base = base.replace(tzinfo=timezone.utc)
-            s.next_run_at = max(now, base + timedelta(seconds=s.interval_seconds))
-    if body.enabled is not None and body.enabled != s.enabled:
+    if body.cron is not None or body.timezone is not None:
+        tz = body.timezone or s.timezone
+        s.cron, s.timezone = _cron(body.cron or s.cron, tz), tz
+    if body.enabled is not None:
         s.enabled = body.enabled
-        s.next_run_at = (now + timedelta(seconds=s.interval_seconds)) if s.enabled else None
+    s.next_run_at = next_run(s) if s.enabled else None
     if body.vars is not None:
         s.vars_json = json.dumps(body.vars)
         if scan:
@@ -120,7 +131,6 @@ def update_scheduler(sid: int, body: SchedulerIn, session: Session = Depends(get
             raise HTTPException(400, "add at least one target")
         s.targets_text = "\n".join(targets)
         if scan and scan.status not in ("running", "paused"):
-            from sqlalchemy import delete
             session.execute(delete(Target).where(Target.scan_id == scan.id, Target.stage == SEED))
             session.commit()
             ingest_targets(session, scan.id, targets)
@@ -139,7 +149,7 @@ def run_now(sid: int, session: Session = Depends(get_session)):
     scan = session.get(Scan, s.scan_id) if s.scan_id else None
     if scan is not None and scan.status in ("running", "paused"):
         raise HTTPException(400, "the previous run is still going")
-    jobs = fire_scheduler(session, s)
+    jobs = fire_scheduler(session, s, datetime.now(timezone.utc))
     return {**_out(session, s), "jobs": jobs}
 
 
