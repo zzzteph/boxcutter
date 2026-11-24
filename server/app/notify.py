@@ -111,7 +111,12 @@ def notify_scan_done(session: Session, scan: Scan, stats: dict) -> None:
     if not (ch and ns.scan_done):
         return
     text = (f"✅ boxcutter: scan '{scan.name}' (run #{scan.run_no}) finished — "
-            f"{stats.get('new', 0)} new, {stats.get('open', 0)} open, {stats.get('resolved', 0)} resolved")
+            f"{stats.get('new', 0)} new, {stats.get('open', 0)} still open, {stats.get('removed', 0)} no longer found")
+    gone = stats.get("removed_list") or []
+    if gone:
+        text += "\nNo longer found:\n" + "\n".join(f"• [{f['severity']}] {f['title']} — {f['target']}" for f in gone[:15])
+        if len(gone) > 15:
+            text += f"\n…and {len(gone) - 15} more"
 
     def run():
         if "telegram" in ch:

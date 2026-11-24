@@ -66,6 +66,7 @@ class Scan(SQLModel, table=True):
     run_no: int = 0
     vars_json: str = _text("{}")                                 # {custom: [{key, value}], debug: bool}
     plan_json: str = _text("[]")                                 # the stage plan of the current run (snapshot)
+    removed_last_run: int = 0                                    # findings the last finished run no longer found
     created_at: datetime = Field(default_factory=now)
     last_run_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -123,7 +124,11 @@ class Finding(SQLModel, table=True):
     cls: str = Field(default="", max_length=120)
     evidence: str = _text("")
     reproduce: str = _text("")
-    state: str = Field(default="new", max_length=24)             # new | open | resolved  (auto, from the diff)
+    # new         - first found in the latest run
+    # open        - found before and found again
+    # unconfirmed - its step could not re-check its target in the latest run (job failed / target not reached);
+    #               kept until a run checks it again. A finding that IS re-checked and not found is deleted.
+    state: str = Field(default="new", max_length=24)
     first_seen: datetime = Field(default_factory=now)
     last_seen: datetime = Field(default_factory=now)
     raw_json: str = _text("{}")
@@ -151,7 +156,7 @@ class ScanItem(SQLModel, table=True):
 
 class Scheduler(SQLModel, table=True):
     """A recurring scan: a name, a cron schedule, what to run and on what. It owns one Scan and re-runs it on
-    every cron tick, so the findings diff over time (new / open / resolved)."""
+    every cron tick; findings that a run no longer finds are removed."""
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(max_length=200)
     template_id: int = Field(index=True)

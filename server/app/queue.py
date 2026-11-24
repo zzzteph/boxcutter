@@ -186,8 +186,21 @@ def on_scan_done(session: Session, scan: Scan) -> None:
     from .diff import reconcile_run
     from .notify import notify_scan_done
     stats = reconcile_run(session, scan.id, scan.run_no, scan.last_run_at)
-    log_activity(session, "scan_done", f"Scan '{scan.name}' done — "
-                 f"{stats['new']} new, {stats['open']} open, {stats['resolved']} resolved", scan_id=scan.id)
+    scan.removed_last_run = stats["removed"]
+    session.add(scan)
+    session.commit()
+    msg = f"Scan '{scan.name}' run #{scan.run_no} done — {stats['new']} new, {stats['open']} still open"
+    if stats["removed"]:
+        msg += f", {stats['removed']} no longer found (removed)"
+    if stats["unconfirmed"]:
+        msg += f", {stats['unconfirmed']} could not be re-checked"
+    log_activity(session, "scan_done", msg, scan_id=scan.id)
+    for f in stats["removed_list"][:20]:                 # what got fixed, one line each
+        log_activity(session, "finding_removed", f"No longer found: [{f['severity']}] {f['title']} on {f['target']}",
+                     scan_id=scan.id)
+    if len(stats["removed_list"]) > 20:
+        log_activity(session, "finding_removed", f"…and {len(stats['removed_list']) - 20} more no longer found",
+                     scan_id=scan.id)
     try:
         notify_scan_done(session, scan, stats)
     except Exception:  # noqa: BLE001 - notifications are best-effort

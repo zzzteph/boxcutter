@@ -1,5 +1,5 @@
 """Schedulers: a named, recurring scan - what to run, on what, and a cron schedule. Each one owns a Scan that it
-re-runs on every tick, so the findings diff over time (new / open / resolved)."""
+re-runs on every tick, starting from the first steps; findings a run no longer finds are removed."""
 from __future__ import annotations
 
 import json

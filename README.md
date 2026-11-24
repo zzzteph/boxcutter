@@ -108,9 +108,14 @@ to see its graph, duplicate it to change it.
 wires animated while data flows. Click a step for its own log and to filter findings / discovered assets / jobs
 to just that step.
 
-**Schedulers** are named recurring scans: what, on what targets, and a cron schedule. Each run is compared with
-the previous one, so findings are *new*, *open* or *resolved*. Runs never stack: if one is still going at the
-next tick, that tick is skipped (and logged). Pause, resume, run now or edit from the Schedulers page.
+**Schedulers** are named recurring scans: what, on what targets, and a cron schedule. Every run (scheduled, "Run
+now" or "Run again") starts over from the first steps on your targets and flows through the whole workflow again.
+When it finishes, the findings are brought up to date: ones found for the first time are **new**, ones found again
+stay **open**, and ones that are **no longer found are removed** — the list always shows what is there now. A
+finding is only removed when its step actually re-checked that target and came back clean; if the job failed or the
+target wasn't reached this time, the finding stays, marked **not re-checked**. Every removal is listed in Activity
+and in the scan-done Slack/Telegram message, so you can see what got fixed. Runs never stack: if one is still going
+at the next tick, that tick is skipped (and logged).
 
 **Notifications** (Settings): Telegram and Slack (incoming webhook) — new findings of the severities you pick,
 and a summary when a scan finishes. `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `SLACK_WEBHOOK_URL` pre-fill

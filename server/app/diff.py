@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
-from sqlalchemy import func, update
+from sqlalchemy import delete, func, update
 from sqlmodel import Session, select
 
 from .assets import classify as classify_asset
@@ -110,8 +110,8 @@ def upsert_finding(session: Session, scan_id: int, kind: str, target: str, f: di
     if existing:
         existing.last_seen = now
         existing.raw_json = raw
-        if existing.state == "resolved":
-            existing.state = "open"           # a resolved finding seen again reopens
+        if existing.state in ("unconfirmed", "resolved"):
+            existing.state = "open"           # re-checked and still there
         session.add(existing)
         return fp, False
     finding = Finding(
@@ -127,20 +127,33 @@ def upsert_finding(session: Session, scan_id: int, kind: str, target: str, f: di
 
 
 def reconcile_run(session: Session, scan_id: int, run_no: int, cutoff: datetime | None) -> dict:
-    """Reconcile a scan's findings after a run whose jobs started at `cutoff` (the scan's last_run_at).
+    """After a run (whose jobs started at `cutoff`) finishes, bring the scan's findings up to date:
 
-    - not seen this run (last_seen < cutoff)            -> ``resolved``
-    - seen this run, carried over from an earlier run   -> ``open``
-    - seen this run, first appeared this run            -> ``new`` (already set at insert time)
+    - found again this run, first seen earlier              -> ``open``
+    - first found this run                                 -> ``new`` (set at insert time)
+    - NOT found this run, and its step successfully re-ran on the same target this run
+                                                            -> deleted (it is gone - fixed or no longer there)
+    - NOT found this run, but its step could not re-check that target (the job failed, or the target was not
+      reached this time, e.g. a host that wasn't rediscovered) -> ``unconfirmed``, kept until a run checks it
 
-    Entirely set-based (a couple of bulk UPDATEs + COUNTs) so it never loads the finding rows — it stays fast
-    even on a scan with hundreds of thousands of findings, and won't block the agent's result request.
-    """
-    cut = _aware(cutoff)                                  # stored datetimes are timezone-aware UTC
+    Returns {"new", "open", "unconfirmed", "removed", "removed_list": [{severity, title, target}, ...]}."""
+    from .models import Job, Target
+    cut = _aware(cutoff)
+    removed: list[dict] = []
     if cut is not None:
-        session.execute(update(Finding).where(
-            Finding.scan_id == scan_id, Finding.state != "resolved", Finding.last_seen < cut
-        ).values(state="resolved"))                       # findings not seen this run -> resolved
+        # every (step, target) this run positively re-checked: its job finished successfully
+        checked = set(session.exec(select(Job.stage, Target.value).join(Target, Target.id == Job.target_id).where(
+            Job.scan_id == scan_id, Job.run_no == run_no, Job.status == "done")).all())
+        stale = session.exec(select(Finding.id, Finding.stage, Finding.target, Finding.severity, Finding.title).where(
+            Finding.scan_id == scan_id, Finding.last_seen < cut)).all()
+        gone = [r for r in stale if (r[1], r[2]) in checked]
+        keep = [r[0] for r in stale if (r[1], r[2]) not in checked]
+        removed = [{"severity": r[3], "title": r[4], "target": r[2]} for r in gone]
+        ids = [r[0] for r in gone]
+        for i in range(0, len(ids), 1000):
+            session.execute(delete(Finding).where(Finding.id.in_(ids[i:i + 1000])))
+        for i in range(0, len(keep), 1000):
+            session.execute(update(Finding).where(Finding.id.in_(keep[i:i + 1000])).values(state="unconfirmed"))
         session.execute(update(Finding).where(
             Finding.scan_id == scan_id, Finding.state == "new",
             Finding.last_seen >= cut, Finding.first_seen < cut
@@ -150,4 +163,5 @@ def reconcile_run(session: Session, scan_id: int, run_no: int, cutoff: datetime 
     def _count(state: str) -> int:
         return session.exec(select(func.count()).select_from(Finding).where(
             Finding.scan_id == scan_id, Finding.state == state)).one()
-    return {"new": _count("new"), "open": _count("open"), "resolved": _count("resolved")}
+    return {"new": _count("new"), "open": _count("open"), "unconfirmed": _count("unconfirmed"),
+            "removed": len(removed), "removed_list": removed}

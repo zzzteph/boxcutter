@@ -19,8 +19,9 @@ const inputs = ref([])
 const tab = ref('findings')
 const SEVS = ['Critical', 'High', 'Medium', 'Low', 'Info']
 const sevOpts = [{ value: '', label: 'All severities' }, ...SEVS.map(s => ({ value: s, label: s }))]
-const stateOpts = [{ value: '', label: 'All states' }, { value: 'active', label: 'Active (new + open)' },
-  { value: 'new', label: 'New' }, { value: 'open', label: 'Open' }, { value: 'resolved', label: 'Resolved' }]
+const stateOpts = [{ value: '', label: 'All findings' }, { value: 'new', label: 'New this run' },
+  { value: 'open', label: 'Still open' }, { value: 'unconfirmed', label: 'Not re-checked' }]
+const UNCONFIRMED = 'Its step could not re-check this target in the last run (the job failed or the target was not reached), so it is kept until a run checks it again.'
 const jobStatusOpts = [{ value: '', label: 'All statuses' },
   ...['running', 'pending', 'done', 'failed', 'cancelled'].map(s => ({ value: s, label: s }))]
 const inputLabels = computed(() => Object.fromEntries(inputs.value.map(i => [i.value, i.label])))
@@ -294,7 +295,9 @@ onUnmounted(stopLive)
         <div class="tl">Open findings</div>
         <div class="tv">{{ scan.findings_open }}</div>
         <div class="sevs"><span v-for="s in SEVS" :key="s" v-show="sevCounts[s]" class="badge" :class="'sev-' + s">{{ sevCounts[s] }} {{ s }}</span></div>
-        <div class="ts"><span class="state-new">{{ scan.findings_new }} new</span> · {{ scan.findings_resolved }} resolved</div>
+        <div class="ts"><span class="state-new">{{ scan.findings_new }} new</span><span v-if="scan.run_no > 1"> ·
+          {{ scan.removed_last_run }} no longer found in the last run</span><span v-if="scan.findings_unconfirmed" :title="UNCONFIRMED"> ·
+          {{ scan.findings_unconfirmed }} not re-checked</span></div>
       </div>
       <div class="card t" @click="showTab('assets')">
         <div class="tl">Discovered</div>
@@ -377,7 +380,8 @@ onUnmounted(stopLive)
                 <td data-label="Title">{{ f.title }}</td>
                 <td data-label="Target" style="word-break:break-all">{{ f.target }}</td>
                 <td data-label="URL" style="word-break:break-all">{{ f.url }}</td>
-                <td data-label="State"><span class="state" :class="'state-' + f.state">{{ f.state }}</span></td>
+                <td data-label="State"><span class="state" :class="'state-' + f.state"
+                    :title="f.state === 'unconfirmed' ? UNCONFIRMED : ''">{{ f.state === 'unconfirmed' ? 'not re-checked' : f.state }}</span></td>
                 <td data-label="Seen" class="muted" style="white-space:nowrap">{{ timeAgo(f.last_seen) }}</td>
               </tr>
               <tr v-if="selFinding === f.id" class="expand">

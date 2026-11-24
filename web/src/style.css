@@ -206,7 +206,7 @@ td.crit { color: var(--crit); font-weight: 500; }
 .sev-Info { background: var(--info); color: #0b1220; }
 .state { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: var(--radius-s);
   font-size: 12px; font-weight: 500; background: var(--sc-high); color: var(--on-surface-variant); }
-.state-new { color: var(--primary); } .state-resolved { color: var(--on-surface-variant); text-decoration: line-through; }
+.state-new { color: var(--primary); } .state-unconfirmed { color: var(--on-surface-variant); font-style: italic; }
 .state-open { color: var(--warn); }
 .st-running { color: var(--primary); } .st-done { color: var(--ok); } .st-paused { color: var(--warn); }
 .st-stopped, .st-failed { color: var(--danger); } .st-queued { color: var(--tertiary); }

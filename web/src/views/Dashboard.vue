@@ -48,7 +48,7 @@ onUnmounted(() => clearInterval(timer))
       </router-link>
       <router-link to="/findings" class="card tile">
         <div class="tnum">{{ s.findings_open }}</div><div class="muted">open findings</div>
-        <div class="muted" style="font-size:12px"><span class="state-new">{{ s.findings_new }} new</span> · {{ s.findings_resolved }} resolved</div>
+        <div class="muted" style="font-size:12px"><span class="state-new">{{ s.findings_new }} new</span> · {{ s.findings_removed }} gone in the latest runs</div>
       </router-link>
       <router-link to="/findings?severity=Critical" class="card tile">
         <div class="tnum" :style="{ color: (s.findings_by_severity.Critical || 0) ? 'var(--crit)' : '' }">{{ s.findings_by_severity.Critical || 0 }}</div>

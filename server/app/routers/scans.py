@@ -145,14 +145,14 @@ def create_scan_upload(template_id: int = Form(...), name: str = Form(""), vars:
 
 # ---- list / detail ------------------------------------------------------------------------------------------
 def _summary(session: Session, s: Scan) -> dict:
-    counts = {"new": 0, "open": 0, "resolved": 0}
+    counts = {"new": 0, "open": 0, "unconfirmed": 0}
     total_f = 0
     for state, c in session.exec(select(Finding.state, func.count()).where(
             Finding.scan_id == s.id).group_by(Finding.state)).all():
         total_f += c
         counts[state if state in counts else "open"] += c
     sev = dict(session.exec(select(Finding.severity, func.count()).where(
-        Finding.scan_id == s.id, Finding.state != "resolved").group_by(Finding.severity)).all())
+        Finding.scan_id == s.id).group_by(Finding.severity)).all())
     jstat = dict(session.exec(select(Job.status, func.count()).where(
         Job.scan_id == s.id, Job.run_no == s.run_no).group_by(Job.status)).all())
     assets = session.exec(select(func.count()).select_from(Target).where(
@@ -163,7 +163,8 @@ def _summary(session: Session, s: Scan) -> dict:
             "template": s.template_name, "scheduler_id": s.scheduler_id, "assets": assets,
             "steps": len(plan), "distributed": len(plan) > 1,
             "findings_new": counts["new"], "findings_open_state": counts["open"],
-            "findings_resolved": counts["resolved"], "findings_open": counts["new"] + counts["open"],
+            "findings_unconfirmed": counts["unconfirmed"], "removed_last_run": s.removed_last_run,
+            "findings_open": total_f,
             "findings_total": total_f, "findings_by_severity": sev, "items_total": items_total,
             "jobs_total": sum(jstat.values()),
             "jobs_done": jstat.get("done", 0) + jstat.get("failed", 0) + jstat.get("cancelled", 0),
@@ -199,7 +200,7 @@ def _stages(session: Session, scan: Scan) -> list[dict]:
     items = dict(session.exec(select(ScanItem.stage, func.count()).where(
         ScanItem.scan_id == scan.id, ScanItem.run_no == scan.run_no).group_by(ScanItem.stage)).all())
     found = dict(session.exec(select(Finding.stage, func.count()).where(
-        Finding.scan_id == scan.id, Finding.state != "resolved").group_by(Finding.stage)).all())
+        Finding.scan_id == scan.id).group_by(Finding.stage)).all())
     done_state: dict[int, bool] = {}
     live = scan.status in ("running", "paused")
 
@@ -462,9 +463,7 @@ def _finding_conds(scan_id, state, severity, target, q, stage=None):
     conds = [Finding.scan_id == scan_id]
     if stage is not None:
         conds.append(Finding.stage == stage)
-    if state == "active":
-        conds.append(Finding.state != "resolved")
-    elif state in ("new", "open", "resolved"):
+    if state in ("new", "open", "unconfirmed"):
         conds.append(Finding.state == state)
     if severity:
         conds.append(Finding.severity == severity)
@@ -619,7 +618,7 @@ _SEV_ORDER = {s: i for i, s in enumerate(_SEV_RANK)}
 def scan_report(scan_id: int, session: Session = Depends(get_session)):
     scan = _scan_or_404(session, scan_id)
     findings = session.exec(select(Finding).where(Finding.scan_id == scan.id)).all()
-    active = [f for f in findings if f.state != "resolved"]
+    active = findings
     by_sev: dict = {}
     for f in active:
         by_sev[f.severity] = by_sev.get(f.severity, 0) + 1
@@ -628,7 +627,7 @@ def scan_report(scan_id: int, session: Session = Depends(get_session)):
            f"- Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
            f"- Status: {scan.status} (run #{scan.run_no})",
            f"- Scan type: {scan.template_name}",
-           f"- Findings: {len(active)} open, {len(findings) - len(active)} resolved",
+           f"- Findings: {len(active)} ({scan.removed_last_run} no longer found in the last run and removed)",
            f"- Open by severity: {sev_summary}", "", "## Findings"]
     for f in sorted(active, key=lambda x: (_SEV_ORDER.get(x.severity, 9), x.target)):
         out += ["", f"### [{f.severity}] {f.title or '(untitled)'}", f"- Target: {f.target}"]

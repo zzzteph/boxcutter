@@ -168,9 +168,7 @@ def global_findings(severity: str | None = None, state: str | None = None, q: st
     conds = []
     if scan_id is not None:
         conds.append(Finding.scan_id == scan_id)
-    if state == "active":
-        conds.append(Finding.state != "resolved")
-    elif state in ("new", "open", "resolved"):
+    if state in ("new", "open", "unconfirmed"):
         conds.append(Finding.state == state)
     if severity:
         conds.append(Finding.severity == severity)
@@ -195,16 +193,14 @@ def global_findings(severity: str | None = None, state: str | None = None, q: st
 def stats(session: Session = Depends(get_session)):
     now = datetime.now(timezone.utc)
     scans_by_status = dict(session.exec(select(Scan.status, func.count()).group_by(Scan.status)).all())
-    by_sev = dict(session.exec(select(Finding.severity, func.count()).where(
-        Finding.state != "resolved").group_by(Finding.severity)).all())
+    by_sev = dict(session.exec(select(Finding.severity, func.count()).group_by(Finding.severity)).all())
     findings_new = session.exec(select(func.count()).select_from(Finding).where(Finding.state == "new")).one()
-    findings_resolved = session.exec(select(func.count()).select_from(Finding).where(
-        Finding.state == "resolved")).one()
+    removed_last_runs = session.exec(select(func.coalesce(func.sum(Scan.removed_last_run), 0))).one()
     runners = session.exec(select(Runner)).all()
     slots_total = sum(r.slots for r in runners if _connected(r))
     slots_busy = sum(r.busy_slots for r in runners if _connected(r))
     crits = session.exec(select(Finding, Scan.name).join(Scan, Scan.id == Finding.scan_id).where(
-        Finding.severity == "Critical", Finding.state != "resolved")
+        Finding.severity == "Critical")
         .order_by(Finding.last_seen.desc()).limit(8)).all()
     active = []
     for s in session.exec(select(Scan).where(Scan.status.in_(["running", "paused"]))
@@ -223,7 +219,7 @@ def stats(session: Session = Depends(get_session)):
     return {"scans_total": sum(scans_by_status.values()), "scans_by_status": scans_by_status,
             "active_scans_count": scans_by_status.get("running", 0) + scans_by_status.get("paused", 0),
             "findings_open": sum(by_sev.values()), "findings_by_severity": by_sev,
-            "findings_new": findings_new, "findings_resolved": findings_resolved,
+            "findings_new": findings_new, "findings_removed": removed_last_runs,
             "scanners_total": len(runners), "scanners_connected": sum(1 for r in runners if _connected(r)),
             "slots_total": slots_total, "slots_busy": slots_busy,
             "recent_criticals": [{"id": f.id, "scan_id": f.scan_id, "scan": n, "target": f.target,
