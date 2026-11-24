@@ -107,6 +107,12 @@ def load_config() -> dict:
             cfg.update(json.load(open(CONFIG_PATH, encoding="utf-8")))
         except Exception:  # noqa: BLE001
             pass
+    # The server's built-in agent is configured BY the server process (`boxcutter serve`), so what it passes in
+    # the environment wins over a saved file - otherwise a stale saved token could lock it out for good.
+    if cfg.get("internal"):
+        for key, env in (("server_url", "SERVER_URL"), ("enroll_token", "ENROLL_TOKEN")):
+            if os.environ.get(env):
+                cfg[key] = os.environ[env]
     return cfg
 
 

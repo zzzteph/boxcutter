@@ -58,6 +58,25 @@ def _wait_healthy(proc, url: str, tries: int = 90) -> bool:
     return False
 
 
+def _builtin_token(data_dir: str) -> str:
+    path = os.path.join(data_dir, ".builtin-enroll-token")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            tok = fh.read().strip()
+            if tok:
+                return tok
+    except OSError:
+        pass
+    tok = secrets.token_urlsafe(24)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(tok)
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return tok
+
+
 def _spawn_agent(port: int, token: str, data_dir: str):
     env = dict(os.environ)
     env["SERVER_URL"] = f"http://127.0.0.1:{port}"
@@ -88,8 +107,9 @@ def main(argv=None) -> int:
     env.setdefault("PYTHONUNBUFFERED", "1")
     os.makedirs(a.data_dir, exist_ok=True)
     env.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(os.path.abspath(a.data_dir), "boxcutter.db"))
-    # a shared enroll token: the server seeds it (ENROLL_TOKEN), the built-in agent enrolls with it
-    token = env.get("ENROLL_TOKEN") or secrets.token_urlsafe(24)
+    # a shared enroll token: the server seeds it (ENROLL_TOKEN), the built-in agent enrolls with it. Kept in the
+    # data dir so a restart reuses it instead of minting (and seeding) a new one every time.
+    token = env.get("ENROLL_TOKEN") or _builtin_token(a.data_dir)
     env["ENROLL_TOKEN"] = token
 
     _log(f"starting server on {a.host}:{a.port}  (data: {a.data_dir})")

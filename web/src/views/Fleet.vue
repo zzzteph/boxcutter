@@ -1,13 +1,19 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, isAdmin } from '../api'
+import { api } from '../api'
 import { timeAgo } from '../util'
 
 const router = useRouter()
 const runners = ref([])
 const newToken = ref('')
-const admin = isAdmin()
+const admin = true
+const tokens = ref([])
+async function loadTokens() { try { tokens.value = await api.get('/enroll-tokens') } catch (e) { /* transient */ } }
+async function revoke(t) {
+  if (!confirm(`Revoke enroll token ${t.prefix}…? Scanners already enrolled keep working.`)) return
+  try { await api.del('/enroll-tokens/' + t.id); await loadTokens() } catch (e) { alert(e.message) }
+}
 const openId = ref(null)                       // which runner's job list is expanded
 function toggle(r) { openId.value = openId.value === r.id ? null : r.id }
 let timer = null
@@ -23,10 +29,11 @@ async function delRunner(r) {
   try { await api.del('/runners/' + r.id); await load() } catch (e) { alert(e.message) }
 }
 async function mkToken() {
-  try { const r = await api.post('/enroll-tokens', { label: 'ui' }); newToken.value = r.token }
+  try { const r = await api.post('/enroll-tokens', { label: 'ui' }); newToken.value = r.token; await loadTokens() }
   catch (e) { alert(e.message) }
 }
 function open(r) { router.push('/scanners/' + r.id) }
+const origin = location.origin
 function meterClass(v) { return v >= 85 ? 'hi' : (v >= 60 ? 'mid' : '') }
 
 // The server has no idea what the newest boxcutter release is — but the fleet does: the highest engine version
@@ -45,7 +52,7 @@ const newestEngine = computed(() => runners.value.map(r => r.engine_version).fil
 function outdated(r) {
   return !!(r.engine_version && newestEngine.value && cmpVer(r.engine_version, newestEngine.value) < 0)
 }
-onMounted(async () => { await load(); timer = setInterval(load, 3000) })
+onMounted(async () => { await load(); loadTokens(); timer = setInterval(load, 3000) })
 onUnmounted(() => clearInterval(timer))
 </script>
 
@@ -54,9 +61,12 @@ onUnmounted(() => clearInterval(timer))
     <h1>Scanners</h1>
     <button class="primary" @click="mkToken">New enroll token</button>
   </div>
-  <div v-if="newToken" class="card" style="margin:10px 0">
+  <div class="muted">Every scanner runs jobs from every scan. More scanners (or more parallel jobs each) = faster scans,
+    especially for distributed workflows and pipelines.</div>
+  <div v-if="newToken" class="card" style="margin:12px 0">
     <b>Enroll token (shown once):</b> <code style="word-break:break-all">{{ newToken }}</code>
-    <div class="muted" style="font-size:12px">Paste this into a scanner's local UI (or set <code>ENROLL_TOKEN</code>) to connect it.</div>
+    <div class="muted" style="font-size:12px;margin-top:6px">Start a scanner on any host with it:</div>
+    <div class="cmd sm">docker run -d --name boxcutter-agent ghcr.io/zzzteph/boxcutter agent --server {{ origin }} --token {{ newToken }}</div>
   </div>
 
   <div class="card tablecard">
@@ -114,12 +124,12 @@ onUnmounted(() => clearInterval(timer))
       <tr v-if="openId === r.id" class="detailrow">
         <td :colspan="10">
           <table class="reflow rows" style="margin:0">
-            <thead><tr><th>Scan</th><th>Asset</th><th>Tool</th><th>Status</th><th>Since</th></tr></thead>
+            <thead><tr><th>Scan</th><th>Target</th><th>Step</th><th>Status</th><th>Since</th></tr></thead>
             <tbody>
               <tr v-for="j in r.current" :key="j.id">
-                <td data-label="Scan"><a href="#" @click.prevent.stop="router.push('/scans/' + j.scan_id)">#{{ j.scan_id }}</a></td>
+                <td data-label="Scan"><a href="#" @click.prevent.stop="router.push('/scans/' + j.scan_id)">{{ j.scan || '#' + j.scan_id }}</a></td>
                 <td data-label="Asset" style="word-break:break-all">{{ j.target }}</td>
-                <td data-label="Tool">{{ j.template }}</td>
+                <td data-label="Step">{{ j.template }}</td>
                 <td data-label="Status"><span class="state" :class="'st-' + j.status">{{ j.status }}</span></td>
                 <td data-label="Since" style="white-space:nowrap">{{ timeAgo(j.claimed_at) }}</td>
               </tr>
@@ -133,6 +143,21 @@ onUnmounted(() => clearInterval(timer))
     </tbody>
   </table>
   </div>
+
+  <template v-if="tokens.length">
+    <h2 style="margin-top:22px">Enroll tokens</h2>
+    <div class="card tablecard">
+      <table class="rows">
+        <thead><tr><th>Token</th><th>Label</th><th>Created</th><th></th></tr></thead>
+        <tbody>
+          <tr v-for="t in tokens" :key="t.id">
+            <td><code>{{ t.prefix }}…</code></td><td>{{ t.label }}</td><td class="muted">{{ timeAgo(t.created_at) }}</td>
+            <td style="text-align:right"><button class="ghost danger sm" @click="revoke(t)">Revoke</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </template>
 </template>
 
 <style scoped>
