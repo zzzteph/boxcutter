@@ -1,11 +1,17 @@
-"""First-boot seed: the admin user (root/root, must change password), the dev enroll token, a demo LLM
-profile, and a starter set of templates (workflows, tools, agents) so the app is usable out of the box.
+"""First-boot / every-boot seed: the admin password, the built-in template catalog, the distributed versions of
+the composite workflows, notification settings and an optional enroll token.
 
-Everything here is idempotent - re-running skips anything that already exists by name (but backfills the
-official description onto older rows that predate the description column).
+Built-in templates are read-only in the UI and re-synced from this file on every start (matched by name), so
+an upgrade ships new descriptions/stages automatically. Custom templates are never touched.
 
-Descriptions are the stock engine's own text (boxcutter --list-all / workflow --list / ai --list) so the
-picker reads exactly like the CLI's help."""
+Catalog fields (all user-facing):
+  title     - plain-language name shown on the scan-type cards
+  category  - grouping in the picker
+  accepts   - what a target must look like: domain | host (domain, hostname, IP or URL) | url | endpoint
+              (URL with parameters) | js (JS file URL) | spec (OpenAPI URL or host) | graphql | network
+  produces  - findings | hosts | urls | items - what it hands to a next pipeline step
+  depth     - quick | standard | deep (rough cost)
+"""
 from __future__ import annotations
 
 import json
@@ -14,154 +20,295 @@ from sqlmodel import Session, select
 
 from .config import settings
 from .db import engine
-from .models import EnrollToken, LLMProfile, NotifySettings, Template, User
-from .security import hash_password, hash_token
+from .models import EnrollToken, NotifySettings, Scheduler, Template
+from .pipeline import DEFAULT_INPUT, SEED
+from .security import ensure_admin, hash_token
 
-# The real stock boxcutter catalog {name: official description}.
-TOOLS = {
-    "subfinder": "Discover subdomains of a target domain using Subfinder.",
-    "dnsx": "Resolve names, brute-force a domain (--domain --wordlist), and filter wildcards (--wildcard). A/AAAA/CNAME; --resp adds the record.",
-    "dns-brute": "Brute-force a domain's subdomains with boxcutter's bundled wordlist (wraps dnsx). Give just the domain; --wordlist overrides the default.",
-    "httpx": "Probe a target with httpx to detect live HTTP services.",
-    "api-map": "Method-aware API discovery: enumerate paths x {GET,POST,PUT,PATCH,DELETE,OPTIONS}, diff each vs a per-method catch-all, and report which paths exist for which verbs (write verbs first). Non-destructive.",
-    "smart-enum": "Generate a context-aware candidate path list from observed URLs (version pivots, numeric id-walks, singular/plural, high-value siblings under observed prefixes). Non-touching; pipe into path-bust/api-map/ffuf.",
-    "screenshot": "Capture a URL in a real browser (CDP) - stores {url, full, thumbnail} as screenshots.",
-    "wayback": "Pull historical URLs for a domain from 4 public archives (deduped).",
-    "wayback-domains": "Run wayback (subdomains on) and extract the unique host list.",
-    "katana-crawl": "Crawl a target URL with Katana (supports --js / --params filters).",
-    "zap-crawl": "Crawl a target URL with ZAP AJAX + traditional spider.",
-    "js-endpoints": "Fetch a JavaScript file and extract API endpoint references via regex.",
-    "js-files": "Discover and collect the JavaScript files a page loads (same-origin + inline sources), for endpoint/secret analysis.",
-    "extract-domains": "Pull every hostname/domain referenced in a page or response (links, scripts, assets) and return the unique list.",
-    "liveless": "Fast liveness probe: check which hosts/URLs answer over HTTP(S) and drop the dead ones before a heavier scan.",
-    "nmap": "TCP port scan a host with nmap (--ports / --top-ports) and report the open ports/services.",
-    "ping-scan": "Sweep a host/range for which addresses are up (host-discovery), returning the live hosts.",
-    "harvest": "Deep browser crawler: drive the app (click/submit/SPA), capture every request, dedupe into a corpus.",
-    "browser-login": "Log in through a real browser (SPA/CSRF/redirect) and return the resulting session cookie/token.",
-    "browser-actions": "Drive a headless browser through scripted actions (click/type/select/...) and capture the result.",
-    "visual-driver": "Drive a browser by SCREEN COORDINATES with human-like mouse motion + typing; returns a coordinate-grid screenshot each call.",
-    "vision-verify": "Load a URL in headless chromium and report whether JS actually EXECUTED (alert/console/canary captured) vs merely reflected - confirms reflected/DOM XSS and screenshots the proof.",
-    "nuclei": "Run Nuclei vulnerability scanner against a target.",
-    "nuclei-dast": "Run Nuclei in DAST mode (active fuzzing templates, nuclei -dast) against a URL.",
-    "sqlmap": "Run sqlmap SQL injection scanner against a target URL.",
-    "blind-oracle": "Detect blind SQL / OS-command injection across a request's parameters via boolean + time-based differential probes (session-aware, delay-scaling confirmation, non-destructive).",
-    "bola-walk": "Two-session cross-account authorization diff (BOLA/IDOR): walk an object id and report where identity B reads an access-controlled object that isn't B's. 3-way (unauth/A/B) test, non-destructive.",
-    "mass-assign": "Detect mass-assignment: re-send a write body with privileged attributes injected (role=admin, isAdmin, verified, balance, ...) and flag acceptance (echoed, or confirmed via --verify). Non-destructive to others.",
-    "dirb": "Brute-force directories on a target URL with dirb.",
-    "dirsearch": "Brute-force directories on a target URL with dirsearch.",
-    "zap-scan-url": "ZAP active scan against a single exact URL (no crawling).",
-    "zap-scan-full": "Full ZAP scan: spider + AJAX spider + active scan against a target URL.",
-    "zap-scan-openapi": "ZAP active scan driven by an OpenAPI/Swagger specification URL.",
-    "path-fuzz": "Brute-force a FUZZ position in a URL; content/structure gate keeps only real, distinct paths (200 by default).",
-    "path-bust": "Directory brute-force under a URL path (no FUZZ marker); content/structure gate, per-dir calibration, --depth.",
-    "fuzz": "Fuzz params/path/body for injection (XSS, SQLi, SSTI, LFI, RCE, XXE, NoSQL, GraphQL) or enumerate IDs.",
-    "scan-secrets": "Fetch a URL and scan the response body for exposed secrets/credentials.",
-    "git-extract": "Extract source from an exposed .git directory and scan it for secrets.",
-    "swagger-parser": "Fetch and parse an OpenAPI/Swagger spec into a structured endpoint list.",
-    "swagger-endpoints": "List endpoint URLs from an OpenAPI/Swagger spec (--fuzzable for {FUZZ}-marked variants).",
-    "swagger-specs": "Probe common OpenAPI/Swagger paths on a host and list the spec URLs found.",
-    "graphql-detect": "Probe common paths for a GraphQL endpoint and list the URL(s) found.",
-    "graphql-audit": "Audit a GraphQL endpoint: introspection, CSRF, batching, verbose errors, arg injection, mutation exposure.",
-    "http-request": "Make an HTTP request to a target URL (POST if --data/-D given, else GET; -X sets any method).",
+# name: (kind, title, category, accepts, produces, depth, description)
+CATALOG: dict[str, tuple] = {
+    # ---- workflows (engine YAML recipes; one job per target) ------------------------------------------------
+    "web-full": ("workflow", "Full website scan", "Websites", "host", "findings", "deep",
+                 "Checks the site is up, then runs nuclei template passes and the deep scan (crawl, fuzzing, "
+                 "sqlmap, OpenAPI, GraphQL, JS secrets) on every live URL. The default choice for a website."),
+    "web-scan": ("workflow", "Deep scan of a URL", "Websites", "url", "findings", "deep",
+                 "Crawls the URL, then fuzz + nuclei DAST + sqlmap on every parameter, fuzzes captured POST "
+                 "bodies, tests OpenAPI and GraphQL endpoints and scans JS files for secrets."),
+    "web-nuclei": ("workflow", "Known vulnerabilities (nuclei)", "Websites", "url", "findings", "quick",
+                   "Nuclei template passes: exposures, misconfigurations, recent CVEs, known-exploited (KEV) "
+                   "and exposed admin panels. Fast, low noise."),
+    "spa-scan": ("workflow", "Single-page app scan", "Websites", "url", "findings", "deep",
+                 "For JavaScript apps: a real-browser crawl (clicks, forms, the cross-origin API), then every "
+                 "captured endpoint and request body is tested, plus GraphQL and JS secrets."),
+    "web-fuzz": ("workflow", "Website scan — fuzzer only", "Websites", "url", "findings", "standard",
+                 "Like the deep scan, but injection testing is done by the built-in fuzzer only (no sqlmap)."),
+    "web-sqlmap": ("workflow", "Website scan — sqlmap only", "Websites", "url", "findings", "deep",
+                   "Like the deep scan, but injection testing is done by sqlmap only (no fuzzer)."),
+    "endpoint-scan": ("workflow", "Scan one endpoint", "Websites", "endpoint", "findings", "standard",
+                      "One URL with parameters: fuzzer + nuclei DAST, and sqlmap only when the fuzzer sees SQL "
+                      "injection (double-confirmed)."),
+    "web-crawl": ("workflow", "Crawl a website", "Discovery", "url", "items", "standard",
+                  "Katana spider plus a real-browser crawl (SPA-aware): every URL and request the site uses."),
+    "recon": ("workflow", "Find subdomains", "Discovery", "domain", "hosts", "quick",
+              "Subdomains from passive sources (subfinder, web archives) and a DNS brute-force, kept only if "
+              "they resolve."),
+    "recon-http": ("workflow", "Find live websites of a domain", "Discovery", "domain", "urls", "quick",
+                   "Subdomain discovery, then httpx: the live HTTP(S) services of a domain, one URL each."),
+    "ip-discover": ("workflow", "Find live hosts in a network", "Network", "network", "hosts", "quick",
+                    "Ping sweep (nmap -sn) of an IP, CIDR or range: the hosts that answer."),
+    "env-scan": ("workflow", "Whole environment scan", "Environment", "domain", "findings", "deep",
+                 "Every subdomain of a domain gets the full website scan and the web-archive scan. The most "
+                 "thorough (and slowest) option."),
+    "env-nuclei": ("workflow", "Nuclei on all subdomains", "Environment", "domain", "findings", "standard",
+                   "Finds subdomains, keeps the live web services and runs the nuclei template passes on each."),
+    "env-takeover": ("workflow", "Subdomain takeover check", "Environment", "domain", "findings", "quick",
+                     "Finds subdomains and runs nuclei's takeover templates on every one of them."),
+    "env-secrets": ("workflow", "Secrets on all subdomains", "Environment", "domain", "findings", "standard",
+                    "Crawls every live subdomain and scans the JavaScript it loads for keys and tokens."),
+    "env-wayback": ("workflow", "Archived URLs of all subdomains", "Environment", "domain", "findings",
+                    "standard", "Web-archive URLs of every subdomain; each parameterised URL is scanned "
+                    "(fuzzer + nuclei DAST + sqlmap if SQLi)."),
+    "env-wayback-secrets": ("workflow", "Archived JS secrets of all subdomains", "Environment", "domain",
+                            "findings", "standard",
+                            "For every subdomain: JS files from a crawl and the web archives, scanned for "
+                            "secrets."),
+    "swagger-scan": ("workflow", "OpenAPI / Swagger scan", "APIs", "spec", "findings", "standard",
+                     "Finds the OpenAPI spec(s) on a host (or give the spec URL) and tests every documented "
+                     "endpoint: fuzzer + nuclei DAST, sqlmap when SQLi is suspected."),
+    "swagger-fuzz": ("workflow", "OpenAPI fuzzing", "APIs", "spec", "findings", "standard",
+                     "Finds the OpenAPI spec(s) and fuzzes every parameterised endpoint (fuzzer only)."),
+    "graphql-scan": ("workflow", "GraphQL scan", "APIs", "host", "findings", "standard",
+                     "Finds GraphQL endpoint(s) and audits each: introspection, CSRF, batching, verbose errors, "
+                     "injection, exposed mutations."),
+    "secrets-scan": ("workflow", "Secrets in JavaScript", "Secrets", "host", "findings", "standard",
+                     "Collects the JS files a site uses (crawl + web archives) and scans each for API keys, "
+                     "tokens and credentials."),
+    "wayback-scan": ("workflow", "Scan archived URLs", "Web archive", "domain", "findings", "standard",
+                     "Historical URLs from public web archives: old JS files scanned for secrets, every "
+                     "parameterised URL scanned (fuzzer + nuclei DAST + sqlmap if SQLi)."),
+    "wayback-fuzz": ("workflow", "Fuzz archived URLs", "Web archive", "domain", "findings", "standard",
+                     "Historical URLs: secrets in JS files and the fuzzer on every parameterised URL (pass your "
+                     "own payload with scan parameters: fuzz --payload ... --pattern ...)."),
+    # ---- single tools (advanced) ---------------------------------------------------------------------------
+    "subfinder": ("tool", "subfinder — passive subdomains", "Tools", "domain", "hosts", "quick",
+                  "Subdomains of a domain from passive sources."),
+    "dns-brute": ("tool", "DNS brute-force", "Tools", "domain", "hosts", "quick",
+                  "Resolves <word>.<domain> for every word in the bundled subdomain wordlist."),
+    "dnsx": ("tool", "dnsx — resolve hostnames", "Tools", "host", "hosts", "quick",
+             "Keeps the hostnames that resolve in DNS."),
+    "wayback-domains": ("tool", "Hostnames from web archives", "Tools", "domain", "hosts", "quick",
+                        "Unique hostnames of a domain seen in public web archives."),
+    "ping-scan": ("tool", "Ping sweep", "Tools", "network", "hosts", "quick",
+                  "nmap -sn host discovery over an IP / CIDR / range."),
+    "httpx": ("tool", "httpx — live web services", "Tools", "host", "urls", "quick",
+              "Probes a host for live HTTP(S) services and returns their URLs."),
+    "wayback": ("tool", "URLs from web archives", "Tools", "domain", "urls", "quick",
+                "Historical URLs of a domain from four public archives."),
+    "katana-crawl": ("tool", "katana — web crawler", "Tools", "url", "urls", "standard",
+                     "Crawls a URL and returns the URLs found."),
+    "harvest": ("tool", "Browser crawl (SPA)", "Tools", "url", "items", "standard",
+                "Drives the site in headless Chromium and captures every request (incl. POST bodies)."),
+    "js-endpoints": ("tool", "Endpoints from a JS file", "Tools", "js", "urls", "quick",
+                     "Extracts API endpoint references from a JavaScript file."),
+    "nuclei": ("tool", "nuclei — template scanner", "Tools", "host", "findings", "standard",
+               "Runs nuclei against a host or URL (add your own -tags / -severity with extra arguments)."),
+    "fuzz": ("tool", "Injection fuzzer", "Tools", "endpoint", "findings", "standard",
+             "Fuzzes parameters / path / body for XSS, SQLi, SSTI, LFI, RCE, XXE, NoSQL and more."),
+    "sqlmap": ("tool", "sqlmap — SQL injection", "Tools", "endpoint", "findings", "deep",
+               "Tests a URL's parameters for SQL injection with sqlmap."),
+    "scan-secrets": ("tool", "Secrets in a page / JS file", "Tools", "url", "findings", "quick",
+                     "Fetches a URL and scans the response for exposed secrets (trufflehog + regex)."),
+    "swagger-specs": ("tool", "Find OpenAPI specs", "Tools", "host", "urls", "quick",
+                      "Probes common OpenAPI / Swagger paths on a host and lists the spec URLs."),
+    "swagger-endpoints": ("tool", "Endpoints from an OpenAPI spec", "Tools", "spec", "urls", "quick",
+                          "Lists the endpoint URLs an OpenAPI spec documents."),
+    "graphql-detect": ("tool", "Find GraphQL endpoints", "Tools", "host", "urls", "quick",
+                       "Probes common paths for a GraphQL endpoint."),
+    "graphql-audit": ("tool", "GraphQL audit", "Tools", "graphql", "findings", "standard",
+                      "Audits one GraphQL endpoint (introspection, CSRF, batching, injection, mutations)."),
 }
-WORKFLOWS = {
-    "endpoint-scan": "scan one endpoint with every DAST tool - fuzz + nuclei -dast + sqlmap + zap-scan-url",
-    "env-nuclei": "subfinder + dns-brute -> nuclei across the env (takeover on all hosts; web-nuclei template passes on live hosts)",
-    "env-scan": "enumerate + validate subdomains, then web-full + wayback-scan each (web-full probes liveness itself)",
-    "env-secrets": "env-scan without the vuln scanners - validate subdomains, then crawl + secrets-scan each live host",
-    "env-takeover": "subfinder + dns-brute, then nuclei takeover templates on every discovered subdomain",
-    "env-wayback-secrets": "subfinder + dns-brute, then secrets-scan (web-crawl + wayback -> scan-secrets) on every subdomain",
-    "env-wayback": "subfinder + dns-brute, wayback every subdomain, then endpoint-scan every parameterised URL (deduped)",
-    "graphql-scan": "discover GraphQL endpoint(s) on a target, then audit each (introspection, CSRF, batching, injection, mutation exposure)",
-    "recon-http": "recon, then httpx; show only the live HTTP(S) services",
-    "recon": "subdomains (subfinder + wayback + dns-brute), kept if they resolve (dnsx)",
-    "secrets-scan": "gather JS files (web-crawl + wayback, filtered to JS), scan each for secrets",
-    "spa-scan": "browser-crawl a JS/SPA in real Chromium (clicks, submits, captures every request incl. the cross-origin API), then DAST each endpoint - endpoint-scan (fuzz + nuclei-dast + sqlmap + zap-scan-url) on each param URL, the body of each POST/PUT fuzzed too, plus GraphQL audit and secrets on JS",
-    "swagger-fuzz": "find OpenAPI/Swagger spec(s) on a host (or use a spec URL), then fuzz every parameterised endpoint (fuzz only - sibling of web-fuzz)",
-    "swagger-scan": "find OpenAPI/Swagger spec(s) on a host (or scan a spec URL directly), then DAST every endpoint - fuzz (fuzzable) + nuclei-dast + sqlmap + zap-scan-url per endpoint, plus zap-scan-openapi per spec",
-    "wayback-fuzz": "wayback URLs - scan-secrets on JS, then fuzz each parameterised URL with YOUR payload (--arg fuzz=\"--payload ... --pattern ...\")",
-    "wayback-scan": "wayback URLs - secrets on JS files, sqlmap/fuzz/zap on param URLs",
-    "web-crawl": "crawl a URL with Katana + ZAP + harvest (real-browser, SPA-aware), merged - emits the endpoint CORPUS (URL strings from the spiders + method/url/body objects from harvest). Project it with ${crawl | urls} for URLs, or ${crawl | writes} for the POST/PUT endpoints.",
-    "web-full": "probe liveness (httpx), then nuclei template passes + the full web-scan DAST on each live URL",
-    "web-fuzz": "like web-scan but injection testing is fuzz-only - no sqlmap, no ZAP active scan. crawl -> fuzz per param URL -> swagger -> fuzz per endpoint -> graphql detect+audit -> secrets per JS",
-    "web-nuclei": "nuclei template passes against one URL - exposures, misconfig, cve2026, kev, exposed-panels (each with tuned severity)",
-    "web-scan": "full DAST of one known URL (no httpx probe) - crawl -> zap-full -> endpoint-scan per param URL -> swagger -> graphql-scan -> secrets per JS",
-    "web-sqlmap": "like web-scan but injection testing is sqlmap-only - no fuzz, no ZAP active scan. crawl -> sqlmap per param URL -> swagger -> sqlmap per endpoint -> graphql detect+audit -> secrets per JS",
-}
-AGENTS = {
-    "irvin": "Conductor: travis -> bob -> caleb, verified + consolidated, with a CEO report and per-agent reasoning.",
-    "logio": "Standalone agentic login: an auth-only agent that logs in with supplied creds (no IRVIN pipeline).",
-    "prawlio": "Authenticated crawl: log in with logio, then crawl the app under that session and list the URLs found.",
-    "crawlio": "Single-agent crawler: build a comprehensive, code-verified endpoint list (strict about false/ghost paths).",
-    "juicy": "Single-agent JS analyst: from a JS file or page, extract hidden URLs, find DOM XSS + secrets, with PoCs.",
-    "bob": "Bob - short surface scanner: an LLM agent that drives the boxcutter tools to highlight exposed surface.",
-    "travis": "Travis - recon triage: probe ONE host lightly and rate how interesting it is for a deeper scan (bob).",
-    "caleb": "Caleb - multi-phase / multi-identity orchestrator: authenticated deep scan, reauth, two-account BFLA, and multi-step chains (reuses bob as its scanning muscle).",
-}
-DEMO_PROFILE = "demo (set an API key)"
-AGENT_CONTEXT = "Authorized assessment. Report only real, exploitable issues."
 
 
-def _ensure_template(s: Session, name: str, kind: str, spec_name: str, owner_id: int, description: str = "",
-                     llm_profile_id: int | None = None, context: str | None = None) -> None:
-    existing = s.exec(select(Template).where(Template.name == name)).first()
-    if existing:
-        # backfill the official description onto rows created before the column existed
-        if description and not (existing.description or "").strip():
-            existing.description = description
-            s.add(existing)
-        return
-    s.add(Template(name=name, kind=kind, spec_json=json.dumps({"name": spec_name, "flags": []}),
-                   description=description, context=context, llm_profile_id=llm_profile_id, owner_id=owner_id))
+# ---- distributed versions of the composite workflows --------------------------------------------------------
+# Each is a stage DAG: every outer per-host / per-URL loop of the YAML recipe becomes a fan-out, so the items
+# one stage produces are spread as separate jobs over every scanner. Stages are written as
+# st(template, from, input, args); `from` defaults to the scan's own targets.
+HARVEST_DEEP = "--max-pages 0 --max-time 300 --max-actions 0"
+NUCLEI_PASSES = [("exposures", "critical,high,medium,low"), ("misconfig", "critical,high,medium,low"),
+                 ("cve2026", "critical,high,medium"), ("kev", "critical,high,medium"),
+                 ("panel", "critical,high,medium")]
+
+
+def st(t: str, frm=(SEED,), inp: str | None = None, args: str = "") -> dict:
+    return {"t": t, "from": list(frm), "input": inp, "args": args}
+
+
+def graft(sub: list[dict], parents: list[int], offset: int) -> list[dict]:
+    """Re-root a sub-DAG: its entry stages read `parents` instead of the scan targets; indexes shift."""
+    out = []
+    for s in sub:
+        frm: list[int] = []
+        for f in s["from"]:
+            frm += parents if f == SEED else [offset + f]
+        out.append({**s, "from": frm})
+    return out
+
+
+def chain(base: list[dict], sub: list[dict], parents: list[int]) -> list[dict]:
+    return base + graft(sub, parents, len(base))
+
+
+def _web_nuclei():
+    return [st("nuclei", inp="urls", args=f'--opt-args="-tags {tag} -severity {sev}"') for tag, sev in NUCLEI_PASSES]
+
+
+def _web(mode: str):
+    s = [st("katana-crawl", inp="urls"),                          # 0
+         st("harvest", inp="urls", args=HARVEST_DEEP),            # 1
+         st("js-endpoints", [0, 1], "js-urls")]                   # 2
+    if mode == "scan":
+        s += [st("endpoint-scan", [0, 1, 2], "param-urls"),       # 3
+              st("fuzz", [1], "writes", "--timeout 120"),         # 4
+              st("swagger-specs", inp="urls"),                    # 5
+              st("swagger-scan", [5], "urls")]                    # 6
+    elif mode == "fuzz":
+        s += [st("fuzz", [0, 1, 2], "param-urls", "--timeout 120"),
+              st("fuzz", [1], "writes", "--timeout 120"),
+              st("swagger-specs", inp="urls"),
+              st("swagger-endpoints", [5], "urls", "--fuzzable"),
+              st("fuzz", [6], "urls", "--timeout 120")]
+    else:  # sqlmap
+        s += [st("sqlmap", [0, 1, 2], "param-urls"),
+              st("sqlmap", [1], "writes"),
+              st("swagger-specs", inp="urls"),
+              st("swagger-endpoints", [5], "urls"),
+              st("sqlmap", [6], "urls")]
+    gd = len(s)
+    s += [st("graphql-detect", inp="urls"),
+          st("graphql-audit", [gd], "urls"),
+          st("scan-secrets", [0, 1], "js-urls")]
+    return s
+
+
+def _recon():
+    return [st("subfinder", inp="hosts"), st("wayback-domains", inp="hosts"), st("dns-brute", inp="hosts"),
+            st("dnsx", [SEED, 0, 1, 2], "hosts")]
+
+
+def _secrets():
+    return [st("katana-crawl", inp="urls"), st("harvest", inp="urls", args=HARVEST_DEEP),
+            st("wayback", inp="hosts"), st("scan-secrets", [0, 1, 2], "js-urls")]
+
+
+def _wayback(consumer: str):
+    return [st("wayback", inp="hosts"), st("scan-secrets", [0], "js-urls"), st(consumer, [0], "param-urls")]
+
+
+def _subs():
+    return [st("subfinder", inp="hosts"), st("dns-brute", inp="hosts")]
+
+
+def _web_full():
+    return chain(chain([st("httpx", inp="all")], _web_nuclei(), [0]), _web("scan"), [0])
+
+
+DISTRIBUTED: dict[str, list[dict]] = {
+    "web-full": _web_full(),
+    "web-scan": _web("scan"),
+    "web-fuzz": _web("fuzz"),
+    "web-sqlmap": _web("sqlmap"),
+    "web-nuclei": _web_nuclei(),
+    "web-crawl": [st("katana-crawl", inp="urls"), st("harvest", inp="urls", args=HARVEST_DEEP)],
+    "spa-scan": [st("harvest", inp="urls", args=HARVEST_DEEP), st("endpoint-scan", [0], "param-urls"),
+                 st("fuzz", [0], "writes", "--timeout 120"), st("graphql-detect", inp="urls"),
+                 st("graphql-audit", [3], "urls"), st("scan-secrets", [0], "js-urls")],
+    "recon": _recon(),
+    "recon-http": _recon() + [st("httpx", [3], "hosts")],
+    "swagger-scan": [st("swagger-specs", inp="all"), st("swagger-scan", [0], "urls")],
+    "swagger-fuzz": [st("swagger-specs", inp="all"), st("swagger-endpoints", [0], "urls", "--fuzzable"),
+                     st("fuzz", [1], "urls", "--timeout 60")],
+    "graphql-scan": [st("graphql-detect", inp="all"), st("graphql-audit", [0], "urls")],
+    "secrets-scan": _secrets(),
+    "wayback-scan": _wayback("endpoint-scan"),
+    "wayback-fuzz": _wayback("fuzz"),
+    "env-nuclei": chain(_subs() + [st("httpx", [0, 1], "hosts")], _web_nuclei(), [2]),
+    "env-takeover": _subs() + [st("nuclei", [0, 1], "hosts", '--opt-args="-tags takeover"')],
+    "env-secrets": chain(_recon() + [st("httpx", [3], "hosts")], _secrets(), [4]),
+    "env-wayback": _subs() + [st("wayback", [0, 1], "hosts"), st("endpoint-scan", [2], "param-urls")],
+    "env-wayback-secrets": chain(_subs(), _secrets(), [0, 1]),
+    "env-scan": chain(chain(_recon(), _web_full(), [3]), _wayback("endpoint-scan"), [3]),
+}
+# endpoint-scan (one conditional chain on one URL) and ip-discover (a single tool) have no fan-out to spread,
+# so they run as one job per target and have no distributed version.
+
+
+def distributed_name(name: str) -> str:
+    return f"{name}-distributed"
+
+
+def _leaves_produce(stages: list[dict]) -> str:
+    parents = {f for s in stages for f in s["from"] if f != SEED}
+    kinds = {CATALOG[s["t"]][4] for i, s in enumerate(stages) if i not in parents} - {"findings"}
+    if not kinds:
+        return "findings"
+    return kinds.pop() if len(kinds) == 1 else "items"
+
+
+def _upsert(s: Session, name: str, **fields) -> Template:
+    t = s.exec(select(Template).where(Template.name == name)).first()
+    if t is None:
+        t = Template(name=name, **fields)
+    else:
+        for k, v in fields.items():
+            setattr(t, k, v)
+    s.add(t)
+    s.commit()
+    s.refresh(t)
+    return t
+
+
+def seed_templates(s: Session) -> None:
+    ids: dict[str, int] = {}
+    for name, (kind, title, cat, accepts, produces, depth, desc) in CATALOG.items():
+        t = _upsert(s, name, kind=kind, title=title, category=cat, accepts=accepts, produces=produces,
+                    depth=depth, description=desc, builtin=True, variant_of="",
+                    spec_json=json.dumps({"name": name, "params": []}))
+        ids[name] = t.id
+    wanted = set(CATALOG)
+    for wf, stages in DISTRIBUTED.items():
+        kind, title, cat, accepts, _produces, depth, desc = CATALOG[wf]
+        spec = {"stages": [{"template_id": ids[x["t"]], "from": x["from"],
+                            "input": x["input"] or DEFAULT_INPUT.get(CATALOG[x["t"]][3], "all"),
+                            "args": x["args"]} for x in stages]}
+        name = distributed_name(wf)
+        wanted.add(name)
+        _upsert(s, name, kind="pipeline", title=title, category=cat, accepts=accepts,
+                produces=_leaves_produce(stages), depth=depth, builtin=True, variant_of=wf,
+                description=f"{desc} Distributed: {len(stages)} steps, each fanned out over every scanner.",
+                spec_json=json.dumps(spec))
+    # drop built-ins that no longer exist in this version (unless a scheduler still points at them)
+    used = set(s.exec(select(Scheduler.template_id)).all())
+    for t in s.exec(select(Template).where(Template.builtin == True)).all():  # noqa: E712
+        if t.name not in wanted and t.id not in used:
+            s.delete(t)
+    s.commit()
 
 
 def seed() -> None:
     with Session(engine) as s:
-        admin = s.exec(select(User).where(User.username == settings.admin_user)).first()
-        if not admin:
-            admin = User(username=settings.admin_user, password_hash=hash_password(settings.admin_password),
-                         role="admin", must_change_password=True)
-            s.add(admin)
-            s.commit()
-            s.refresh(admin)
-
+        ensure_admin(s)
+        seed_templates(s)
         if settings.enroll_token:
             th = hash_token(settings.enroll_token)
             if not s.exec(select(EnrollToken).where(EnrollToken.token_hash == th)).first():
-                s.add(EnrollToken(token_hash=th, label="seed (from .env)"))
-
-        # a placeholder LLM profile so the agent templates are visible; set a real key to run them for real
-        profile = s.exec(select(LLMProfile).where(LLMProfile.name == DEMO_PROFILE)).first()
-        if not profile:
-            profile = LLMProfile(name=DEMO_PROFILE, provider="anthropic", model="claude-sonnet-5",
-                                 api_key_secret="", created_by=admin.id)
-            s.add(profile)
-            s.commit()
-            s.refresh(profile)
-
-        # a ready-to-use Claude Code profile: NO API key - it rides this container's own authenticated Claude
-        # Code login (authorize once with `claude` /login; it persists on /data). Appears in every agent/operator
-        # picker so a subscription login can drive a run out of the box.
-        cc_name = "Claude Code (subscription login)"
-        if not s.exec(select(LLMProfile).where(LLMProfile.name == cc_name)).first():
-            s.add(LLMProfile(name=cc_name, provider="claude-code", model="claude-sonnet-4-6",
-                             api_key_secret="", created_by=admin.id))
-            s.commit()
-
-        for name, desc in WORKFLOWS.items():
-            _ensure_template(s, name, "workflow", name, admin.id, description=desc)
-        for name, desc in TOOLS.items():
-            _ensure_template(s, name, "tool", name, admin.id, description=desc)
-        for name, desc in AGENTS.items():
-            _ensure_template(s, name, "ai_agent", name, admin.id, description=desc,
-                             llm_profile_id=profile.id, context=AGENT_CONTEXT)
-
-        # Telegram notification settings singleton — seed from env if a bot token/chat id were provided
-        if not s.exec(select(NotifySettings)).first():
+                s.add(EnrollToken(token_hash=th, label="built-in agent", prefix=settings.enroll_token[:6]))
+        if not s.get(NotifySettings, 1):
             ns = NotifySettings(id=1)
             if settings.telegram_bot_token and settings.telegram_chat_id:
                 ns.telegram_enabled = True
                 ns.telegram_token = settings.telegram_bot_token
                 ns.telegram_chat_id = settings.telegram_chat_id
+            if settings.slack_webhook_url:
+                ns.slack_enabled = True
+                ns.slack_webhook = settings.slack_webhook_url
             s.add(ns)
         s.commit()

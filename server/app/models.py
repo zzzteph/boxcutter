@@ -1,4 +1,4 @@
-"""SQLModel tables. See SPEC.md section 4.
+"""SQLModel tables.
 
 Every string column has an explicit VARCHAR length or is TEXT, so CREATE TABLE compiles on MySQL/MariaDB (it
 would otherwise reject an unbounded VARCHAR). Lengths are also fine on SQLite/Postgres. Long/free-form fields
@@ -21,126 +21,87 @@ def _text(default=""):
     return Field(default=default, sa_column=Column(Text))
 
 
-class User(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    username: str = Field(index=True, unique=True, max_length=150)
-    password_hash: str = Field(max_length=255)
-    role: str = Field(default="user", max_length=32)          # admin | user | service
-    must_change_password: bool = False
-    totp_secret: Optional[str] = Field(default=None, sa_column=Column(Text))   # base32 TOTP secret, server-only
-    totp_enabled: bool = False                                # optional per-user 2FA
-    created_at: datetime = Field(default_factory=now)
-
-
-class ApiKey(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    user_id: int = Field(foreign_key="user.id", index=True)
-    name: str = Field(default="", max_length=120)
-    prefix: str = Field(default="", max_length=32)
-    key_hash: str = Field(index=True, max_length=128)
-    created_at: datetime = Field(default_factory=now)
-    last_used_at: Optional[datetime] = None
-    revoked: bool = False
-
-
-class LLMProfile(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: str = Field(index=True, unique=True, max_length=150)
-    provider: str = Field(max_length=40)                      # anthropic | openai | litellm | claude-code
-    model: Optional[str] = Field(default=None, max_length=120)
-    proxy_url: Optional[str] = Field(default=None, max_length=500)
-    api_key_secret: str = _text("")                          # server-only, never serialized to the browser
-    created_by: Optional[int] = Field(default=None, foreign_key="user.id")
+class AppSettings(SQLModel, table=True):
+    """Singleton (id=1). The one admin account's password hash (HTTP basic auth; the username is fixed)."""
+    id: Optional[int] = Field(default=1, primary_key=True)
+    admin_password_hash: str = Field(default="", max_length=255)
+    password_changed_at: Optional[datetime] = None
 
 
 class Template(SQLModel, table=True):
+    """A scan type the UI can run.
+
+    kind:
+      tool      - one engine tool (`boxcutter <tool> <target>`), one job per target
+      workflow  - one engine YAML workflow (`boxcutter workflow <name> <target>`), one job per target
+      pipeline  - a chain of the above: each stage's results are filtered by data type and fanned out as
+                  separate jobs to the next stage, spread across every scanner. Built-in pipelines are the
+                  distributed versions of the composite workflows; users build their own.
+    spec_json:
+      tool/workflow -> {"name": "<engine name>", "params": [{"flag": "--x", "value": "y"}]}
+      pipeline      -> {"stages": [{"template_id": 1, "from": [-1], "input": "urls", "args": ""}, ...]}
+    """
     id: Optional[int] = Field(default=None, primary_key=True)
-    name: str = Field(max_length=200)
-    kind: str = Field(max_length=32)                          # workflow | tool | ai_agent
-    spec_json: str = _text("{}")                             # {"name": "...", "flags": [...]}
-    description: str = _text("")                             # official boxcutter description, shown in the picker
-    context: Optional[str] = Field(default=None, sa_column=Column(Text))
-    llm_profile_id: Optional[int] = Field(default=None, foreign_key="llmprofile.id")
-    owner_id: int = Field(foreign_key="user.id")
+    name: str = Field(index=True, unique=True, max_length=120)   # slug
+    title: str = Field(default="", max_length=200)               # human name shown in the UI
+    kind: str = Field(max_length=16)
+    builtin: bool = False
+    variant_of: str = Field(default="", max_length=120)          # built-in pipeline: the workflow it distributes
+    category: str = Field(default="Custom", max_length=40)
+    accepts: str = Field(default="any", max_length=24)           # domain|host|url|endpoint|js|spec|graphql|network|any
+    produces: str = Field(default="findings", max_length=16)     # findings|hosts|urls|items
+    depth: str = Field(default="standard", max_length=16)        # quick|standard|deep
+    description: str = _text("")
+    spec_json: str = _text("{}")
     created_at: datetime = Field(default_factory=now)
-
-
-class TemplateShare(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    template_id: int = Field(foreign_key="template.id", index=True)
-    user_id: int = Field(foreign_key="user.id", index=True)
-    perm: str = Field(default="read", max_length=16)
 
 
 class Scan(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(max_length=255)
-    owner_id: int = Field(foreign_key="user.id", index=True)
-    template_id: int = Field(foreign_key="template.id")
-    status: str = Field(default="draft", index=True, max_length=24)   # draft|queued|running|paused|stopped|done
+    template_id: Optional[int] = Field(default=None, index=True)
+    template_name: str = Field(default="", max_length=200)       # denormalized, survives a template delete
+    scheduler_id: Optional[int] = Field(default=None, index=True)
+    status: str = Field(default="queued", index=True, max_length=24)   # queued|running|paused|stopped|done
     run_no: int = 0
-    vars_json: str = _text("{}")                             # scan-specific inputs: {context, creds, custom:[{key,value}]}
-    authorized_ack_at: Optional[datetime] = None
+    vars_json: str = _text("{}")                                 # {custom: [{key, value}], debug: bool}
+    plan_json: str = _text("[]")                                 # the stage plan of the current run (snapshot)
     created_at: datetime = Field(default_factory=now)
-    last_run_at: Optional[datetime] = None                    # when the current/last run started
-    finished_at: Optional[datetime] = None                    # when the last run completed (for duration)
-
-
-class ScanShare(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    scan_id: int = Field(foreign_key="scan.id", index=True)
-    user_id: int = Field(foreign_key="user.id", index=True)
-    perm: str = Field(default="read", max_length=16)
-
-
-class Stage(SQLModel, table=True):
-    """A DOWNSTREAM stage of a pipeline scan. Stage 0 is implicit — it is the scan's own template_id, run on the
-    scan's uploaded targets. Each Stage row (stage_no >= 1) declares a template to run on the items the PREVIOUS
-    stage produced: when a stage drains, its ScanItems are filtered (item_filter) and become this stage's
-    targets, enqueued as their own jobs so the whole runner fleet fans out over them. See docs/pipelines-design.md."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    scan_id: int = Field(foreign_key="scan.id", index=True)
-    stage_no: int = Field(default=1)                          # >= 1; stage 0 is the scan's own template
-    # which stage's produced items this stage consumes. -1 = the default (the immediately-preceding stage_no-1,
-    # the old linear behaviour). Set explicitly for a fan-out BRANCH so several stages can consume the SAME
-    # upstream and run in parallel (recon -> nuclei AND recon -> sqlmap).
-    from_stage: int = Field(default=-1)
-    template_id: int = Field(foreign_key="template.id")
-    item_filter: str = Field(default="all", max_length=32)    # all | urls  (which upstream items become targets)
-    created_at: datetime = Field(default_factory=now)
+    last_run_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
 
 
 class Target(SQLModel, table=True):
+    """What a job runs on. stage = -1 for the scan's own (user-supplied) targets; stage = i for the items that
+    were fanned out into pipeline stage i. `key` de-duplicates within a stage; `args_json` carries per-target
+    extra argv (e.g. --method/--data for a captured POST request)."""
+    __table_args__ = (Index("ix_target_scan_stage_key", "scan_id", "stage", "key"),)
     id: Optional[int] = Field(default=None, primary_key=True)
-    scan_id: int = Field(foreign_key="scan.id", index=True)
+    scan_id: int = Field(index=True)
+    stage: int = Field(default=-1)
     value: str = Field(max_length=1024)
-    stage_no: int = Field(default=0, index=True)              # which pipeline stage this target belongs to (0 = seed)
+    key: str = Field(default="", max_length=64)
+    args_json: str = _text("")
 
 
 class Job(SQLModel, table=True):
-    # composite index for the fair-claim + per-scan status counts (hot path at hundreds of thousands of jobs)
-    __table_args__ = (Index("ix_job_scan_status_created", "scan_id", "status", "created_at"),)
+    __table_args__ = (Index("ix_job_scan_status_created", "scan_id", "status", "created_at"),
+                      Index("ix_job_scan_run_stage", "scan_id", "run_no", "stage", "status"))
     id: Optional[int] = Field(default=None, primary_key=True)
-    scan_id: int = Field(foreign_key="scan.id", index=True)
-    target_id: int = Field(foreign_key="target.id")
-    template_id: int = Field(foreign_key="template.id")
+    scan_id: int = Field(index=True)
+    target_id: int = Field(index=True)
     run_no: int = 0
-    stage_no: int = Field(default=0)                          # pipeline stage this job belongs to (0 = seed stage)
-    # legacy column (kept so existing DBs still map cleanly); always "" now. Any agent can run any job.
-    needs_model: str = Field(default="", max_length=120)
-    dedup_key: str = Field(index=True, unique=True, max_length=128)
+    stage: int = 0                                               # index into the scan's plan
+    dedup_key: str = Field(index=True, unique=True, max_length=64)
     # opaque per-job run token: integer PKs get reused after a scan is deleted (SQLite reuses rowids), so a
     # stale agent finishing a deleted job could post its result to a REUSED id now owned by a new scan. The
     # agent echoes this token; result/event posts whose token doesn't match the current job are rejected.
     token: str = Field(default="", max_length=32)
     status: str = Field(default="pending", index=True, max_length=24)  # pending|claimed|running|done|failed|cancelled
-    # the workflow box this job is CURRENTLY inside (from the engine's step markers), so the live log lines it
-    # streams can be attributed to that box for the per-box log view. Transient; "" between/after steps.
-    active_node: str = Field(default="", max_length=64)
-    runner_id: Optional[int] = Field(default=None, foreign_key="runner.id")
+    runner_id: Optional[int] = Field(default=None, index=True)
     attempts: int = 0
-    argv_json: str = _text("[]")                             # the exact boxcutter command run for this target
-    output: str = _text("")                                 # raw engine stdout (report) for the debug view
+    argv_json: str = _text("[]")                                # the exact boxcutter command run for this target
+    output: str = _text("")                                     # raw engine stdout for the debug view
     claimed_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     error: Optional[str] = Field(default=None, sa_column=Column(Text))
@@ -148,11 +109,10 @@ class Job(SQLModel, table=True):
 
 
 class Finding(SQLModel, table=True):
-    # (scan_id, fingerprint) speeds the per-result diff upsert; (scan_id, severity) speeds the sorted findings list
     __table_args__ = (Index("ix_finding_scan_fp", "scan_id", "fingerprint"),
                       Index("ix_finding_scan_sev", "scan_id", "severity"))
     id: Optional[int] = Field(default=None, primary_key=True)
-    scan_id: int = Field(foreign_key="scan.id", index=True)
+    scan_id: int = Field(index=True)
     target: str = Field(default="", max_length=1024)
     fingerprint: str = Field(index=True, max_length=128)
     template_kind: str = Field(default="", max_length=32)
@@ -162,118 +122,73 @@ class Finding(SQLModel, table=True):
     cls: str = Field(default="", max_length=120)
     evidence: str = _text("")
     reproduce: str = _text("")
-    state: str = Field(default="new", max_length=24)          # new | open | resolved  (auto, from the diff)
+    state: str = Field(default="new", max_length=24)             # new | open | resolved  (auto, from the diff)
     first_seen: datetime = Field(default_factory=now)
     last_seen: datetime = Field(default_factory=now)
     raw_json: str = _text("{}")
 
 
 class ScanItem(SQLModel, table=True):
-    """A non-finding result: a URL, host, endpoint or plain string a workflow/tool emits instead of an issue
-    (a crawl, a path-bust, an enum). Kept out of Finding so the findings table stays a list of ISSUES, while
-    this data is still listable and downloadable one-per-line instead of being dropped on the floor."""
+    """A non-finding result: a URL, host or endpoint a tool/workflow emits instead of an issue. Listable and
+    downloadable one-per-line; in a pipeline these are what flows into the next stage."""
     __table_args__ = (Index("ix_scanitem_scan_fp", "scan_id", "fingerprint"),
                       Index("ix_scanitem_scan_type", "scan_id", "asset_type"))
     id: Optional[int] = Field(default=None, primary_key=True)
-    scan_id: int = Field(foreign_key="scan.id", index=True)
+    scan_id: int = Field(index=True)
     target: str = Field(default="", max_length=1024)
     template_kind: str = Field(default="", max_length=32)
-    fingerprint: str = Field(default="", max_length=128)      # of the normalized value; dedupes across reruns
-    value: str = Field(default="", max_length=2048)           # the URL / host / item itself
-    # discovered-asset type (domain|subdomain|url|ip|endpoint|other), computed at ingest for the Assets explorer
-    asset_type: str = Field(default="", max_length=16)
-    label: str = Field(default="", max_length=400)            # the engine's title for it, when it had one
+    fingerprint: str = Field(default="", max_length=128)
+    value: str = Field(default="", max_length=2048)
+    asset_type: str = Field(default="", max_length=16)           # domain|subdomain|url|ip|endpoint|other
+    label: str = Field(default="", max_length=400)
     cls: str = Field(default="", max_length=120)
-    stage_no: int = Field(default=0, index=True)              # the pipeline stage that produced it (for promotion)
+    stage: int = 0
     run_no: int = 0
     first_seen: datetime = Field(default_factory=now)
     last_seen: datetime = Field(default_factory=now)
 
 
-class Screenshot(SQLModel, table=True):
-    """A captured page: url + full PNG + thumbnail (both base64). Stored apart from ScanItem because a PNG far
-    exceeds a listable value. Deduped per (scan, url) so a rerun refreshes rather than duplicates."""
-    __table_args__ = (Index("ix_screenshot_scan_fp", "scan_id", "fingerprint"),)
+class Scheduler(SQLModel, table=True):
+    """A recurring scan: a name, how often, what to run and on what. It owns one Scan and re-runs it every
+    `interval_seconds`, so the findings diff over time (new / open / resolved)."""
     id: Optional[int] = Field(default=None, primary_key=True)
-    scan_id: int = Field(foreign_key="scan.id", index=True)
-    target: str = Field(default="", max_length=1024)
-    url: str = Field(default="", max_length=2048)
-    title: str = Field(default="", max_length=400)
-    status: int = 0                                           # HTTP status at capture
-    fingerprint: str = Field(default="", max_length=128)      # of (target, url); dedupes across reruns
-    full: str = _text("")                                    # full-page PNG, base64
-    thumbnail: str = _text("")                               # thumbnail PNG, base64
-    run_no: int = 0
-    first_seen: datetime = Field(default_factory=now)
-    last_seen: datetime = Field(default_factory=now)
-
-
-class Schedule(SQLModel, table=True):
-    """Recurring re-run of a scan - continuous perimeter monitoring. Every ``interval_seconds`` the server's
-    sweeper re-runs the scan (bumps run_no, re-enqueues) when it isn't already running, so findings diff over
-    time (new / open / resolved). One schedule per scan (it re-runs the SAME scan, building on its history)."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    scan_id: int = Field(foreign_key="scan.id", index=True, unique=True)
-    interval_seconds: int = 3600                              # how often to re-run (min enforced in the API)
+    name: str = Field(max_length=200)
+    template_id: int = Field(index=True)
+    targets_text: str = _text("")                               # one target per line
+    vars_json: str = _text("{}")
+    interval_seconds: int = 86400
     enabled: bool = True
+    scan_id: Optional[int] = Field(default=None, index=True)
     last_run_at: Optional[datetime] = None
-    next_run_at: Optional[datetime] = Field(default=None, index=True)   # when the sweeper should fire it next
-    created_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    next_run_at: Optional[datetime] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=now)
-
-
-class OperatorRun(SQLModel, table=True):
-    """A DIRECT, in-container run of an ai operator agent (joseph). Unlike a Scan - which fans jobs out across
-    the runner fleet - an operator run executes the engine as a subprocess on THIS server host: you pick an LLM
-    profile, give a target + brief, and watch the reasoning stream live, then read the report. Holds the run
-    config, the accumulated live log (stderr narration), and the final report/findings."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    owner_id: int = Field(foreign_key="user.id", index=True)
-    agent: str = Field(default="joseph", max_length=40)
-    target: str = Field(default="", max_length=1024)
-    profile_id: Optional[int] = Field(default=None, foreign_key="llmprofile.id")
-    profile_name: str = Field(default="", max_length=150)     # denormalized for display after a profile is deleted
-    status: str = Field(default="running", index=True, max_length=24)   # running | done | failed | stopped
-    vars_json: str = _text("{}")           # {context, creds: bool, dry_run, analysts, max_steps, provider, model}
-    log: str = _text("")                   # accumulated stderr (the reasoning stream), persisted at finish
-    report: str = _text("")                # final human-readable markdown report
-    findings_json: str = _text("[]")
-    meta_json: str = _text("{}")           # {tokens, cost_usd, steps, mutations, scripts, workspace}
-    error: Optional[str] = Field(default=None, sa_column=Column(Text))
-    exit_code: Optional[int] = None
-    created_at: datetime = Field(default_factory=now, index=True)
-    finished_at: Optional[datetime] = None
 
 
 class JobEvent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    job_id: int = Field(foreign_key="job.id", index=True)
-    scan_id: int = Field(foreign_key="scan.id", index=True)
-    seq: int = 0
+    job_id: int = Field(index=True)
+    scan_id: int = Field(index=True)
     phase: str = Field(default="", max_length=64)
     agent: str = Field(default="", max_length=64)
-    node: str = Field(default="", max_length=64)        # live canvas: which workflow box (graph node id) this is
     line: str = _text("")
-    reasoning: Optional[str] = Field(default=None, sa_column=Column(Text))
-    at: datetime = Field(default_factory=now, index=True)     # indexed for age-based log retention pruning
+    at: datetime = Field(default_factory=now, index=True)        # indexed for age-based log retention pruning
 
 
 class Runner(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(default="", max_length=150)
     host: str = Field(default="", max_length=255)
-    internal: bool = False                                    # the all-in-one server's built-in agent: a permanent
-    #                                                           singleton — concurrency-adjustable but NOT removable
-    ip: str = Field(default="", max_length=64)                # the agent host's IP, reported at enroll/heartbeat
-    version: str = Field(default="", max_length=40)            # the agent (supervisor) version
-    engine_version: str = Field(default="", max_length=64)    # the boxcutter engine the agent actually runs
-    status: str = Field(default="idle", max_length=24)        # idle | busy | disconnected (from last_heartbeat)
-    slots: int = 1                                            # concurrency the agent currently reports
-    desired_slots: Optional[int] = None                       # concurrency the server is asking the agent to adopt
+    internal: bool = False                                       # the server's built-in agent (not removable)
+    ip: str = Field(default="", max_length=64)
+    version: str = Field(default="", max_length=40)
+    engine_version: str = Field(default="", max_length=64)
+    status: str = Field(default="idle", max_length=24)           # idle | busy | disconnected (from last_heartbeat)
+    slots: int = 1                                               # concurrency the agent currently reports
+    desired_slots: Optional[int] = None                          # concurrency the server asks the agent to adopt
     busy_slots: int = 0
     current_jobs_json: str = _text("[]")
-    metrics_json: str = _text("{}")                          # {"cpu": pct, "mem": pct} from the runner heartbeat
-    token_hash: str = Field(default="", max_length=128)
+    metrics_json: str = _text("{}")                              # {"cpu": pct, "mem": pct}
+    token_hash: str = Field(default="", max_length=128, index=True)
     last_heartbeat: Optional[datetime] = None
     enrolled_at: datetime = Field(default_factory=now)
 
@@ -281,27 +196,29 @@ class Runner(SQLModel, table=True):
 class Activity(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     at: datetime = Field(default_factory=now, index=True)
-    kind: str = Field(default="", max_length=40)              # scan_created | job_claimed | scan_done | ...
+    kind: str = Field(default="", max_length=40)                 # scan_created | job_claimed | scan_done | ...
     message: str = Field(default="", max_length=500)
-    scan_id: Optional[int] = Field(default=None, foreign_key="scan.id", index=True)
-    runner_id: Optional[int] = Field(default=None, foreign_key="runner.id")
-    severity: str = Field(default="info", max_length=16)      # info | warn | critical
+    scan_id: Optional[int] = Field(default=None, index=True)
+    runner_id: Optional[int] = Field(default=None)
+    severity: str = Field(default="info", max_length=16)         # info | warn | critical
 
 
 class NotifySettings(SQLModel, table=True):
-    """Singleton (id=1) — Telegram notification config. The bot token is a server-only secret (never serialized
-    to the browser), like LLM api keys."""
+    """Singleton (id=1): Telegram + Slack notifications. Bot token / webhook URL are server-only secrets."""
     id: Optional[int] = Field(default=1, primary_key=True)
     telegram_enabled: bool = False
-    telegram_token: str = _text("")                          # secret, server-only
+    telegram_token: str = _text("")
     telegram_chat_id: str = Field(default="", max_length=64)
-    severities_json: str = _text('["Critical", "High"]')     # which finding severities to send
+    slack_enabled: bool = False
+    slack_webhook: str = _text("")
+    severities_json: str = _text('["Critical", "High"]')        # which new-finding severities to send
+    scan_done: bool = True                                       # also send a summary when a scan finishes
 
 
 class EnrollToken(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     token_hash: str = Field(index=True, max_length=128)
     label: str = Field(default="", max_length=150)
-    created_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    prefix: str = Field(default="", max_length=16)
     created_at: datetime = Field(default_factory=now)
     revoked: bool = False

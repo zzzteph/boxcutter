@@ -11,7 +11,7 @@ from sqlalchemy import func, update
 from sqlmodel import Session, select
 
 from .assets import classify as classify_asset
-from .models import Finding, ScanItem, Screenshot
+from .models import Finding, ScanItem
 
 # Informational reconnaissance / reachability items (e.g. "host reachable") are not issues and must not render
 # as findings.
@@ -57,11 +57,9 @@ def item_fingerprint(target: str, value: str) -> str:
 
 
 def upsert_item(session: Session, scan_id: int, kind: str, target: str, value: str,
-                label: str = "", cls: str = "", run_no: int = 0, stage_no: int = 0) -> bool:
+                label: str = "", cls: str = "", run_no: int = 0, stage: int = 0) -> bool:
     """Insert a non-finding item, or bump `last_seen` if this scan already has it (so a rerun refreshes rather
-    than duplicates). Returns True when the row is new. `stage_no` records the pipeline stage that produced the
-    item, set only on INSERT — an item keeps its first-seen stage across reruns, so stage promotion selects the
-    right producer's output (see queue.promote_stage)."""
+    than duplicates). Returns True when the row is new. `stage` is the pipeline stage that first produced it."""
     fp = item_fingerprint(target, value)
     row = session.exec(select(ScanItem).where(ScanItem.scan_id == scan_id,
                                               ScanItem.fingerprint == fp)).first()
@@ -72,35 +70,8 @@ def upsert_item(session: Session, scan_id: int, kind: str, target: str, value: s
         return False
     row = ScanItem(scan_id=scan_id, target=target, template_kind=kind, fingerprint=fp,
                    value=value[:2048], asset_type=classify_asset(value), label=(label or "")[:400],
-                   run_no=run_no, stage_no=stage_no, first_seen=at, last_seen=at)
+                   run_no=run_no, stage=stage, first_seen=at, last_seen=at)
     row.cls = (cls or "")[:120]      # 'cls' can't be a constructor kwarg (shadows __new__), same as Finding
-    session.add(row)
-    return True
-
-
-def upsert_screenshot(session: Session, scan_id: int, target: str, f: dict, run_no: int = 0) -> bool:
-    """Insert a screenshot record (url + full PNG + thumbnail, base64), or refresh it on a rerun. Deduped per
-    (scan, url). Returns True when the row is new. `image` is accepted as an alias for `full`."""
-    url = str(f.get("url", "")).strip()
-    fp = item_fingerprint(target, url or str(f.get("title", "")))
-    full = str(f.get("full") or f.get("image") or "")
-    thumb = str(f.get("thumbnail") or "")
-    at = datetime.now(timezone.utc)
-    row = session.exec(select(Screenshot).where(Screenshot.scan_id == scan_id,
-                                                Screenshot.fingerprint == fp)).first()
-    if row is not None:
-        if full:
-            row.full = full
-        if thumb:
-            row.thumbnail = thumb
-        row.title = str(f.get("title", ""))[:400]
-        row.status = int(f.get("status") or 0)
-        row.last_seen, row.run_no = at, run_no
-        session.add(row)
-        return False
-    row = Screenshot(scan_id=scan_id, target=target, url=url[:2048], title=str(f.get("title", ""))[:400],
-                     status=int(f.get("status") or 0), fingerprint=fp, full=full, thumbnail=thumb,
-                     run_no=run_no, first_seen=at, last_seen=at)
     session.add(row)
     return True
 
@@ -142,7 +113,6 @@ def upsert_finding(session: Session, scan_id: int, kind: str, target: str, f: di
         if existing.state == "resolved":
             existing.state = "open"           # a resolved finding seen again reopens
         session.add(existing)
-        session.commit()
         return fp, False
     finding = Finding(
         scan_id=scan_id, target=target, fingerprint=fp, template_kind=kind,
@@ -152,7 +122,7 @@ def upsert_finding(session: Session, scan_id: int, kind: str, target: str, f: di
         raw_json=raw, state="new", first_seen=now, last_seen=now)
     finding.cls = str(f.get("cls", "")).lower()   # 'cls' can't be a constructor kwarg (shadows __new__)
     session.add(finding)
-    session.commit()
+    session.flush()                           # so a duplicate in the same result batch is seen as existing
     return fp, True
 
 
@@ -166,8 +136,7 @@ def reconcile_run(session: Session, scan_id: int, run_no: int, cutoff: datetime 
     Entirely set-based (a couple of bulk UPDATEs + COUNTs) so it never loads the finding rows — it stays fast
     even on a scan with hundreds of thousands of findings, and won't block the agent's result request.
     """
-    cut = _aware(cutoff)
-    cut = cut.replace(tzinfo=None) if cut else None       # compare naive-UTC to the stored naive-UTC datetimes
+    cut = _aware(cutoff)                                  # stored datetimes are timezone-aware UTC
     if cut is not None:
         session.execute(update(Finding).where(
             Finding.scan_id == scan_id, Finding.state != "resolved", Finding.last_seen < cut

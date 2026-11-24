@@ -1,307 +1,194 @@
+"""Templates (what a scan runs): the built-in catalog, the built-in distributed workflows, and the user's own
+pipelines and presets. Built-ins are read-only."""
 from __future__ import annotations
 
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Template, User
-from ..security import current_user
-from ..seed import TOOLS as TOOL_DESC, WORKFLOWS as BUILTIN_WORKFLOWS
-from ..tool_flags import TOOL_FLAGS
-from ..workflow_compile import TOOL_KIND, WorkflowError, compile_pipeline
-from ..workflow_compile import _FLOW_TOOLS as FLOW_TOOLS
+from ..models import Scheduler, Template
+from ..pipeline import DEFAULT_INPUT, INPUT_HELP, INPUTS, SEED, PlanError, build_plan, flatten
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
-KINDS = {"workflow", "tool", "ai_agent"}
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
-class TemplateIn(BaseModel):
-    name: str
-    kind: str
-    spec: dict = {}                    # {"name": "irvin"|"web-full"|"nuclei", "flags": [...]}
-    description: str | None = None
-    context: str | None = None
-    llm_profile_id: int | None = None
+def _spec(t: Template) -> dict:
+    try:
+        return json.loads(t.spec_json or "{}") or {}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
-class TemplatePatch(BaseModel):
-    name: str | None = None
-    kind: str | None = None
-    spec: dict | None = None
-    description: str | None = None
-    context: str | None = None
-    llm_profile_id: int | None = None
-
-
-def _out(t: Template) -> dict:
-    return {"id": t.id, "name": t.name, "kind": t.kind, "spec": json.loads(t.spec_json or "{}"),
-            "description": t.description, "context": t.context, "llm_profile_id": t.llm_profile_id,
-            "owner_id": t.owner_id}
-
-
-@router.post("")
-def create_template(body: TemplateIn, user: User = Depends(current_user),
-                    session: Session = Depends(get_session)):
-    if body.kind not in KINDS:
-        raise HTTPException(400, f"kind must be one of {sorted(KINDS)}")
-    t = Template(name=body.name, kind=body.kind, spec_json=json.dumps(body.spec or {}),
-                 description=body.description or "",
-                 context=body.context, llm_profile_id=body.llm_profile_id, owner_id=user.id)
-    session.add(t)
-    session.commit()
-    session.refresh(t)
-    return _out(t)
+def _out(t: Template, session: Session | None = None, with_plan: bool = False) -> dict:
+    spec = _spec(t)
+    out = {"id": t.id, "name": t.name, "title": t.title or t.name, "kind": t.kind, "builtin": t.builtin,
+           "variant_of": t.variant_of, "category": t.category, "accepts": t.accepts, "produces": t.produces,
+           "depth": t.depth, "description": t.description, "spec": spec}
+    if t.kind == "pipeline":
+        out["steps"] = len(spec.get("stages") or [])
+    if with_plan and session is not None:
+        try:
+            out["plan"] = build_plan(session, t)
+            out["plan_error"] = ""
+        except PlanError as e:
+            out["plan"], out["plan_error"] = [], str(e)
+    return out
 
 
 @router.get("")
-def list_templates(user: User = Depends(current_user), session: Session = Depends(get_session)):
-    # single shared group: everyone sees every template
-    templates = session.exec(select(Template)).all()
-    return [_out(t) for t in sorted(templates, key=lambda x: x.id, reverse=True)]
+def list_templates(session: Session = Depends(get_session)):
+    rows = session.exec(select(Template).order_by(Template.builtin.desc(), Template.id)).all()
+    return [_out(t) for t in rows]
 
 
-# ---- custom workflow builder: wire tool boxes into a workflow (see docs/workflow-builder-design.md) ----
-class WorkflowGraphIn(BaseModel):
-    name: str                          # the workflow slug (also the display name); 2-64 [a-z0-9-]
-    help: str | None = None
-    graph: dict = {}                   # {nodes:[{id, tool, args}], edges:[{from, to}]}
-    template_id: int | None = None     # set to UPDATE an existing custom-workflow template
+@router.get("/inputs")
+def inputs():
+    """The data filters a pipeline step can apply to what it reads."""
+    return [{"value": k, "label": v, "help": INPUT_HELP[k]} for k, v in INPUTS.items()]
 
 
-# tool -> pipeline stage, so the builder's picker can GROUP the flat tool list (mirrors registry ordering).
-_TOOL_GROUP = {
-    "subfinder": "Recon", "dnsx": "Recon", "dns-brute": "Recon", "ping-scan": "Recon", "nmap": "Recon",
-    "httpx": "Recon", "liveless": "Recon", "api-map": "Recon", "smart-enum": "Recon", "screenshot": "Recon",
-    "wayback": "Recon", "wayback-domains": "Recon",
-    "katana-crawl": "Crawl", "zap-crawl": "Crawl", "js-endpoints": "Crawl", "js-files": "Crawl",
-    "extract-domains": "Crawl", "harvest": "Crawl",
-    "browser-login": "Crawl", "browser-actions": "Crawl", "visual-driver": "Crawl", "vision-verify": "Crawl",
-    "nuclei": "Vuln scanners", "nuclei-dast": "Vuln scanners", "sqlmap": "Vuln scanners",
-    "blind-oracle": "Vuln scanners",
-    "bola-walk": "Vuln scanners", "mass-assign": "Vuln scanners", "dirb": "Vuln scanners",
-    "dirsearch": "Vuln scanners", "zap-scan-url": "Vuln scanners", "zap-scan-full": "Vuln scanners",
-    "zap-scan-openapi": "Vuln scanners",
-    "path-fuzz": "Fuzzing", "path-bust": "Fuzzing", "fuzz": "Fuzzing",
-    "scan-secrets": "Secrets", "git-extract": "Secrets",
-    "swagger-parser": "API specs", "swagger-endpoints": "API specs", "swagger-specs": "API specs",
-    "graphql-detect": "GraphQL", "graphql-audit": "GraphQL",
-    "http-request": "Generic",
-    "aggregate": "Flow", "filter": "Flow", "limit": "Flow", "hosts": "Flow",
-    "uniq-urls": "Flow", "js-urls": "Flow", "param-urls": "Flow", "dedup-params": "Flow",
-}
-_GROUP_ORDER = ["Recon", "Crawl", "Vuln scanners", "Fuzzing", "Secrets", "API specs", "GraphQL",
-                "Flow", "Generic", "Other"]
-# A short, SPECIFIC noun for what each box actually PRODUCES — because the raw output kind ("items") is the same
-# for a dozen tools that emit very different things. Shown on the box as "out: <produces>". Missing -> kind.
-_TOOL_PRODUCES = {
-    "subfinder": "subdomains", "dnsx": "resolved hosts", "dns-brute": "resolved subdomains",
-    "ping-scan": "live hosts", "nmap": "open ports (host:port)", "httpx": "live HTTP services (URLs)",
-    "liveless": "live URLs", "api-map": "API findings", "smart-enum": "candidate paths",
-    "screenshot": "page screenshots", "wayback": "archived URLs", "wayback-domains": "archived hostnames",
-    "katana-crawl": "crawled URLs", "zap-crawl": "crawled URLs", "js-endpoints": "API endpoints",
-    "js-files": "JavaScript file URLs", "extract-domains": "referenced hostnames",
-    "harvest": "crawled requests (URLs)", "browser-login": "a login session (cookies/token)",
-    "browser-actions": "browser action results", "visual-driver": "screenshots + page state",
-    "vision-verify": "XSS-confirmation findings",
-    "nuclei": "vulnerability findings", "nuclei-dast": "DAST vulnerability findings",
-    "sqlmap": "SQL-injection findings", "blind-oracle": "injection findings",
-    "bola-walk": "BOLA/IDOR findings", "mass-assign": "mass-assignment findings",
-    "dirb": "discovered paths (findings)", "dirsearch": "discovered paths (findings)",
-    "zap-scan-url": "ZAP findings", "zap-scan-full": "ZAP findings", "zap-scan-openapi": "ZAP findings",
-    "path-fuzz": "discovered paths (findings)", "path-bust": "discovered paths (findings)",
-    "fuzz": "injection findings", "scan-secrets": "exposed-secret findings",
-    "git-extract": "extracted source + secrets", "swagger-parser": "API endpoints",
-    "swagger-endpoints": "endpoint URLs", "swagger-specs": "OpenAPI spec URLs",
-    "graphql-detect": "GraphQL endpoint URLs", "graphql-audit": "GraphQL findings",
-    "http-request": "an HTTP response",
-    "aggregate": "merged URL set", "filter": "filtered items", "limit": "first N items",
-    "hosts": "unique hostnames", "uniq-urls": "unique URLs", "js-urls": "JavaScript file URLs",
-    "param-urls": "URLs with parameters", "dedup-params": "deduped parameter URLs",
-}
-# descriptions for synthetic flow pseudo-tools (not in the engine's tool list, so not in TOOL_DESC)
-_SYNTH_DESC = {"aggregate": "Collect, de-duplicate and sort everything wired into it into one URL set; the "
-                            "boxes after it run once over that union.",
-               "filter": "Keep or reject URLs by a text match (set the condition: contains = keep, excludes = "
-                         "reject). Boxes after it get only the kept URLs.",
-               "limit": "Cap the wired-in URLs to the first N (put N in the box's args field; default 100) - to "
-                        "bound cost on a huge recon set.",
-               "hosts": "Collapse the wired-in URLs to their unique hostnames.",
-               "uniq-urls": "Merge the wired-in items into one de-duplicated URL set (order preserved). Use it to "
-                            "combine several producers into unique URLs.",
-               "js-urls": "Keep only the JavaScript file URLs from what's wired in (feed js-endpoints / secrets).",
-               "param-urls": "Keep only the URLs that carry query parameters — the useful feed for a fuzzer.",
-               "dedup-params": "Collapse parameterised URLs by path + param-name set (one per shape, values "
-                               "ignored) so a fuzzer tests each shape once instead of thousands of near-dupes."}
+class TemplateIn(BaseModel):
+    title: str
+    description: str = ""
+    kind: str = "pipeline"                 # pipeline | preset (a tool/workflow with fixed extra arguments)
+    stages: list[dict] = []                # pipeline: [{template_id, from, input, args}]
+    base_template_id: int | None = None    # preset: the tool/workflow it wraps
+    params: list[dict] = []                # preset: [{flag, value}]
 
 
-# What each box needs as its INPUT/target — so the builder can say "needs a domain / a URL" and you don't wire a
-# URL into a box that wants a bare domain. Flow boxes consume whatever is wired in.
-_TOOL_ACCEPTS = {
-    "subfinder": "a domain (example.com)", "dnsx": "a domain or host", "dns-brute": "a domain",
-    "ping-scan": "a host or IP", "nmap": "a host or IP", "httpx": "a host or URL", "liveless": "hosts or URLs",
-    "api-map": "a base URL", "smart-enum": "URLs", "screenshot": "a URL", "wayback": "a domain",
-    "wayback-domains": "a domain", "katana-crawl": "a URL", "zap-crawl": "a URL",
-    "js-endpoints": "a JavaScript file URL", "js-files": "a URL", "extract-domains": "a URL or page",
-    "harvest": "a URL", "browser-login": "a login URL", "browser-actions": "a URL", "visual-driver": "a URL",
-    "vision-verify": "a URL", "nuclei": "a URL or host", "nuclei-dast": "a URL (fuzzable endpoint)",
-    "sqlmap": "a URL", "blind-oracle": "a URL with params",
-    "bola-walk": "a URL", "mass-assign": "a URL", "dirb": "a base URL", "dirsearch": "a base URL",
-    "zap-scan-url": "a URL", "zap-scan-full": "a URL", "zap-scan-openapi": "an OpenAPI spec URL",
-    "path-fuzz": "a URL with a FUZZ marker", "path-bust": "a base URL", "fuzz": "a URL",
-    "scan-secrets": "a URL", "git-extract": "a URL exposing /.git", "swagger-parser": "an OpenAPI spec URL",
-    "swagger-endpoints": "an OpenAPI spec URL", "swagger-specs": "a host or URL", "graphql-detect": "a host or URL",
-    "graphql-audit": "a GraphQL endpoint URL", "http-request": "a URL",
-    "aggregate": "wired items", "filter": "wired items", "limit": "wired items", "hosts": "wired items",
-    "uniq-urls": "wired items", "js-urls": "wired items", "param-urls": "wired items",
-    "dedup-params": "wired items",
-}
+def _slug(session: Session, title: str, exclude_id: int | None = None) -> str:
+    base = _SLUG_RE.sub("-", title.lower()).strip("-")[:60] or "custom"
+    name, n = base, 2
+    while True:
+        t = session.exec(select(Template).where(Template.name == name)).first()
+        if t is None or t.id == exclude_id:
+            return name
+        name, n = f"{base}-{n}", n + 1
 
 
-# A wire INTO a box auto-defaults to FAN-OUT (distribute per-item across the fleet) UNLESS the box is one of
-# these: a tool that needs a whole DOMAIN/range (subfinder, dns-brute, dnsx, wayback, ping-scan — per-item would
-# be wrong) or a flow box (shapes data in-process). Everything else — liveness, httpx, harvest, nuclei, sqlmap,
-# screenshots, crawlers, … — fans out, so a recon → scan graph distributes automatically.
-_NO_FANOUT = {
-    "subfinder", "dns-brute", "dnsx", "wayback", "wayback-domains", "ping-scan",
-} | FLOW_TOOLS
+def _clean_stages(stages: list[dict]) -> list[dict]:
+    out = []
+    for i, s in enumerate(stages or []):
+        frm = s.get("from")
+        if frm in (None, ""):
+            frm = [SEED] if i == 0 else [i - 1]
+        if not isinstance(frm, list):
+            frm = [frm]
+        out.append({"template_id": s.get("template_id"), "from": frm,
+                    "input": s.get("input") or None, "args": str(s.get("args") or "").strip()})
+    return out
 
 
-@router.get("/tool-catalog")
-def tool_catalog(user: User = Depends(current_user)):
-    """The tools a custom workflow can wire together, each with its output KIND (findings = terminal, can't feed
-    a downstream box; urls/items = chainable) and its pipeline GROUP so the builder's picker can section them."""
-    def gkey(name: str):
-        g = _TOOL_GROUP.get(name, "Other")
-        return (_GROUP_ORDER.index(g), name)
-    return [{"name": n, "kind": k, "group": _TOOL_GROUP.get(n, "Other"),
-             "terminal": k == "findings", "description": TOOL_DESC.get(n, "") or _SYNTH_DESC.get(n, ""),
-             "produces": _TOOL_PRODUCES.get(n, ""),   # specific noun for what this box outputs (vs. the raw kind)
-             "accepts": _TOOL_ACCEPTS.get(n, ""),      # what this box needs as its input/target
-             "flow": n in FLOW_TOOLS,                  # a flow/shaping box (no args, can't be a fan-out target)
-             "fanout": n not in _NO_FANOUT,            # a wire INTO this box auto-defaults to fan-out
-             "flags": TOOL_FLAGS.get(n, [])}      # accepted CLI flags, for live arg validation in the builder
-            for n, k in sorted(TOOL_KIND.items(), key=lambda kv: gkey(kv[0]))]
-
-
-@router.get("/tool-flags")
-def tool_flags(user: User = Depends(current_user)):
-    """The accepted CLI flags per tool, so New Scan / the template editor can warn about an argument the tool will
-    reject (e.g. `-severity` on nuclei) before the scan runs. Tool-native scanner flags go through `--opt-args`."""
-    return TOOL_FLAGS
-
-
-def _preview_text(segments: list[dict]) -> str:
-    """Render the compiled segment(s) for the builder's live preview. A single segment shows its YAML as before;
-    a fan-out pipeline shows each stage with a header so you can see exactly where the work is distributed."""
-    if len(segments) == 1:
-        return segments[0]["yaml"]
-    parts = []
-    for i, s in enumerate(segments):
-        head = (f"# ─── stage {i}: {s['name']} — runs on the scan target"
-                if i == 0 else
-                f"# ─── stage {i}: {s['name']} — fans out across the fleet on stage {i - 1}'s "
-                f"{'URLs' if s['item_filter'] == 'urls' else 'items'} (one job each)")
-        parts.append(head + "\n" + s["yaml"])
-    return "\n\n".join(parts)
-
-
-@router.post("/workflow/preview")
-def preview_workflow(body: WorkflowGraphIn, user: User = Depends(current_user)):
-    """Compile a graph WITHOUT saving — for the builder's live preview. Returns {spec, yaml, segments} or a 400
-    with the validation message so the UI can show exactly why a wiring is illegal. ``segments`` is the number of
-    fan-out stages the graph compiles to (1 = an ordinary single-process workflow)."""
-    graph = dict(body.graph or {})
-    graph["name"] = body.name or "preview"
-    if body.help is not None:
-        graph["help"] = body.help
-    try:
-        segs, _node_stage = compile_pipeline(graph, reserved_names=set(BUILTIN_WORKFLOWS))
-    except WorkflowError as e:
-        raise HTTPException(400, str(e))
-    return {"spec": segs[0]["spec"], "yaml": _preview_text(segs), "segments": len(segs)}
-
-
-@router.post("/workflow")
-def save_workflow(body: WorkflowGraphIn, user: User = Depends(current_user),
-                  session: Session = Depends(get_session)):
-    """Compile a node graph into a runnable workflow and persist it as a Template (kind=workflow). The compiled
-    spec is stored as JSON text under spec['yaml']; a runner writes it into a BOXCUTTER_WORKFLOWS dir at run time
-    so `boxcutter workflow <name>` finds it (see runners.claim + agent.run_job)."""
-    graph = dict(body.graph or {})
-    graph["name"] = body.name
-    if body.help is not None:
-        graph["help"] = body.help
-    try:
-        segs, node_stage = compile_pipeline(graph, reserved_names=set(BUILTIN_WORKFLOWS))
-    except WorkflowError as e:
-        raise HTTPException(400, str(e))
-    seg0 = segs[0]
-    spec = seg0["spec"]
-    # yaml = the stage-0 workflow file the runner writes; graph = the editable source. A fan-out graph also stores
-    # its ordered segments under `pipeline` — the server turns these into real pipeline stages at scan time, so
-    # the downstream work fans out across the fleet instead of running inside one process (see scans._builder_stages).
-    # node_stage maps each box -> its stage, so the scan's live canvas can colour boxes by stage state.
-    stored = {"name": spec["name"], "yaml": seg0["yaml"], "graph": graph, "node_stage": node_stage}
-    if len(segs) > 1:
-        stored["pipeline"] = [{"name": s["name"], "yaml": s["yaml"], "item_filter": s["item_filter"],
-                               "from_stage": s.get("from_stage", i - 1)} for i, s in enumerate(segs)]
-    if body.template_id is not None:
-        t = session.get(Template, body.template_id)
-        if not t or (t.owner_id != user.id and user.role != "admin"):
-            raise HTTPException(403)
-        t.name, t.kind, t.spec_json, t.description = body.name, "workflow", json.dumps(stored), spec["help"]
+def _apply(session: Session, t: Template, body: TemplateIn) -> None:
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(400, "give it a name")
+    t.title = title[:200]
+    t.description = body.description.strip()
+    t.category = "Custom"
+    if body.kind == "pipeline":
+        stages = _clean_stages(body.stages)
+        try:
+            plan = flatten(session, stages, _seen={t.id} if t.id else None)
+        except PlanError as e:
+            raise HTTPException(400, str(e))
+        first = session.get(Template, int(stages[0]["template_id"]))
+        parents = {f for s in plan for f in s["from"] if f != SEED}
+        leaf_kinds = {s["produces"] for i, s in enumerate(plan) if i not in parents} - {"findings"}
+        t.kind = "pipeline"
+        t.accepts = first.accepts if first else "any"
+        t.produces = (leaf_kinds.pop() if len(leaf_kinds) == 1 else "items") if leaf_kinds else "findings"
+        depths = set(session.exec(select(Template.depth).where(
+            Template.id.in_([s["template_id"] for s in plan]))).all())
+        t.depth = "deep" if "deep" in depths else ("standard" if "standard" in depths else "quick")
+        # store with resolved defaults so the editor shows exactly what runs
+        for s in stages:
+            st = session.get(Template, int(s["template_id"]))
+            s["input"] = s["input"] or DEFAULT_INPUT.get(st.accepts if st else "any", "all")
+            s["template_id"] = int(s["template_id"])
+            s["from"] = [int(f) for f in s["from"]]
+        t.spec_json = json.dumps({"stages": stages})
+    elif body.kind == "preset":
+        base = session.get(Template, body.base_template_id or 0)
+        if base is None or base.kind not in ("tool", "workflow"):
+            raise HTTPException(400, "a preset wraps one tool or workflow")
+        params = [{"flag": str(p.get("flag", "")).strip(), "value": str(p.get("value", "") or "")}
+                  for p in body.params if str(p.get("flag", "")).strip()]
+        t.kind = base.kind
+        t.accepts, t.produces, t.depth = base.accepts, base.produces, base.depth
+        t.spec_json = json.dumps({"name": _spec(base).get("name") or base.name, "params": params,
+                                  "base": base.name})
     else:
-        t = Template(name=body.name, kind="workflow", spec_json=json.dumps(stored),
-                     description=spec["help"], owner_id=user.id)
+        raise HTTPException(400, "kind must be pipeline or preset")
+
+
+@router.post("")
+def create_template(body: TemplateIn, session: Session = Depends(get_session)):
+    t = Template(name=_slug(session, body.title), kind="pipeline", builtin=False)
+    _apply(session, t, body)
     session.add(t)
     session.commit()
     session.refresh(t)
-    return _out(t)
+    return _out(t, session, with_plan=True)
+
+
+@router.post("/preview")
+def preview(body: TemplateIn, session: Session = Depends(get_session)):
+    """Validate a pipeline without saving - the editor's live check. Returns the expanded plan or the error."""
+    try:
+        plan = flatten(session, _clean_stages(body.stages))
+    except PlanError as e:
+        return {"ok": False, "error": str(e), "plan": []}
+    return {"ok": True, "error": "", "plan": plan}
 
 
 @router.get("/{tid}")
-def get_template(tid: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+def get_template(tid: int, session: Session = Depends(get_session)):
     t = session.get(Template, tid)
     if not t:
         raise HTTPException(404)
-    return _out(t)
+    return _out(t, session, with_plan=True)
 
 
-@router.patch("/{tid}")
-def update_template(tid: int, body: TemplatePatch, user: User = Depends(current_user),
-                    session: Session = Depends(get_session)):
+@router.put("/{tid}")
+def update_template(tid: int, body: TemplateIn, session: Session = Depends(get_session)):
     t = session.get(Template, tid)
-    if not t or (t.owner_id != user.id and user.role != "admin"):
-        raise HTTPException(403)
-    if body.kind is not None:
-        if body.kind not in KINDS:
-            raise HTTPException(400, f"kind must be one of {sorted(KINDS)}")
-        t.kind = body.kind
-    if body.name is not None:
-        t.name = body.name
-    if body.spec is not None:
-        t.spec_json = json.dumps(body.spec)
-    if body.description is not None:
-        t.description = body.description
-    if body.context is not None:
-        t.context = body.context
-    if body.llm_profile_id is not None:
-        t.llm_profile_id = body.llm_profile_id
+    if not t:
+        raise HTTPException(404)
+    if t.builtin:
+        raise HTTPException(400, "built-in templates are read-only — duplicate it to customise")
+    _apply(session, t, body)
+    t.name = _slug(session, t.title, exclude_id=t.id)
     session.add(t)
     session.commit()
     session.refresh(t)
-    return _out(t)
+    return _out(t, session, with_plan=True)
+
+
+def _users_of(session: Session, tid: int) -> list[str]:
+    users = [f"scheduler '{s.name}'" for s in session.exec(select(Scheduler).where(Scheduler.template_id == tid))]
+    for p in session.exec(select(Template).where(Template.kind == "pipeline")).all():
+        if p.id != tid and any(int(s.get("template_id") or 0) == tid for s in (_spec(p).get("stages") or [])):
+            users.append(f"pipeline '{p.title or p.name}'")
+    return users
 
 
 @router.delete("/{tid}")
-def delete_template(tid: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+def delete_template(tid: int, session: Session = Depends(get_session)):
     t = session.get(Template, tid)
-    if not t or (t.owner_id != user.id and user.role != "admin"):
-        raise HTTPException(403)
+    if not t:
+        raise HTTPException(404)
+    if t.builtin:
+        raise HTTPException(400, "built-in templates can't be deleted")
+    users = _users_of(session, tid)
+    if users:
+        raise HTTPException(400, "still used by " + ", ".join(users[:5]))
     session.delete(t)
     session.commit()
     return {"ok": True}

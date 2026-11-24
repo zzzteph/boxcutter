@@ -1,26 +1,27 @@
-"""boxcutter-ui server entrypoint: create tables, seed root/root, run the stale-job sweeper, mount routers.
+"""boxcutter server: the web UI (SPA + its /api endpoints, behind HTTP basic auth), the scanner-agent protocol
+(/runner/*, token auth) and the background sweeper.
+
+There is deliberately no public REST API: no OpenAPI docs, no API keys, no CORS. /api exists only for the
+bundled UI.
 
 Run: uvicorn app.main:app --host 0.0.0.0 --port 8000
 """
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.utils import get_openapi
-from fastapi.responses import PlainTextResponse
+from fastapi import APIRouter, FastAPI
 from sqlmodel import Session
 
 from .activity import cap_job_events, prune_logs
 from .config import settings
 from .db import engine, init_db
-from .queue import reconcile_drained_scans, requeue_stale, run_due_schedules
-from .routers import (admin, auth, console, keys, operator, runners, scans, schedules,
-                      templates)
+from .queue import reconcile_drained_scans, requeue_stale, run_due_schedulers
+from .routers import fleet, runners, scans, schedulers, templates
+from .routers import settings as settings_router
+from .security import BasicAuthMiddleware
 from .seed import seed
 
 
@@ -30,10 +31,10 @@ async def _sweeper() -> None:
         try:
             with Session(engine) as s:
                 requeue_stale(s)
-                reconcile_drained_scans(s)    # unstick any running scan whose jobs all finished (advance/finish)
-                run_due_schedules(s)          # fire any recurring (scheduled) scans that are due
+                reconcile_drained_scans(s)
+                run_due_schedulers(s)
                 cycle += 1
-                if cycle % 20 == 0:      # ~ every 10 min: trim log rows past retention + cap each job's live log
+                if cycle % 20 == 0:      # ~ every 10 min: trim old log rows + cap each job's live log
                     prune_logs(s, settings.activity_retention_days)
                     cap_job_events(s, settings.log_max_events_per_job)
         except Exception:  # noqa: BLE001 - the sweeper must never die
@@ -45,59 +46,15 @@ async def _sweeper() -> None:
 async def lifespan(app: FastAPI):
     init_db()
     seed()
-    from . import operator as _operator
-    _operator.reap_orphans()      # any operator run left 'running' by a dead server -> mark failed
-    tasks = [asyncio.create_task(_sweeper())]
+    task = asyncio.create_task(_sweeper())
     try:
         yield
     finally:
-        for t in tasks:
-            t.cancel()
+        task.cancel()
 
 
-_API_DESCRIPTION = """
-The **boxcutter-ui** REST API. Authenticate one of two ways:
-
-* **JWT** — `POST /auth/login` with a username/password, then send `Authorization: Bearer <token>`.
-* **API key** — create one under Settings → API keys (or a system user), then send it as `X-API-Key: <key>`
-  or `Authorization: Bearer <key>`.
-
-Click **Authorize** below to try the endpoints. Interactive docs at `/docs`, ReDoc at `/redoc`,
-raw schema at `/openapi.json`.
-"""
-
-_OPENAPI_TAGS = [
-    {"name": "auth", "description": "Login, current user, change password."},
-    {"name": "scans", "description": "Create/list scans, findings, live log (SSE), per-target debug, report."},
-    {"name": "templates", "description": "Scan templates: workflow / tool / ai_agent."},
-    {"name": "runners", "description": "Scanner (runner) enrollment, job claim/result/heartbeat, fleet."},
-    {"name": "operator", "description": "Direct in-container operator runs (joseph): run, stream, report."},
-    {"name": "admin", "description": "Users and LLM profiles (admin)."},
-    {"name": "keys", "description": "Personal API keys and system (API-only) users."},
-]
-
-app = FastAPI(title="boxcutter-ui", version="0.1.0", description=_API_DESCRIPTION,
-              openapi_tags=_OPENAPI_TAGS, lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
-                   allow_methods=["*"], allow_headers=["*"])
-
-
-def _custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    schema = get_openapi(title=app.title, version=app.version, description=_API_DESCRIPTION,
-                         tags=_OPENAPI_TAGS, routes=app.routes)
-    comps = schema.setdefault("components", {}).setdefault("securitySchemes", {})
-    comps["bearerAuth"] = {"type": "http", "scheme": "bearer", "bearerFormat": "JWT",
-                           "description": "A user JWT, or an API key (bck_...)."}
-    comps["apiKey"] = {"type": "apiKey", "in": "header", "name": "X-API-Key",
-                       "description": "A personal or system-user API key."}
-    schema["security"] = [{"bearerAuth": []}, {"apiKey": []}]   # Authorize works for both
-    app.openapi_schema = schema
-    return schema
-
-
-app.openapi = _custom_openapi
+app = FastAPI(title="boxcutter", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+app.add_middleware(BasicAuthMiddleware)
 
 
 @app.get("/health")
@@ -105,29 +62,14 @@ def health():
     return {"ok": True}
 
 
-@app.get("/runner.py", response_class=PlainTextResponse)
-def runner_bootstrap():
-    """Serve the runner supervisor so a stock-image container can self-bootstrap:
-    docker run ... --entrypoint python3 ghcr.io/zzzteph/boxcutter -c "exec(urlopen('SERVER/runner.py').read())"
-    """
-    path = os.environ.get("RUNNER_BOOTSTRAP_PATH", "/app/runner/supervisor.py")
-    p = Path(path)
-    if p.exists():
-        return p.read_text(encoding="utf-8")
-    return "# runner supervisor not bundled on the server; mount runner/ or set RUNNER_BOOTSTRAP_PATH\n"
-
-
-app.include_router(auth.router)
-app.include_router(scans.router)
 app.include_router(runners.router)
-app.include_router(templates.router)
-app.include_router(admin.router)
-app.include_router(keys.router)
-app.include_router(schedules.router)
-app.include_router(operator.router)
-app.include_router(console.router)      # /console/claude/ws — before the static mount so the WS route matches
 
-# Prod: serve the built SPA if present (web/dist copied to ./web_dist in the image).
+api = APIRouter(prefix="/api")
+for r in (scans.router, templates.router, schedulers.router, settings_router.router, fleet.router):
+    api.include_router(r)
+app.include_router(api)
+
+# the built SPA (web/dist is copied to ./web_dist in the image)
 _web = Path(__file__).resolve().parent.parent / "web_dist"
 if _web.exists():
     from fastapi.staticfiles import StaticFiles
