@@ -20,19 +20,10 @@ REQUIREMENTS: dict[str, str] = {
     "dnsx": "dnsx",
     "dns-brute": "dnsx",
     "httpx": "httpx",
-    "screenshot": "chromium-browser",
     "katana-crawl": "katana",
     "nuclei": "nuclei",
     "sqlmap": "/usr/share/sqlmap/sqlmap.py",
-    "dirb": "dirb",
-    "dirsearch": "/usr/share/dirsearch/dirsearch.py",
-    "zap-crawl": "zap.sh",
-    "zap-scan-url": "zap.sh",
-    "zap-scan-full": "zap.sh",
-    "zap-scan-openapi": "zap.sh",
     "harvest": "chromium-browser",
-    "browser-login": "chromium-browser",
-    "browser-actions": "chromium-browser",
 }
 
 

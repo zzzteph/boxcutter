@@ -10,7 +10,7 @@ It then DEDUPES into a testable corpus: ids in the path are templated (`/orders/
 requests collapse by (method, path-template, param-set), so 500 captured calls become ~30 distinct endpoints.
 Each corpus entry carries a copy-paste curl + raw Burp request (core.repro), and a parameter catalog records
 every param seen, its inferred type (id/uuid/email/enum/text) and where it lives - so `fuzz`/`api-map`/`sqlmap`/
-`graphql-audit` can consume the output directly. Optional --har writes a Burp/ZAP-importable HAR.
+`graphql-audit` can consume the output directly. Optional --har writes a Burp-importable HAR.
 
 Safety: it never clicks logout/delete/pay/etc, never fires a raw DELETE, uses throwaway form values, stays in
 scope, and is bounded by --max-pages/--max-actions/--max-time. Full-image tool: needs chromium +
@@ -72,7 +72,7 @@ def add_arguments(parser) -> None:
     parser.add_argument("--include-assets", dest="include_assets", action="store_true",
                         help="Include static assets (images/css/fonts) in the corpus (default: skipped).")
     parser.add_argument("--har", dest="har", default=None, metavar="FILE",
-                        help="Also write a HAR of every captured request (importable into Burp/ZAP).")
+                        help="Also write a HAR of every captured request (importable into Burp).")
     add_header_arg(parser)
     add_common_args(parser)
 

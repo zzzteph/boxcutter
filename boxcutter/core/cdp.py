@@ -117,9 +117,8 @@ class Chrome:
         self.headers = headers or {}
         self.timeout = timeout
         self._dbg = debug
-        # Optional upstream proxy (e.g. joseph's ZAP daemon, so the browser's OWN traffic lands in the same
-        # capturable/mutatable store as the tools'). Chromium already runs with --ignore-certificate-errors,
-        # so a MITM proxy's dynamic CA is accepted. None => direct, unchanged behaviour.
+        # Optional upstream proxy (e.g. an intercepting proxy). Chromium already runs with
+        # --ignore-certificate-errors, so a MITM proxy's dynamic CA is accepted. None => direct.
         self._proxy = proxy
         # a fixed viewport at deviceScaleFactor=1 (for the visual driver): 1 screenshot px == 1 CSS px == the
         # x,y we hand to Input.dispatchMouseEvent, so a coordinate the model reads off the grid clicks true.
@@ -846,7 +845,7 @@ def get_session(sid: str, headers: dict | None = None, timeout: int = 45,
     (page, fresh) - fresh=True when it was just opened, so the caller knows to navigate to the start URL rather
     than continue from wherever the persistent session already is. `viewport` pins a fixed size + DPR=1 (used
     by the visual driver so screenshot pixels map 1:1 to click coordinates). `proxy` routes the browser's own
-    traffic through an upstream proxy (joseph's ZAP daemon) so it is captured alongside the tools'."""
+    traffic through an upstream proxy."""
     page = _SESSIONS.get(sid)
     if page is not None and page._alive():
         return page, False

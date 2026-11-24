@@ -53,7 +53,7 @@ ENGINE_VERSION = _ENGINE_VERSION
 # (and never scans a real target). See BUILD.md testing notes.
 MOCK = os.environ.get("MOCK_RUNNER", "").strip().lower() not in ("", "0", "false", "no")
 # A boxcutter scan runs for as long as it needs to. There is NO idle timeout: a deep scan (AI agent, full
-# workflow, sqlmap/ZAP/nuclei) is SILENT for long stretches — --steps only prints at step boundaries — so a
+# workflow, sqlmap/nuclei) is SILENT for long stretches — --steps only prints at step boundaries — so a
 # silence clock kills real work. The ONLY bound is a 6h absolute backstop; it exists so a wedged engine can't
 # hold a worker slot forever. Raise JOB_MAX_RUNTIME if you run scans that legitimately go longer. Normally a
 # job ends when the engine exits, when the server cancels it (scan stopped/deleted), or when the operator stops
@@ -376,7 +376,7 @@ def run_job(job: dict, secrets: dict) -> dict:
                     _kill_tree(proc)
                     break
         # Tear down the WHOLE process group on EVERY exit, even a clean one: a tool may have left a lingering
-        # child (a headless browser, a ZAP/java daemon, a detached scanner) that keeps the stdout/stderr pipes
+        # child (a headless browser, a detached scanner) that keeps the stdout/stderr pipes
         # open after the engine itself exited. If a pipe never sees EOF the pump thread stays blocked in
         # readline(), so join(timeout) ABANDONS it — one live thread (and the stray process) leaked per job,
         # until the agent can no longer fork()/start a thread (EAGAIN / "can't start new thread"). Killing the

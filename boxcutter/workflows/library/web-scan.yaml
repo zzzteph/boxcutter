@@ -27,8 +27,7 @@ steps:
   - select: ${urls | params | dedup}
     save: params
 
-  # DAST each parameterised URL. ZAP active scanning was removed - it produced most
-  # of the noise/false positives on web targets. nuclei template passes run in web-full.
+  # DAST each parameterised URL. nuclei template passes run in web-full.
   #
   # SQLi is double-confirmed: fuzz is a cheap PROBE (set: overwrites the scratch var
   # each iteration, so the guard below only sees THIS param's hits). Every fuzz finding
