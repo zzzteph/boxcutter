@@ -51,7 +51,8 @@ onUnmounted(() => clearInterval(timer))
 </template>
 
 <style scoped>
-.newscan { height: 36px; color: var(--on-primary) !important; padding: 0 16px !important; }
+.newscan, .newscan.router-link-active { height: 36px; color: var(--on-primary) !important; padding: 0 16px !important;
+  background: var(--accent) !important; }
 .newscan:hover { text-decoration: none; }
 .gear { font-size: 18px; padding: 6px 10px !important; }
 .brand:hover { text-decoration: none; }

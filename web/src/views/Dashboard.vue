@@ -9,7 +9,18 @@ const SEVS = ['Critical', 'High', 'Medium', 'Low', 'Info']
 const SEV_VAR = { Critical: 'var(--crit)', High: 'var(--high)', Medium: 'var(--med)', Low: 'var(--low)', Info: 'var(--info)' }
 
 async function load() { try { s.value = await api.get('/stats') } catch (e) { /* transient */ } }
-const trendMax = computed(() => Math.max(1, ...((s.value?.trend || []).map(t => t.count))))
+// always 14 day slots (oldest -> today), so a single busy day doesn't stretch into one full-width block
+const days = computed(() => {
+  const by = Object.fromEntries((s.value?.trend || []).map(t => [String(t.date).slice(0, 10), t.count]))
+  const out = []
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10)
+    out.push({ date: d, count: by[d] || 0 })
+  }
+  return out
+})
+const trendMax = computed(() => Math.max(1, ...days.value.map(t => t.count)))
+const trendTotal = computed(() => days.value.reduce((a, t) => a + t.count, 0))
 function pct(a) { return a.jobs_total ? Math.round(100 * a.jobs_done / a.jobs_total) : 0 }
 onMounted(async () => { await load(); timer = setInterval(load, 5000) })
 onUnmounted(() => clearInterval(timer))
@@ -91,11 +102,12 @@ onUnmounted(() => clearInterval(timer))
 
       <div class="card">
         <h2>New findings (14 days)</h2>
+        <div class="muted" style="font-size:12px">{{ trendTotal }} in the last 14 days</div>
         <div class="trend">
-          <div v-for="t in s.trend" :key="t.date" class="tbar" :title="t.date + ': ' + t.count">
+          <div v-for="t in days" :key="t.date" class="tbar" :title="t.date + ': ' + t.count">
             <div :style="{ height: Math.round(t.count / trendMax * 100) + '%' }"></div>
           </div>
-          <div v-if="!s.trend.length" class="muted">No findings yet.</div>
+
         </div>
       </div>
 
