@@ -1,14 +1,14 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, isAdmin } from '../api'
+import { api } from '../api'
 import { fmtDuration, timeAgo } from '../util'
 
 const route = useRoute()
 const router = useRouter()
 const id = route.params.id
 const r = ref(null)
-const admin = isAdmin()
+const admin = true
 
 async function delRunner() {
   if (!confirm(`Remove scanner "${r.value ? (r.value.name || ('runner #' + r.value.id)) : ''}" from the fleet?`)) return

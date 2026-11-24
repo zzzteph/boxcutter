@@ -94,7 +94,7 @@ onUnmounted(() => { clearInterval(timer); clearTimeout(qTimer) })
           <td data-label="Title"><span class="chev">{{ openId === f.id ? '▾' : '▸' }}</span> {{ f.title }}</td>
           <td data-label="Asset">{{ f.target }}</td>
           <td data-label="Scan">{{ f.scan }}</td>
-          <td data-label="State"><span class="state" :class="'state-' + f.state">{{ f.state }}</span></td>
+          <td data-label="State"><span class="state" :class="'state-' + f.state">{{ f.state === 'unconfirmed' ? 'not re-checked' : f.state }}</span></td>
           <td data-label="Seen" style="white-space:nowrap">{{ timeAgo(f.last_seen) }}</td>
         </tr>
         <tr v-if="openId === f.id" class="detailrow">

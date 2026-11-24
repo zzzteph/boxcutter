@@ -31,11 +31,8 @@ server/data/
 .runner-config.json
 **/.runner-config.json
 
-# caleb coverage working area (harness, ground-truth keys, handoff docs, run artifacts) - kept on disk, not tracked
-opt/
-
-# Design docs / working notes - kept on disk, not tracked
-docs/
+# the SPA build copied/linked next to the server
+server/web_dist
 
 # Test target runtime DB + request logs + uploads + generated fixtures
 test/store.db

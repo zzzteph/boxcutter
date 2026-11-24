@@ -1,29 +1,24 @@
 # boxcutter dependencies - one file for every mode.
 #
-# The lean scanning ENGINE and `boxcutter agent` need only `requests` (plus websocket-client for the browser
-# tools). In the Docker image those come from the base (apk py3-requests) + a websocket-client pip install, so
-# the engine layer never pulls the heavier deps below. The web SERVER (`boxcutter serve`) and the MCP server
-# (`boxcutter mcp`) need the rest; in the image the whole file installs into a dedicated /opt/srv venv, leaving
-# the engine's system-python imports untouched. From a source checkout, `pip install -r requirements.txt` gets
-# everything (or just `pip install requests websocket-client` for engine-only use).
+# The lean scanning ENGINE and `boxcutter agent` need only `requests`, PyYAML (workflows) and websocket-client
+# (the browser crawler). In the Docker image those come from the base (apk py3-requests / py3-yaml) + a
+# websocket-client pip install, so the engine layer never pulls the server deps below. The web SERVER
+# (`boxcutter serve`) needs the rest; in the image the whole file installs into a dedicated /opt/srv venv.
 
-# --- engine + agent (always) ---
-requests>=2.31
-# Browser tools (harvest/login/actions) drive chromium over CDP; pure-Python, installs on musl. Optional: when
-# absent those tools degrade gracefully and the rest of boxcutter is unaffected.
-websocket-client>=1.6
+# --- engine + agent ---
+requests>=2.34.2
+PyYAML>=6.0.4
+# Browser crawler (harvest) drives chromium over CDP; pure-Python, installs on musl. Optional: when absent
+# harvest degrades gracefully and the rest of boxcutter is unaffected.
+websocket-client>=1.9.2
 
-# --- web server: `boxcutter serve` (FastAPI API + built SPA + a built-in agent) ---
-fastapi>=0.110
-uvicorn[standard]>=0.27
-sqlmodel>=0.0.16
-pydantic-settings>=2.2
-passlib[bcrypt]>=1.7
-bcrypt>=4.0.1,<4.1
-pyjwt>=2.8
-python-multipart>=0.0.9
-pymysql>=1.1
-psycopg[binary]>=3.1     # Postgres driver — set DATABASE_URL=postgresql+psycopg://user:pass@host/db to use it
-
-# --- MCP server: `boxcutter mcp` (brings its own starlette/uvicorn/sse-starlette transport) ---
-mcp>=1.6,<2
+# --- web server: `boxcutter serve` (UI + scanner protocol + a built-in agent) ---
+fastapi>=0.165.0
+uvicorn[standard]>=0.54.0
+sqlmodel>=0.0.50
+pydantic-settings>=2.16.3
+python-multipart>=0.0.34
+pymysql>=1.2.4              # MySQL/MariaDB driver - DATABASE_URL=mysql+pymysql://user:pass@host/db
+psycopg[binary]>=3.3.9      # Postgres driver   - DATABASE_URL=postgresql+psycopg://user:pass@host/db
+cronsim==2.8                # cron schedules (parse, next runs, plain-English description)
+tzdata>=2026.6              # IANA time zones for zoneinfo (the image has no system tz database)

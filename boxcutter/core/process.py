@@ -3,8 +3,8 @@
 The PHP commands all follow the same shape: start a tool with a timeout, let
 it stream into a temp file, and on timeout kill it but still parse whatever it
 already wrote. :func:`run` reproduces that: a hard wall-clock timeout, a
-graceful-then-forceful kill that takes down the whole process group (so ZAP's
-firefox/geckodriver children don't get orphaned), and the captured output
+graceful-then-forceful kill that takes down the whole process group (so a
+tool's child processes don't get orphaned), and the captured output
 returned regardless of how the process ended.
 """
 

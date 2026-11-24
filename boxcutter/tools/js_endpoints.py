@@ -45,7 +45,7 @@ def run(args) -> int:
     js_url = args.js_url.strip()
     base_url = (args.base_url or "").rstrip("/")
     # Default the base to the JS file's own origin so discovered paths come out as
-    # absolute, scannable URLs (a relative "/api/x" can't be fed to fuzz/sqlmap/zap).
+    # absolute, scannable URLs (a relative "/api/x" can't be fed to fuzz/sqlmap).
     if not base_url:
         parts = urlparse(js_url)
         if parts.scheme and parts.netloc:

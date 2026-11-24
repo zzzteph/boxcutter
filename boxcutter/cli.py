@@ -37,7 +37,7 @@ from .workflows._common import (
     add_show_findings_option,
     add_steps_option,
 )
-from .tools.registry import AI, TOOLS
+from .tools.registry import TOOLS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,10 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Containerised pentesting toolkit - JSON-emitting wrappers around "
         "scanning tools. Each subcommand returns {success, data, error}.",
         epilog="operating modes:\n"
-               "  boxcutter <tool>|workflow|ai ...   run the scanning engine (default)\n"
-               "  boxcutter serve                    run the web UI/API server (+ a built-in agent)\n"
-               "  boxcutter agent --server URL ...   run this host as a scale-out scanner\n"
-               "  boxcutter mcp [--http]             serve the tools over MCP (stdio or HTTP)\n",
+               "  boxcutter <tool>|workflow ...      run the scanning engine (default)\n"
+               "  boxcutter serve                    run the web UI (+ a built-in agent)\n"
+               "  boxcutter agent --server URL ...   run this host as a scale-out scanner\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"boxcutter {__version__}")
@@ -70,39 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_raw_parser(subparsers)
     _add_workflow_parser(subparsers)
-    _add_ai_parser(subparsers)
     return parser
-
-
-def _add_ai_parser(subparsers: argparse._SubParsersAction) -> None:
-    ai = subparsers.add_parser(
-        "ai",
-        help="Run an AI agent (LLM-driven; needs a provider/API key, makes many calls).",
-        description="Run an AI agent: an autonomous LLM-driven command (a login, a crawl, or the full IRVIN "
-        "pipeline). Use `boxcutter ai --list` to see them. Each also works bare - e.g. `boxcutter logio` - "
-        "unless a tool shares the name, in which case the tool wins the bare form and you use `ai` to be "
-        "explicit.",
-    )
-    # distinct dest so it doesn't collide with the top-level --list in main()
-    ai.add_argument("--list", dest="ai_list", action="store_true", help="List AI agents and exit")
-    ai_sub = ai.add_subparsers(dest="ai_agent", metavar="<agent>")
-    for module in AI:
-        sub = ai_sub.add_parser(module.NAME, help=module.HELP, description=module.HELP)
-        module.add_arguments(sub)
-        if getattr(module, "KIND", "items") == "findings":
-            add_severity_arg(sub)
-        sub.set_defaults(_run=module.run, _tool_name=module.NAME, _kind=getattr(module, "KIND", "items"))
-    ai.set_defaults(_run=_run_ai_index)
-
-
-def _run_ai_index(args) -> int:
-    width = max(len(m.NAME) for m in AI)
-    print("AI agents (LLM-driven - need a provider/API key):\n")
-    for module in AI:
-        print(f"  {module.NAME.ljust(width)}  {module.HELP}")
-    print("\nRun one with:  boxcutter ai <agent> <target>")
-    print("(or bare `boxcutter <agent>` when no tool shares the name)")
-    return 0
 
 
 def _add_workflow_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -143,9 +110,6 @@ def _run_workflow_index(args) -> int:
 # Bundled tools that aren't a bare binary on PATH get an explicit launcher.
 RAW_ALIASES: dict[str, list[str]] = {
     "sqlmap": ["python3", "/usr/share/sqlmap/sqlmap.py"],
-    "dirsearch": ["python3", "/usr/share/dirsearch/dirsearch.py"],
-    "zap": ["/usr/share/zaproxy/zap.sh"],
-    "zap.sh": ["/usr/share/zaproxy/zap.sh"],
 }
 
 
@@ -158,7 +122,7 @@ def _add_raw_parser(subparsers: argparse._SubParsersAction) -> None:
         "Example: boxcutter raw nuclei -u https://example.com -t cves",
     )
     raw.add_argument("tool_name", metavar="<binary>",
-                     help="Tool to run: any binary on PATH, or sqlmap/dirsearch/zap")
+                     help="Tool to run: any binary on PATH, or sqlmap")
     raw.add_argument("tool_args", nargs=argparse.REMAINDER,
                      help="Arguments forwarded verbatim to the tool")
     raw.set_defaults(_run=_run_raw)
@@ -190,29 +154,25 @@ def _print_tool_list(show_all: bool = False) -> None:
         reqs = ", ".join(sorted({capability.requirement_for(m.NAME) for m in hidden}))
         print(f"\n  {len(hidden)} more not installed here ({reqs}) - run 'boxcutter --list-all' to show")
     print("\nMulti-tool workflows:  boxcutter workflow --list")
-    print("AI agents (LLM-driven):  boxcutter ai --list")
 
 
 # Top-level subcommands that are neither a tool nor a workflow.
-_RESERVED_SUBCOMMANDS = {"workflow", "ai", "raw", "run", "agent", "serve", "forge", "mcp"}
+_RESERVED_SUBCOMMANDS = {"workflow", "raw", "run", "agent", "serve"}
 
 
 def _desugar(argv: list[str]) -> list[str]:
-    """Let ``boxcutter <ai-agent|workflow> <target>`` work without the ``ai``/``workflow`` keyword.
+    """Let ``boxcutter <workflow> <target>`` work without the ``workflow`` keyword.
 
     Tool-first resolution: if the first token names a TOOL (or a reserved
     subcommand, or is a global flag) it is left untouched - so a tool WINS a
-    bare-name clash. Otherwise, an AI-agent name gets the ``ai`` keyword and a
-    workflow name gets the ``workflow`` keyword. Unknown names fall through so
-    argparse reports them the usual way.
+    bare-name clash. Otherwise a workflow name gets the ``workflow`` keyword.
+    Unknown names fall through so argparse reports them the usual way.
     """
     if not argv or argv[0].startswith("-"):
         return argv
     first = argv[0]
     if first in _RESERVED_SUBCOMMANDS or any(m.NAME == first for m in TOOLS):
         return argv
-    if any(m.NAME == first for m in AI):
-        return ["ai", *argv]
     if any(m.NAME == first for m in WORKFLOWS):
         return ["workflow", *argv]
     return argv
@@ -230,13 +190,9 @@ def main(argv: list[str] | None = None) -> int:
     # Operating modes: the same boxcutter runs as a server or a scanner agent, not just the CLI. These are
     # handled before the tool/workflow machinery (they have their own arg parsing and long-running loops), and
     # `serve` pulls in web deps only when invoked - the lean engine never imports them.
-    if raw_argv and raw_argv[0] in ("agent", "serve", "forge", "mcp"):
+    if raw_argv and raw_argv[0] in ("agent", "serve"):
         if raw_argv[0] == "agent":
             from . import agent as _mode
-        elif raw_argv[0] == "forge":
-            from .forge import conductor as _mode
-        elif raw_argv[0] == "mcp":
-            from . import mcp_server as _mode
         else:
             from . import serve as _mode
         return _mode.main(raw_argv[1:])

@@ -13,6 +13,4 @@ server/data
 .vscode
 *.md
 !README.md
-opt/
-trace/
-ph.txt
+server/web_dist

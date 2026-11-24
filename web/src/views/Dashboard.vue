@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../api'
-import { timeAgo } from '../util'
+import { timeAgo, timeUntil } from '../util'
 
 const s = ref(null)
 let timer = null
@@ -9,15 +9,38 @@ const SEVS = ['Critical', 'High', 'Medium', 'Low', 'Info']
 const SEV_VAR = { Critical: 'var(--crit)', High: 'var(--high)', Medium: 'var(--med)', Low: 'var(--low)', Info: 'var(--info)' }
 
 async function load() { try { s.value = await api.get('/stats') } catch (e) { /* transient */ } }
-const trendMax = computed(() => Math.max(1, ...((s.value?.trend || []).map(t => t.count))))
+// always 14 day slots (oldest -> today), so a single busy day doesn't stretch into one full-width block
+const days = computed(() => {
+  const by = Object.fromEntries((s.value?.trend || []).map(t => [String(t.date).slice(0, 10), t.count]))
+  const out = []
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10)
+    out.push({ date: d, count: by[d] || 0 })
+  }
+  return out
+})
+const trendMax = computed(() => Math.max(1, ...days.value.map(t => t.count)))
+const trendTotal = computed(() => days.value.reduce((a, t) => a + t.count, 0))
 function pct(a) { return a.jobs_total ? Math.round(100 * a.jobs_done / a.jobs_total) : 0 }
 onMounted(async () => { await load(); timer = setInterval(load, 5000) })
 onUnmounted(() => clearInterval(timer))
 </script>
 
 <template>
-  <h1>Overview</h1>
-  <div v-if="s">
+  <div class="row" style="justify-content:space-between;align-items:center">
+    <h1 style="margin:0">Overview</h1>
+    <router-link to="/scans/new" class="btn primary">+ New scan</router-link>
+  </div>
+  <div v-if="s && !s.scans_total" class="card hero">
+    <h2 style="margin-top:0">Welcome to boxcutter</h2>
+    <ol>
+      <li><router-link to="/scans/new">Start a scan</router-link> — paste a domain, URL or IP range and pick what to check.</li>
+      <li><router-link to="/schedulers">Schedule it</router-link> to re-run daily or weekly and see what changed.</li>
+      <li><router-link to="/settings">Turn on Slack or Telegram</router-link> to hear about new findings.</li>
+      <li><router-link to="/scanners">Add scanners</router-link> to spread big scans over several hosts.</li>
+    </ol>
+  </div>
+  <div v-if="s" style="margin-top:14px">
     <div class="tiles">
       <router-link to="/scans" class="card tile">
         <div class="tnum">{{ s.active_scans_count }}</div><div class="muted">active scans</div>
@@ -25,7 +48,7 @@ onUnmounted(() => clearInterval(timer))
       </router-link>
       <router-link to="/findings" class="card tile">
         <div class="tnum">{{ s.findings_open }}</div><div class="muted">open findings</div>
-        <div class="muted" style="font-size:12px"><span class="state-new">{{ s.findings_new }} new</span> · {{ s.findings_resolved }} resolved</div>
+        <div class="muted" style="font-size:12px"><span class="state-new">{{ s.findings_new }} new</span> · {{ s.findings_removed }} gone in the latest runs</div>
       </router-link>
       <router-link to="/findings?severity=Critical" class="card tile">
         <div class="tnum" :style="{ color: (s.findings_by_severity.Critical || 0) ? 'var(--crit)' : '' }">{{ s.findings_by_severity.Critical || 0 }}</div>
@@ -34,6 +57,7 @@ onUnmounted(() => clearInterval(timer))
       <router-link to="/scanners" class="card tile">
         <div class="tnum">{{ s.scanners_connected }}<span class="muted" style="font-size:18px">/{{ s.scanners_total }}</span></div>
         <div class="muted">scanners online</div>
+        <div class="muted" style="font-size:12px">{{ s.slots_busy }}/{{ s.slots_total }} job slots busy</div>
       </router-link>
     </div>
 
@@ -54,9 +78,17 @@ onUnmounted(() => clearInterval(timer))
         <router-link v-for="a in s.active_scans" :key="a.id" :to="'/scans/' + a.id" class="actrow">
           <div class="row" style="justify-content:space-between"><b>{{ a.name }}</b><span class="state" :class="'st-' + a.status">{{ a.status }}</span></div>
           <div class="progress"><div class="bar" :style="{ width: pct(a) + '%' }"></div></div>
-          <div class="muted" style="font-size:12px">{{ a.jobs_done }}/{{ a.jobs_total }} assets</div>
+          <div class="muted" style="font-size:12px">{{ a.jobs_done }}/{{ a.jobs_total }} jobs</div>
         </router-link>
         <div v-if="!s.active_scans.length" class="muted">No active scans.</div>
+      </div>
+
+      <div class="card">
+        <h2>Upcoming scheduled runs</h2>
+        <router-link v-for="u in s.upcoming" :key="u.id" :to="u.scan_id ? '/scans/' + u.scan_id : '/schedulers'" class="actrow">
+          <div class="row" style="justify-content:space-between"><b>{{ u.name }}</b><span class="muted">{{ timeUntil(u.next_run_at) }}</span></div>
+        </router-link>
+        <div v-if="!s.upcoming.length" class="muted">Nothing scheduled. <router-link to="/scans/new?repeat=1">Create a scheduler</router-link>.</div>
       </div>
 
       <div class="card">
@@ -70,11 +102,12 @@ onUnmounted(() => clearInterval(timer))
 
       <div class="card">
         <h2>New findings (14 days)</h2>
+        <div class="muted" style="font-size:12px">{{ trendTotal }} in the last 14 days</div>
         <div class="trend">
-          <div v-for="t in s.trend" :key="t.date" class="tbar" :title="t.date + ': ' + t.count">
+          <div v-for="t in days" :key="t.date" class="tbar" :title="t.date + ': ' + t.count">
             <div :style="{ height: Math.round(t.count / trendMax * 100) + '%' }"></div>
           </div>
-          <div v-if="!s.trend.length" class="muted">No findings yet.</div>
+
         </div>
       </div>
 
@@ -90,3 +123,8 @@ onUnmounted(() => clearInterval(timer))
   </div>
   <div v-else class="muted">Loading…</div>
 </template>
+
+<style scoped>
+.hero { margin-top: 14px; }
+.hero ol { margin: 6px 0 0; padding-left: 20px; line-height: 1.9; }
+</style>

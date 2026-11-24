@@ -6,8 +6,9 @@
 
 A pentesting toolkit in one container.
 
-One CLI over ProjectDiscovery, OWASP ZAP, sqlmap, dirb, dirsearch, and some Python
-recon/fuzz tools. Point it at a target, get one JSON result.
+One CLI over ProjectDiscovery (subfinder, dnsx, httpx, katana, nuclei), sqlmap, trufflehog and a few Python
+recon / fuzz / API tools, plus a web UI that runs scans across a fleet of scanners. Point it at a target, get
+one JSON result — or schedule it and get told what changed.
 
 > ⚠️ Active, intrusive scanning. Only run it against systems you're authorized to test.
 
@@ -21,291 +22,150 @@ docker run --rm boxcutter --list             # tools
 docker run --rm boxcutter workflow --list    # workflows
 ```
 
-Below, `boxcutter <args>` = `docker run --rm boxcutter <args>`. Add `--table` for readable
-output, `--steps` to watch a workflow run, `--header "K: V"` for auth (repeatable).
+Below, `boxcutter <args>` = `docker run --rm boxcutter <args>`. Add `--table` for readable output, `--steps`
+to watch a workflow run, `--header "K: V"` for auth (repeatable).
 
-## Scan
+## Scan from the CLI
 
 ```bash
-# whole scan of one site
+# a website
 boxcutter web-full https://example.com --table
-boxcutter web-full https://example.com --severity critical,high     # worst only
-boxcutter web-full https://example.com --header "Authorization: Bearer T"   # behind auth
+boxcutter web-full https://example.com --severity critical,high               # worst only
+boxcutter web-full https://example.com --header "Authorization: Bearer T"     # behind auth
 
-# one URL / one param
+# one URL / one parameter
 boxcutter endpoint-scan "https://shop.example.com/product?id=1"
-boxcutter fuzz "https://example.com/search?q=1"                     # inject every param
-boxcutter fuzz "https://example.com/api/orders/{NUMBERS}"           # enumerate IDs (IDOR)
+boxcutter fuzz "https://example.com/search?q=1"                    # inject every param
+boxcutter fuzz "https://example.com/api/orders/{NUMBERS}"          # enumerate IDs (IDOR)
 boxcutter sqlmap "https://example.com/item?id=1"
 
-# an API
+# APIs
 boxcutter swagger-scan https://api.example.com/openapi.json
-boxcutter swagger-scan api.example.com                              # find the spec first
-boxcutter graphql-audit https://api.example.com/graphql
+boxcutter graphql-scan https://api.example.com
 
-# map the app in a headless browser (SPA-aware: clicks links, submits forms, captures every request)
-boxcutter harvest https://app.example.com                          # dedupe into an endpoint corpus
-boxcutter harvest https://app.example.com --har traffic.har        # + a Burp/ZAP-importable HAR
-boxcutter harvest https://app.example.com --header "Cookie: session=..."    # authenticated crawl
+# a JS / single-page app in a real headless browser
+boxcutter harvest https://app.example.com
+boxcutter spa-scan https://app.example.com --header "Cookie: session=..."
 
-# start from a domain
-boxcutter recon example.com                                        # subdomains that resolve
-boxcutter env-scan example.com --steps                             # scan the whole environment
-boxcutter env-takeover example.com                                 # subdomain takeover sweep
+# a whole domain
+boxcutter recon example.com                 # subdomains that resolve
+boxcutter env-scan example.com --steps      # every subdomain, full scan
+boxcutter env-takeover example.com          # subdomain takeover sweep
 
-# secrets & source
+# secrets in JavaScript
 boxcutter secrets-scan example.com
-boxcutter git-extract https://example.com/                         # rebuild an exposed .git
-
-# custom payload, report only on match
-boxcutter fuzz "https://example.com/p?id=1" --payload "' OR '1'='1" --pattern "sql syntax|error"
 
 # run any bundled binary natively
 boxcutter raw nuclei -u https://example.com -t cves
 ```
 
-**Tools:** `subfinder` `dnsx` `httpx` `screenshot` `wayback` · `katana-crawl` `zap-crawl`
-`js-endpoints` `harvest` · `nuclei` `sqlmap` `dirb` `dirsearch` `zap-scan-*` · `fuzz`
-`path-fuzz` · `scan-secrets` `git-extract` · `swagger-*` `graphql-*` · `http-request`.
-**Workflows:** `web-full` `web-scan` `spa-scan` `endpoint-scan` `web-fuzz` `web-sqlmap` `swagger-scan`
-`graphql-scan` `secrets-scan` `recon` `env-scan` `env-nuclei` `env-takeover`.
+**Tools:** `subfinder` `dnsx` `dns-brute` `ping-scan` `httpx` `wayback` `wayback-domains` · `katana-crawl`
+`harvest` `js-endpoints` · `nuclei` `sqlmap` `fuzz` · `scan-secrets` · `swagger-specs` `swagger-endpoints` ·
+`graphql-detect` `graphql-audit`. Only the tools the bundled workflows use ship.
 
-`boxcutter <cmd> --help` for options. Custom workflows: drop YAML in
-`boxcutter/workflows/library/` or point `BOXCUTTER_WORKFLOWS` at a dir.
+**Templates** (YAML workflows of the engine): `web-full` `web-scan` `web-nuclei` `web-fuzz` `web-sqlmap` `spa-scan` `endpoint-scan` `web-crawl`
+`swagger-scan` `swagger-fuzz` `graphql-scan` `secrets-scan` `wayback-scan` `wayback-fuzz` `recon` `recon-http`
+`ip-discover` `env-scan` `env-nuclei` `env-takeover` `env-secrets` `env-wayback` `env-wayback-secrets`.
 
-## Browser crawl (SPA)
+`boxcutter <cmd> --help` for options. Custom workflows: drop YAML in `boxcutter/workflows/library/` or point
+`BOXCUTTER_WORKFLOWS` at a dir.
 
-`harvest` drives the target in a real headless browser (Chromium over CDP): clicks links,
-submits forms, follows routes, and captures every request (GET/POST, XHR/fetch, navigations),
-including the cross-origin `api.*` backend a plain spider never sees. It dedupes into an endpoint
-corpus (path ids templated to `{id}`) with a copy-paste curl per request, and can write a
-Burp/ZAP-importable HAR. It feeds the shared `web-crawl` step, so `web-full`/`web-scan` pick up a
-SPA's API surface, and the `spa-scan` workflow DASTs every captured URL.
+## Web UI
 
 ```bash
-boxcutter harvest https://app.example.com --capture-host "*.example.com"   # keep the org, drop trackers
-boxcutter harvest https://app.example.com --header "Cookie: session=..." --har traffic.har   # authed + HAR
-boxcutter workflow spa-scan https://app.example.com --header "Cookie: session=..."
+docker run -d --name boxcutter -p 8000:8000 -v boxcutter-data:/data ghcr.io/zzzteph/boxcutter serve
 ```
 
-Mount a dir for the HAR: `docker run --rm -v "$PWD:/out" boxcutter harvest https://app.example.com
---har /out/traffic.har`. Needs the full image (bundles chromium).
+Open `http://<host>:8000`. The browser asks for a login: **`admin` / `admin`** (HTTP basic auth, one account).
+Change the password under **Settings** — the UI reminds you until you do. `ADMIN_PASSWORD` sets the first-boot
+password instead. Put TLS (a reverse proxy) in front for anything beyond localhost: basic auth sends the password
+with every request.
 
-## AI agents
+The server includes a built-in scanner that runs 2 jobs in parallel; change that live on the **Scanners** page or
+add more scanners (below).
 
-LLM-driven agents that drive the same tools on their own. Each needs a provider and API key
-(`--provider` / `--api-key`, or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) and makes many calls.
-List them with `boxcutter ai --list`; run one with `boxcutter ai <agent> <target>` (or bare
-`boxcutter <agent>` when no tool shares the name). Under docker, pass the key through:
-`docker run --rm -e ANTHROPIC_API_KEY boxcutter irvin example.com`.
+**New scan** is three steps on one page:
 
-- `irvin`: the conductor. Runs travis, then bob, then caleb over a whole domain, verifies and
-  consolidates the findings, and writes a CEO executive summary plus a technical report. It
-  streams every agent's reasoning live and can dump it per agent.
-- `bob`: surface scanner, highlights exposed attack surface.
-- `caleb`: multi-phase, multi-identity orchestrator (authenticated deep scan, reauth, two-account BFLA).
-- `travis`: recon triage, rates how interesting a host is before a deeper scan.
-- `crawlio`: crawler that builds a code-verified endpoint list.
-- `prawlio`: authenticated crawl (logs in, then crawls under that session).
-- `logio`: auth-only agent that logs in with supplied creds.
-- `juicy`: JS analyst, pulls hidden URLs, DOM XSS, and secrets from a JS file or page.
+1. **What to scan** — paste domains, URLs, IPs or CIDRs (or upload a list). The kind is detected as you type.
+2. **What to do** — two tabs of cards that fit those targets: **Workflows** (multi-step, the work spreads over all
+   scanners) and **Templates** (one job per target: a bundled scan template or a single tool). A short
+   *Recommended* row comes first, then groups (Websites, Environment, Discovery, APIs, Secrets, Web archive,
+   Network) and a search box. Pick a workflow and its graph is drawn right there, so you see how it will run.
+3. **When** — run once now, or **on a schedule**: a cron expression with a time zone (presets for the usual ones),
+   checked live — "At 03:00 on Monday · next: Mon 30 Nov 03:00, …". That creates a scheduler.
 
-```bash
-# full engagement from a domain: recon, rank hosts, bob, then caleb, into a verified report
-boxcutter irvin example.com
+A summary bar says exactly what will run before you start it.
 
-# scan an explicit list of hosts and skip discovery (or --hosts-file targets.txt, one per line)
-boxcutter irvin --hosts app.example.com,api.example.com --report report.md
+**Workflows** are graphs of steps. Every step runs one template once per item it receives — each run a separate
+job that any scanner picks up — and hands what it finds (hostnames, URLs, URLs with parameters, JavaScript
+files, POST/PUT requests) to the steps wired after it, as soon as each job finishes. Build your own in the
+**workflow builder**: add steps from the palette, drag from a step's dot onto another step to wire them, pick
+what kind of results each step takes, name steps, nest other workflows. Every bundled template that loops over
+hosts or URLs also ships as a built-in workflow (21 of them, e.g. *Whole environment scan* as 23 steps) — open one
+to see its graph, duplicate it to change it.
 
-# quick pass (bob only, skip caleb's deep pass) and save the CEO + findings report
-boxcutter irvin example.com --quick --report report.md
+**A scan's page** shows its workflow **live**: every step with its state, jobs, what it found and its findings,
+wires animated while data flows. Click a step for its own log and to filter findings / discovered assets / jobs
+to just that step.
 
-# authenticated deep scan with two identities for BOLA/BFLA, top 3 ranked hosts only
-boxcutter irvin app.example.com --creds user:pass --creds-b user2:pass2 --max-hosts 3
+**Schedulers** are named recurring scans: what, on what targets, and a cron schedule. Every run (scheduled, "Run
+now" or "Run again") starts over from the first steps on your targets and flows through the whole workflow again.
+When it finishes, the findings are brought up to date: ones found for the first time are **new**, ones found again
+stay **open**, and ones that are **no longer found are removed** — the list always shows what is there now. A
+finding is only removed when its step actually re-checked that target and came back clean; if the job failed or the
+target wasn't reached this time, the finding stays, marked **not re-checked**. Every removal is listed in Activity
+and in the scan-done Slack/Telegram message, so you can see what got fixed. Runs never stack: if one is still going
+at the next tick, that tick is skipped (and logged).
 
-# dump every agent's reasoning (native thinking + narration) and all artifacts to folders
-boxcutter irvin example.com --reasoning-dir reasoning/ --out-dir run/
+**Notifications** (Settings): Telegram and Slack (incoming webhook) — new findings of the severities you pick,
+and a summary when a scan finishes. `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `SLACK_WEBHOOK_URL` pre-fill
+them on first boot.
 
-# turn native thinking off for a cheaper run, or widen which host tiers get scanned
-boxcutter irvin example.com --reasoning 0 --tiers critical,high,medium
-```
+There is no public REST API: the server's `/api` routes exist only for its own UI (no API keys, no OpenAPI docs,
+no CORS).
 
-## Server & agents
+## Scanners (agents)
 
-The same image is also a web app and a scale-out scanner fleet. `boxcutter serve` runs the
-UI/API (with one built-in agent); `boxcutter agent` turns any host into a scanner that pulls
-jobs from that server over HTTP. One image, one version for all three modes, so every push
-rebuilds them together and an agent can never disagree with the engine it runs.
-
-**Run the server** (one host). Then open `http://<host>:8000` and log in with `root` / `root`
-(you are forced to change it on first login):
-
-```bash
-docker run -d --name boxcutter-server -p 8000:8000 -v boxcutter-data:/data \
-  ghcr.io/zzzteph/boxcutter serve
-```
-
-The server includes a built-in scanner that starts idle. Raise its "number of boxcutters" on
-the Scanners page to scan from the server host itself, or add dedicated agents:
-
-**Run an agent** (any number of other hosts). Copy the enroll token from the server's Scanners
-page, then point an agent at the server:
+Every scanner pulls jobs from the server and runs them. More scanners = faster scans, especially
+workflows. On the server's **Scanners** page click **New enroll token**, then on any host:
 
 ```bash
 docker run -d --name boxcutter-agent \
   ghcr.io/zzzteph/boxcutter agent --server https://scanner.example.com --token <ENROLL_TOKEN>
 ```
 
-The agent enrolls, heartbeats, and runs N `boxcutter` jobs in parallel (`--concurrency N`, or
-change it live from the Scanners page). Put TLS (a reverse proxy) in front of the *server* for
-remote agents and browsers.
+Change how many jobs it runs at once (`--concurrency N`, default 2) live from the Scanners page. The agent only
+needs to reach the server; the server never connects back. Put TLS in front of the *server* for remote agents.
 
-### The agent control UI (`:7070`)
-
-Each agent also serves a small control UI (login `root` / `root`) to set its server URL, token,
-and concurrency without redeploying. It is optional: the agent runs headless with only `--server`
-and `--token`. The UI binds to port `7070` inside the container; change the bind port with
-`--ui-port PORT` (or the `RUNNER_UI_PORT` env var).
-
-Docker does not publish that port unless you ask it to, and the UI can change where the agent
-sends its results, so do not expose it on a public interface. Bind it to loopback only and reach
-it through an SSH tunnel or a reverse proxy you control:
+Each agent also serves a small control UI on port `7070` (HTTP basic auth, `admin` / `admin`, changeable there;
+`RUNNER_UI_PASSWORD` sets the initial one) to change its server, token and concurrency. It can redirect where the
+agent sends results, so publish it to loopback only and tunnel to it:
 
 ```bash
-# publish the control UI to localhost ONLY (note the 127.0.0.1 prefix), not 0.0.0.0
 docker run -d --name boxcutter-agent -p 127.0.0.1:7070:7070 \
   ghcr.io/zzzteph/boxcutter agent --server https://scanner.example.com --token <ENROLL_TOKEN>
-
-# reach it from your own machine over SSH, then open http://localhost:7070
-ssh -L 7070:127.0.0.1:7070 user@agent-host
+ssh -L 7070:127.0.0.1:7070 user@agent-host     # then open http://localhost:7070
 ```
 
-For a permanent endpoint, put nginx (with TLS and auth) in front of `127.0.0.1:7070` instead of
-publishing `7070` on a public interface. The agent never needs its port reachable from the server;
-only the agent needs to reach the server.
-
-From a source checkout (no Docker): `pip install -r requirements.txt` then
-`boxcutter serve`. Agents need no extra dependencies: `boxcutter agent --server ... --token ...`.
-
-### Local models (Ollama)
-
-The AI agents can run on a local model instead of a hosted API - no key, no per-token cost. Install Ollama on
-a host (`curl -fsSL https://ollama.com/install.sh | sh`, then `ollama serve`), then in the UI under **LLM
-Profiles → Local models** click **Download** for a small model (`qwen2.5:7b` is a good default; the listed
-models all fit ~8GB RAM) and **Use in a profile** - an `ai_agent` template then runs on it.
-
-Models run where they're downloaded: the server manages the server host's Ollama, and each **agent** has its
-own Download buttons (on its `:7070` control UI) for its own Ollama - so a scanner only ever claims a job whose
-model it has installed. If the server (or an agent) runs in Docker and Ollama runs on the host, point it at the
-host with `OLLAMA_BASE_URL=http://host.docker.internal:11434` (on Linux also add
-`--add-host=host.docker.internal:host-gateway`); left blank, the server auto-detects that case. Small local
-models are weaker at multi-step agent reasoning than the hosted providers - good for cheap/offline passes, not
-a like-for-like swap for a deep scan.
+From a source checkout (no Docker): `pip install -r requirements.txt`, build the UI (`cd web && npm ci && npm run
+build && ln -s ../web/dist ../server/web_dist`), then `boxcutter serve`.
 
 ### Quick reference
 
 | mode | command | port | notes |
 |------|---------|------|-------|
-| engine | `boxcutter <tool> <target>` | - | one scan, JSON envelope on stdout |
-| server | `boxcutter serve` | `8000` (UI/API) | built-in agent; persist with `-v boxcutter-data:/data` |
-| agent | `boxcutter agent --server <URL> --token <T>` | `7070` (control UI) | scale-out scanner; publish `7070` to loopback only |
-| mcp | `boxcutter mcp [--http]` | `9000` (HTTP) | expose the tools over MCP to any agent; `--api-key` to gate |
+| engine | `boxcutter <tool\|workflow> <target>` | - | one scan, JSON envelope on stdout |
+| server | `boxcutter serve` | `8000` | web UI + built-in scanner; persist with `-v boxcutter-data:/data` |
+| agent | `boxcutter agent --server <URL> --token <T>` | `7070` | scale-out scanner; publish `7070` to loopback only |
 
-Agent flags and env vars:
-
-| flag / env | default | purpose |
-|------------|---------|---------|
-| `--server <URL>` | - | server base URL the agent pulls jobs from |
-| `--token <TOKEN>` | - | enroll token (copy from the server's Scanners page) |
-| `--concurrency <N>` | `1` | parallel jobs (also settable live from the Scanners page) |
-| `--ui-port <PORT>` / `RUNNER_UI_PORT` | `7070` | control-UI bind port |
-| `RUNNER_CONFIG` | `/data/runner-config.json` | file the agent persists its server URL / token / concurrency to |
-| `OLLAMA_BASE_URL` | auto | point the agent at its Ollama for local models (e.g. `http://host.docker.internal:11434`) |
-
-The agent only needs to reach the server; the server never connects back to the agent.
-
-## MCP server
-
-Expose boxcutter's deterministic tools over the [Model Context Protocol](https://modelcontextprotocol.io) so
-any MCP client - Claude Desktop, an IDE agent, or your own orchestrator - can drive the toolkit. Each tool's
-name, description and JSON-Schema are generated straight from its own argparse, so the advertised contract can
-never drift from what the CLI accepts. Only the deterministic tools are exposed; the LLM-driven `ai` agents
-need a provider/API key and are deliberately not deployable here.
-
-Two transports:
-
-```bash
-# stdio - for clients that SPAWN boxcutter as a subprocess (configure this command in the client):
-boxcutter mcp
-
-# Streamable HTTP - a networked endpoint, with an optional shared-secret key:
-docker run -d --name boxcutter-mcp -p 9000:9000 \
-  -e BOXCUTTER_MCP_API_KEY=$SECRET \
-  ghcr.io/zzzteph/boxcutter mcp --http --host 0.0.0.0
-```
-
-The endpoint is at `http://<host>:9000/mcp` (`/health` is an open liveness probe). When a key is set, clients
-send it as `Authorization: Bearer <key>` or `X-API-Key: <key>`. Put TLS (a reverse proxy) in front for real
-exposure - the key is a deployment gate, not a substitute for it.
-
-### `--http` and `--host`
-
-`--http` picks the transport. Without it, `boxcutter mcp` speaks MCP over **stdio** (a client launches boxcutter
-as a child process and talks over stdin/stdout - for local clients like Claude Desktop). With `--http` it runs
-a **networked** Streamable HTTP server clients connect to at `http://<host>:9000/mcp`.
-
-`--host` is the interface the HTTP server binds to:
-
-- `127.0.0.1` (the default) - **loopback only**, reachable from the same machine/container.
-- `0.0.0.0` - **all interfaces**, reachable from outside.
-
-Inside Docker you need `--host 0.0.0.0`: `-p 9000:9000` forwards traffic to the container's *external* interface,
-so a process bound to `127.0.0.1` inside the container isn't reachable through the published port. `0.0.0.0` lets
-it accept the forwarded traffic (the same reason `boxcutter serve` binds `0.0.0.0`).
-
-`0.0.0.0` means anything that can route to the host can reach the endpoint, so pair it with the API key and TLS.
-If you don't need remote access, publish to loopback and tunnel instead - the container still binds `0.0.0.0`
-(so the port mapping works), but Docker only exposes it on the host's loopback:
-
-```bash
-docker run -d --name boxcutter-mcp -p 127.0.0.1:9000:9000 \
-  -e BOXCUTTER_MCP_API_KEY=$SECRET \
-  ghcr.io/zzzteph/boxcutter mcp --http --host 0.0.0.0
-
-# reach it from your own machine over SSH:
-ssh -L 9000:127.0.0.1:9000 user@mcp-host
-```
-
-### Long-running tools & timeouts
-
-Assume **every** call can take minutes - `nuclei`, `sqlmap`, the `zap-scan-*` scanners and `harvest` routinely
-do. An MCP `tools/call` is **synchronous**: the client holds the connection open and receives the result when
-the tool finishes (correlated by JSON-RPC id). There is no separate job queue to poll. Calls run **concurrently**
-in their own worker threads, so a slow tool never blocks the others - results just come back as each finishes.
-
-The server never cuts a call short on its own; the only server-side bound is `--tool-timeout` (default `1800`s /
-30 min), after which that one call returns a `{"success": false, "error": "… timed out"}` envelope. Raise it for
-long scans (`--tool-timeout 3600`, or `0` for no limit).
-
-The real risk with a minutes-long call is an *idle* timeout on the connection, not the server:
-
-- **HTTP, default transport (SSE):** the stream sends a keepalive `: ping` every **15s** while the tool runs, so
-  a reverse proxy / load balancer only drops the call if its idle timeout is under 15s. This is the recommended
-  transport for long tools.
-- **HTTP `--json-response`:** one plain response held open with **no keepalive** until the tool finishes - more
-  likely to be cut by a proxy on a long call. Don't use it for slow tools.
-- **stdio:** no HTTP layer, so no HTTP timeout - only the client's own MCP request timeout applies.
-
-So for slow tools: keep the default SSE transport, set `--tool-timeout` above your longest scan, and raise the
-**client's** read timeout and any **reverse-proxy / load-balancer** read/idle timeout (e.g. nginx
-`proxy_read_timeout 3600s`) above the longest expected runtime. (If you need fire-and-forget jobs decoupled from
-a live connection, that's what the `boxcutter serve` + `agent` fleet is for; the MCP server is synchronous.)
-
-Inspect what's exposed without a client: `boxcutter mcp --list-tools`, `--print-catalog` (JSON of every
-name/description/schema), or `--print-docs` (a Markdown reference). Per-call timeout is `--tool-timeout`
-(default 1800s); `--all-tools` advertises the full registry even where a binary isn't installed.
-
-From a source checkout (no Docker): `pip install -r requirements.txt` then `boxcutter mcp`.
+| env | default | purpose |
+|-----|---------|---------|
+| `ADMIN_PASSWORD` | `admin` | first-boot UI password (then change it in Settings) |
+| `DATABASE_URL` | `sqlite:////data/boxcutter.db` | or `postgresql+psycopg://…` / `mysql+pymysql://…` |
+| `ENROLL_TOKEN` | generated | token the built-in scanner (and any agent) enrolls with |
+| `CONCURRENCY` | `2` | parallel jobs of a scanner (0 = idle) |
+| `RUNNER_UI_PORT` | `7070` | agent control-UI port |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SLACK_WEBHOOK_URL` | - | pre-fill notifications |
 
 ## Output
 
@@ -316,9 +176,9 @@ One JSON envelope on stdout: `{ "success": true, "kind": "findings", "data": [..
 
 Scanning is done by these projects. Credit to their authors:
 
-- [ProjectDiscovery](https://github.com/projectdiscovery): `subfinder`, `dnsx`, `naabu`, `katana`, `nuclei`, `httpx`
-- [OWASP ZAP](https://www.zaproxy.org/): crawling and active scanning
+- [ProjectDiscovery](https://github.com/projectdiscovery): `subfinder`, `dnsx`, `katana`, `nuclei`, `httpx`
 - [sqlmap](https://sqlmap.org/): SQL injection
-- [dirb](https://dirb.sourceforge.net/) + [dirsearch](https://github.com/maurosoria/dirsearch): content discovery
+- [trufflehog](https://github.com/trufflesecurity/trufflehog): secret detection
+- [nmap](https://nmap.org/): host discovery
 
-boxcutter adds the CLI, the JSON envelope, and the YAML workflows.
+boxcutter adds the CLI, the JSON envelope, the YAML templates, the distributed workflow engine and the UI.

@@ -1,64 +1,60 @@
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { api, token, setToken, setUser, getUser, isAdmin, getActivitySeen } from './api'
-const docsUrl = '/docs'   // same origin/port as the app (Vite proxies it in dev; the API serves it in prod)
+import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { useRoute } from 'vue-router'
+import { api, getActivitySeen } from './api'
+
 const route = useRoute()
-const router = useRouter()
 const open = ref(false)
-const acctOpen = ref(false)
-const acctEl = ref(null)
 const unseen = ref(0)
+const defaultPw = ref(false)
 let timer = null
 
-const initial = computed(() => (getUser()?.username || '?').charAt(0))
-function logout() { setToken(''); setUser(''); open.value = false; acctOpen.value = false; router.push('/login') }
-function go() { open.value = false; acctOpen.value = false }
-function onDoc(e) { if (acctEl.value && !acctEl.value.contains(e.target)) acctOpen.value = false }
-watch(() => route.path, () => { acctOpen.value = false })
+watch(() => route.path, () => { open.value = false })
 async function pollActivity() {
-  if (!token()) { unseen.value = 0; return }
   try {
     const r = await api.get('/activity?limit=50')
     const seen = getActivitySeen()
     unseen.value = r.items.filter(a => a.id > seen).length
   } catch (e) { /* transient */ }
 }
-onMounted(() => { pollActivity(); timer = setInterval(pollActivity, 5000); document.addEventListener('click', onDoc) })
-onUnmounted(() => { clearInterval(timer); document.removeEventListener('click', onDoc) })
+async function checkAccount() {
+  try { defaultPw.value = (await api.get('/settings/account')).default_password } catch (e) { /* ignore */ }
+}
+onMounted(() => { pollActivity(); checkAccount(); timer = setInterval(pollActivity, 8000) })
+onUnmounted(() => clearInterval(timer))
 </script>
 
 <template>
-  <nav v-if="route.path !== '/login'" class="nav">
-    <span class="brand">boxcutter</span>
+  <nav class="nav">
+    <router-link to="/dashboard" class="brand">boxcutter</router-link>
     <button class="navtoggle" @click="open = !open" aria-label="Toggle menu">☰</button>
     <div class="navlinks" :class="{ open }">
-      <router-link to="/dashboard" @click="go">Overview</router-link>
-      <router-link to="/scans" @click="go">Scans</router-link>
-      <router-link to="/monitoring" @click="go">Monitoring</router-link>
-      <router-link to="/findings" @click="go">Findings</router-link>
-      <router-link to="/operator" @click="go">Operator</router-link>
-      <router-link to="/templates" @click="go">Templates</router-link>
-      <router-link to="/workflows/new" @click="go">Build workflow</router-link>
-      <router-link to="/scanners" @click="go">Scanners</router-link>
-      <router-link to="/activity" @click="go">Activity<span v-if="unseen" class="navbadge">{{ unseen > 99 ? '99+' : unseen }}</span></router-link>
-      <router-link v-if="isAdmin()" to="/llm-profiles" @click="go">LLM Profiles</router-link>
-      <a :href="docsUrl" target="_blank" rel="noopener" @click="go">API ↗</a>
+      <router-link to="/dashboard">Overview</router-link>
+      <router-link to="/scans" :class="{ 'router-link-active': route.path.startsWith('/scans/') && route.path !== '/scans/new' }">Scans</router-link>
+      <router-link to="/schedulers">Schedulers</router-link>
+      <router-link to="/workflows">Workflows</router-link>
+      <router-link to="/findings">Findings</router-link>
+      <router-link to="/scanners">Scanners</router-link>
+      <router-link to="/activity">Activity<span v-if="unseen" class="navbadge">{{ unseen > 99 ? '99+' : unseen }}</span></router-link>
       <span class="spacer" />
-      <div v-if="token()" class="acct" ref="acctEl">
-        <button class="avatar" @click.stop="acctOpen = !acctOpen" :title="getUser()?.username" aria-label="Account">{{ initial }}</button>
-        <div v-if="acctOpen" class="menu-panel right">
-          <div class="menu-head">
-            <span class="avatar">{{ initial }}</span>
-            <div><div class="who">{{ getUser()?.username }}</div><div class="role">{{ getUser()?.role }}</div></div>
-          </div>
-          <router-link to="/settings" class="menu-item" @click="go">Settings</router-link>
-          <button class="menu-item danger" @click="logout">Log out</button>
-        </div>
-      </div>
+      <router-link to="/scans/new" class="btn primary newscan">+ New scan</router-link>
+      <router-link to="/settings" class="gear" title="Settings" aria-label="Settings">⚙</router-link>
     </div>
   </nav>
+  <div v-if="defaultPw && route.path !== '/settings'" class="banner">
+    You are still using the default password <code>admin</code>.
+    <router-link to="/settings">Change it in Settings</router-link>.
+  </div>
   <main class="container">
-    <router-view />
+    <router-view :key="route.fullPath.startsWith('/scans/new') ? route.fullPath : route.path" />
   </main>
 </template>
+
+<style scoped>
+.newscan, .newscan.router-link-active { height: 36px; color: var(--on-primary) !important; padding: 0 16px !important;
+  background: var(--accent) !important; }
+.newscan:hover { text-decoration: none; }
+.gear { font-size: 18px; padding: 6px 10px !important; }
+.brand:hover { text-decoration: none; }
+.banner { background: var(--tertiary-container); color: var(--on-tertiary-container); padding: 8px 28px; font-size: 13px; }
+</style>

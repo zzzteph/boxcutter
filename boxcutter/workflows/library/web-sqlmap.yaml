@@ -1,5 +1,5 @@
 name: web-sqlmap
-help: like web-scan but injection testing is sqlmap-only - no fuzz, no ZAP active scan. crawl -> sqlmap per param URL -> swagger -> sqlmap per endpoint -> graphql detect+audit -> secrets per JS
+help: like web-scan but injection testing is sqlmap-only - no fuzz. crawl -> sqlmap per param URL -> swagger -> sqlmap per endpoint -> graphql detect+audit -> secrets per JS
 input: url
 output: findings
 
@@ -27,7 +27,7 @@ steps:
   - select: ${urls | params | dedup}
     save: params
 
-  # sqlmap each parameterised URL (no fuzz, no ZAP active scan - sqlmap only)
+  # sqlmap each parameterised URL (no fuzz - sqlmap only)
   - for_each: ${params}
     do:
       - tool: sqlmap

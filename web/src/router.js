@@ -1,28 +1,26 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import { token } from './api'
 
 const routes = [
-  { path: '/login', component: () => import('./views/Login.vue') },
   { path: '/', redirect: '/dashboard' },
   { path: '/dashboard', component: () => import('./views/Dashboard.vue') },
-  { path: '/findings', component: () => import('./views/Findings.vue') },
   { path: '/scans', component: () => import('./views/Scans.vue') },
   { path: '/scans/new', component: () => import('./views/NewScan.vue') },
   { path: '/scans/:id', component: () => import('./views/ScanDetail.vue') },
-  { path: '/operator', component: () => import('./views/Operator.vue') },
-  { path: '/monitoring', component: () => import('./views/Schedules.vue') },
-  { path: '/templates', component: () => import('./views/Templates.vue') },
+  { path: '/schedulers', component: () => import('./views/Schedulers.vue') },
+  { path: '/workflows', component: () => import('./views/Workflows.vue') },
   { path: '/workflows/new', component: () => import('./views/WorkflowBuilder.vue') },
-  { path: '/llm-profiles', component: () => import('./views/LLMProfiles.vue') },
-  { path: '/activity', component: () => import('./views/Activity.vue') },
+  { path: '/workflows/:id', component: () => import('./views/WorkflowBuilder.vue') },
+  { path: '/findings', component: () => import('./views/Findings.vue') },
   { path: '/scanners', component: () => import('./views/Fleet.vue') },
   { path: '/scanners/:id', component: () => import('./views/RunnerDetail.vue') },
-  { path: '/fleet', redirect: '/scanners' },
+  { path: '/activity', component: () => import('./views/Activity.vue') },
   { path: '/settings', component: () => import('./views/Settings.vue') },
+  // old paths
+  { path: '/monitoring', redirect: '/schedulers' },
+  { path: '/templates', redirect: '/workflows' },
+  { path: '/pipelines', redirect: '/workflows' },
+  { path: '/fleet', redirect: '/scanners' },
+  { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
 ]
 
-const router = createRouter({ history: createWebHashHistory(), routes })
-router.beforeEach((to) => {
-  if (to.path !== '/login' && !token()) return '/login'
-})
-export default router
+export default createRouter({ history: createWebHashHistory(), routes })

@@ -1,297 +1,214 @@
 <script setup>
-import { ref, reactive, computed, watch, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+// New scan in three plain steps on one page:
+//   1. What to scan   - paste targets (or upload a file); the kind is detected as you type
+//   2. What to do     - a workflow (its graph is shown) or a single template, as cards that fit those targets
+//   3. When           - once now, or on a cron schedule (that creates a scheduler)
+// A sticky summary bar says exactly what will happen and starts it.
+// Query params pre-fill it: ?template=<id>&targets=a,b&repeat=1
+import { ref, computed, watch, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
-import TemplatePicker from '../components/TemplatePicker.vue'
-import Select from '../components/Select.vue'
+import ScanTypePicker from '../components/ScanTypePicker.vue'
+import WorkflowGraph from '../components/WorkflowGraph.vue'
+import CronInput from '../components/CronInput.vue'
+import { KIND_LABEL, KIND_ONE, detectTargets, targetLines } from '../util'
+import { graphFromPlan } from '../workflow'
 
+const route = useRoute()
 const router = useRouter()
+
 const templates = ref([])
-const name = ref('')
-const targets = ref('')
+const inputs = ref([])
+const stats = ref(null)
+const targetsText = ref('')
+const file = ref(null)
 const templateId = ref(null)
+const when = ref('now')                 // now | schedule
+const cron = ref('0 3 * * *')
+const tz = ref('')
+const cronOk = ref(false)
+const cronDesc = ref('')
+const firstNow = ref(true)
+const name = ref('')
+const showAdvanced = ref(false)
+const params = ref([])
 const err = ref('')
 const busy = ref(false)
-// optional host-list file: for lists too large to paste (hundreds of thousands / millions). When set it is
-// uploaded (streamed server-side) and takes precedence over the textarea.
-const file = ref(null)
-function onFile(e) { file.value = e.target.files?.[0] || null }
-function clearFile() { file.value = null }
+const preview = ref(null)               // the chosen workflow's expanded plan, drawn as a graph
 
-// scan-specific inputs (used mainly by AI-agent templates): context, creds, and arbitrary custom params
-const vars = reactive({ context: '', creds: '', custom: [] })
-function addCustom() { vars.custom.push({ key: '', value: '' }) }
-function rmCustom(i) { vars.custom.splice(i, 1) }
-
-// pipeline: optional downstream stages. Each runs its template on the items the PREVIOUS stage produced
-// (stage 0 = the template above, run on the targets). Turns e.g. recon → web-full into a fan-out chain
-// instead of one long serial scan. See docs/pipelines-design.md.
-const stages = ref([])   // [{ template_id, item_filter, branch }]
-function addStage() { stages.value.push({ template_id: null, item_filter: 'all', branch: false }) }
-function rmStage(i) { stages.value.splice(i, 1) }
-const FILTERS = [{ value: 'all', label: 'all items (hosts & URLs)' }, { value: 'urls', label: 'URLs only' }]
-// mirror the server's _create_stages leveling so the displayed stage numbers match: a branch shares the level
-// of the stage before it (a parallel fan-out); anything else opens the next level. The first stage always
-// opens level 1 (there is nothing before it to run in parallel with).
-const stageLevels = computed(() => {
-  let level = 0
-  return stages.value.map(s => { if (!(s.branch && level >= 1)) level += 1; return level })
+const lines = computed(() => targetLines(targetsText.value))
+const detected = computed(() => detectTargets(lines.value))
+const kind = computed(() => (file.value && !lines.value.length) ? '' : detected.value.kind)
+const chosen = computed(() => templates.value.find(t => t.id === templateId.value) || null)
+const inputLabels = computed(() => Object.fromEntries(inputs.value.map(i => [i.value, i.label])))
+const slots = computed(() => stats.value ? stats.value.slots_total : null)
+const detectLabel = computed(() => {
+  const d = detected.value
+  if (!d.total) return ''
+  return Object.entries(d.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${(n === 1 ? KIND_ONE[k] : KIND_LABEL[k]) || k}`).join(' · ')
 })
-function stagesPayload() {
-  return stages.value.filter(s => s.template_id)
-    .map(s => ({ template_id: s.template_id, item_filter: s.item_filter, branch: !!s.branch }))
-}
-
-const targetCount = computed(() => targets.value.split(/\s+/).filter(Boolean).length)
-const selTmpl = computed(() => templates.value.find(t => t.id === templateId.value) || null)
-const isAgent = computed(() => selTmpl.value?.kind === 'ai_agent')
-
-// per-scan LLM profile override + reasoning dump (agent templates only)
-const profiles = ref([])
-const profileId = ref(null)
-const showReasoning = ref(false)
-const verbose = ref(false)                 // --debug: stream detailed step/tool logs for debugging a workflow
-const profileOpts = computed(() => profiles.value.map(p => ({ value: p.id, label: `${p.name} (${p.provider})` })))
-const selProfile = computed(() => profiles.value.find(p => p.id === profileId.value) || null)
-watch(templateId, () => { profileId.value = selTmpl.value?.llm_profile_id ?? null })
-
-// progress flags the SERVER adds per kind (must mirror build_argv's _PROGRESS_FLAGS) so the preview is exact
-const PROGRESS = { tool: ['--debug'], workflow: ['--steps', '--show-findings'], ai_agent: ['--debug'] }
-
-function specTokens(spec) {
-  const out = []
-  for (const p of (spec?.params || [])) {
-    if (!p.flag) continue
-    out.push(p.flag)
-    if (p.value !== '' && p.value != null) out.push(String(p.value))
-  }
-  for (const f of (spec?.flags || [])) out.push(String(f))
-  return out
-}
-// a live "this is what will run" preview, like a command you'd type on your laptop
-const preview = computed(() => {
-  const t = selTmpl.value
-  if (!t) return ''
-  const sub = t.kind === 'workflow' ? ['workflow'] : t.kind === 'ai_agent' ? ['ai'] : []
-  const parts = ['boxcutter', ...sub, t.spec?.name, '<target>', ...specTokens(t.spec)]
-  if (isAgent.value) {
-    const p = selProfile.value
-    if (p) {
-      parts.push('--provider', p.provider)
-      if (p.model) parts.push('--model', p.model)
-      if (p.proxy_url) parts.push('--llm-proxy-url', p.proxy_url)
-    }
-    const ctx = vars.context.trim() || t.context || ''
-    if (ctx) parts.push('--context', q(ctx))
-    if (vars.creds.trim()) parts.push('--creds', q(vars.creds.trim()))
-    if (showReasoning.value) parts.push('--reasoning', '8000')
-  }
-  for (const c of vars.custom) {
-    if (!c.key.trim()) continue
-    parts.push(c.key.startsWith('-') ? c.key.trim() : '--' + c.key.trim())
-    if (c.value !== '' && c.value != null) parts.push(q(String(c.value)))
-  }
-  for (const f of (PROGRESS[t.kind] || [])) parts.push(f)
-  if (verbose.value && !parts.includes('--debug')) parts.push('--debug')
-  return parts.filter(Boolean).join(' ')
-})
-function q(s) { return /\s/.test(s) ? `"${s}"` : s }
-
-function varsPayload() {
-  const v = {}
-  if (isAgent.value) {
-    if (vars.context.trim()) v.context = vars.context.trim()
-    if (vars.creds.trim()) v.creds = vars.creds.trim()
-    if (profileId.value) v.llm_profile_id = profileId.value
-    if (showReasoning.value) v.reasoning = 8000
-  }
-  if (verbose.value) v.debug = true
-  const custom = vars.custom.filter(c => c.key.trim()).map(c => ({ key: c.key.trim(), value: c.value }))
-  if (custom.length) v.custom = custom
-  return v
-}
-
-// arg validation (#7): accepted flags per tool, so a scan-specific custom param the tool would reject
-// (e.g. `-severity` on a nuclei template) is caught here instead of failing mid-scan.
-const toolFlags = ref({})
-const argWarnings = computed(() => {
-  const t = selTmpl.value
-  if (!t || t.kind !== 'tool') return []        // workflows/agents: flags aren't a single tool's — skip
-  const allowed = toolFlags.value[t.spec?.name]
-  if (!allowed || !allowed.length) return []
-  const out = []
-  for (const c of vars.custom) {
-    const k = (c.key || '').trim()
-    if (!k) continue
-    const flag = (k.startsWith('-') ? k : '--' + k).split('=')[0]
-    if (!allowed.includes(flag)) out.push(flag)
-  }
-  return [...new Set(out)]
+const unknownCount = computed(() => detected.value.counts.unknown || 0)
+const ready = computed(() => !!chosen.value && (lines.value.length > 0 || !!file.value) && (when.value === 'now' || cronOk.value))
+const summary = computed(() => {
+  if (!chosen.value) return 'Pick what to run'
+  const on = file.value ? `targets from ${file.value.name}` : `${lines.value.length} target${lines.value.length === 1 ? '' : 's'}`
+  const what = chosen.value.title + (chosen.value.kind === 'pipeline' ? ` (workflow, ${chosen.value.steps} steps)` : '')
+  const sched = (cronDesc.value || 'cron ' + cron.value).replace(/^At /, 'at ')
+  return `${what} on ${on} · ` + (when.value === 'schedule' ? `${sched} (${tz.value})${firstNow.value ? ', first run now' : ''}` : 'now')
 })
 
-async function load() {
-  templates.value = await api.get('/templates')
-  profiles.value = await api.get('/llm-profiles')
-  try { toolFlags.value = await api.get('/templates/tool-flags') } catch (e) { /* non-fatal */ }
-  if (!templateId.value && templates.value[0]) templateId.value = templates.value[0].id
-}
-async function create() {
-  err.value = ''; busy.value = true
+watch(templateId, async (id) => {
+  preview.value = null
+  const t = templates.value.find(x => x.id === id)
+  if (!t || t.kind !== 'pipeline') return
+  try { const full = await api.get('/templates/' + id); if (templateId.value === id) preview.value = graphFromPlan(full.plan) }
+  catch (e) { /* preview is optional */ }
+})
+
+function onFile(ev) { file.value = (ev.target.files && ev.target.files[0]) || null }
+function addParam() { params.value.push({ flag: '', value: '' }) }
+
+async function start() {
+  if (!ready.value || busy.value) return
+  err.value = ''
+  busy.value = true
+  const vars = { custom: params.value.filter(p => p.flag.trim()) }
+  const sched = when.value === 'schedule'
   try {
     let r
     if (file.value) {
-      // large host lists: upload the file (server streams it) instead of posting a JSON array
       const fd = new FormData()
+      fd.append('template_id', chosen.value.id)
       fd.append('name', name.value)
-      fd.append('template_id', String(templateId.value))
-      fd.append('vars', JSON.stringify(varsPayload()))
-      fd.append('stages', JSON.stringify(stagesPayload()))
+      fd.append('vars', JSON.stringify(vars))
+      if (sched) { fd.append('cron', cron.value); fd.append('timezone', tz.value); fd.append('start_now', firstNow.value) }
       fd.append('file', file.value)
       r = await api.postForm('/scans/upload', fd)
     } else {
-      r = await api.post('/scans', {
-        name: name.value, template_id: templateId.value,
-        targets: targets.value.split(/\s+/).filter(Boolean),
-        vars: varsPayload(),
-        stages: stagesPayload(),
-      })
+      r = await api.post('/scans', { template_id: chosen.value.id, name: name.value, targets: lines.value, vars,
+        cron: sched ? cron.value : null, timezone: tz.value || 'UTC', start_now: firstNow.value })
     }
-    router.push('/scans/' + r.id)
+    router.push(r.id ? '/scans/' + r.id : '/schedulers')
   } catch (e) { err.value = e.message } finally { busy.value = false }
 }
-onMounted(load)
+
+onMounted(async () => {
+  const [t, inp, s] = await Promise.all([api.get('/templates'), api.get('/templates/inputs'), api.get('/stats').catch(() => null)])
+  templates.value = t; inputs.value = inp; stats.value = s
+  const q = route.query
+  if (q.targets) targetsText.value = String(q.targets).split(',').join('\n')
+  if (q.repeat) when.value = 'schedule'
+  if (q.template && t.some(x => String(x.id) === String(q.template))) templateId.value = Number(q.template)
+})
 </script>
 
 <template>
-  <div class="row" style="justify-content:space-between;align-items:center">
-    <h1>New scan</h1>
-    <router-link to="/scans" class="btn ghost">← Scans</router-link>
-  </div>
+  <h1>New scan</h1>
+  <p class="muted" style="margin-top:0">Three steps: what to scan, what to do, and when.</p>
 
-  <div class="split">
-    <div class="card">
-      <h2>Scan</h2>
-      <div class="formgrid">
-        <div>
-          <label>Name</label>
-          <input v-model="name" placeholder="Acme external" @keyup.enter="create" />
-        </div>
-        <div>
-          <label>Template</label>
-          <TemplatePicker v-model="templateId" :templates="templates" />
-          <div v-if="selTmpl?.description" class="muted" style="font-size:12.5px;margin-top:6px;line-height:1.4">
-            {{ selTmpl.description }}</div>
-        </div>
+  <section class="step card">
+    <div class="step-h"><span class="num">1</span><h2>What do you want to scan?</h2></div>
+    <textarea v-model="targetsText" rows="5" :disabled="!!file"
+              placeholder="One target per line, for example:&#10;example.com&#10;https://app.example.com/login&#10;10.0.0.0/24"></textarea>
+    <div class="row" style="justify-content:space-between;margin-top:8px">
+      <div class="row" style="gap:6px">
+        <span v-if="detectLabel" class="chip detect">Detected: {{ detectLabel }}</span>
+        <span v-if="unknownCount" class="chip warnchip">{{ unknownCount }} line(s) don't look like a domain, URL or IP</span>
+        <span v-if="file" class="chip">📄 {{ file.name }} ({{ Math.ceil(file.size / 1024) }} KB) <a href="#" @click.prevent="file = null">✕</a></span>
       </div>
-
-      <label>Targets (one per line or space separated)
-        <span class="muted">— {{ targetCount }} asset(s)</span></label>
-      <textarea v-model="targets" rows="10" :disabled="!!file"
-        placeholder="example.com&#10;https://api.example.com&#10;10.0.0.0/24"></textarea>
-
-      <label style="margin-top:12px">…or upload a host list <span class="muted">— one per line; blank lines and
-        # comments ignored. Use this for very large lists (100k–millions).</span></label>
-      <div v-if="!file" class="row">
-        <input type="file" accept=".txt,.csv,.list,text/plain" @change="onFile" />
-      </div>
-      <div v-else class="row" style="align-items:center;gap:8px">
-        <span class="tag">📄 {{ file.name }}</span>
-        <span class="muted" style="font-size:12px">{{ (file.size / 1048576).toFixed(2) }} MB — streamed on upload</span>
-        <button class="ghost sm" @click="clearFile">Remove</button>
-      </div>
-
-      <label style="margin-top:16px">Pipeline <span class="muted">— optional: after the template above runs,
-        chain more workflows that consume what it found (each stage fans out across the fleet)</span></label>
-      <div class="pipe">
-        <div class="pipe-stage seed">
-          <span class="pipe-no">0</span>
-          <span class="pipe-name">{{ selTmpl?.name || 'template above' }}</span>
-          <span class="muted" style="font-size:12px">runs on your targets</span>
-        </div>
-        <div v-for="(s, i) in stages" :key="i" class="pipe-stage" :class="{ branch: s.branch && i > 0 }">
-          <span class="pipe-arrow" aria-hidden="true">{{ s.branch && i > 0 ? '∥ parallel' : '↓ feeds' }}</span>
-          <span class="pipe-no">{{ stageLevels[i] }}</span>
-          <div class="pipe-pick"><TemplatePicker v-model="s.template_id" :templates="templates" /></div>
-          <Select v-model="s.item_filter" :options="FILTERS" />
-          <label v-if="i > 0" class="pipe-branch" title="Run in parallel with the stage above (both consume the same items)">
-            <input type="checkbox" v-model="s.branch" /> parallel
-          </label>
-          <button class="danger ghost icon" title="Remove stage" @click="rmStage(i)">✕</button>
-        </div>
-      </div>
-      <button class="tonal sm" style="margin-top:8px" @click="addStage">+ Add stage</button>
-
-      <p v-if="err" class="err">{{ err }}</p>
-      <p v-if="!templates.length" class="muted">No templates yet —
-        <router-link to="/templates">create one</router-link> first.</p>
-      <button class="primary" style="margin-top:14px"
-        :disabled="busy || !name || !templateId || (!targets && !file)"
-        @click="create">{{ busy ? 'Starting…' : 'Start scan' }}</button>
-    </div>
-
-    <div class="card">
-      <h2>Inputs <span v-if="selTmpl" class="tag" :class="'kind-' + selTmpl.kind">{{ selTmpl.kind }}</span></h2>
-
-      <template v-if="isAgent">
-        <p class="muted" style="margin-top:0">These values are specific to <b>this</b> scan / customer and are
-          passed to the agent at run time — not stored on the shared template.</p>
-        <label>LLM profile <span class="muted">— overrides the template's for this scan</span></label>
-        <Select v-model="profileId" :options="profileOpts" placeholder="Use the template's profile" />
-        <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer">
-          <input type="checkbox" v-model="showReasoning" style="width:auto" />
-          Show the agent's reasoning — stream WHY it picks each tool into the live log
-        </label>
-        <label>Context (engagement / scope guidance)</label>
-        <textarea v-model="vars.context" rows="3"
-          :placeholder="selTmpl?.context || 'Staging env. Focus on auth & access control. In-scope: app.example.com'"></textarea>
-        <label>Credentials (optional — used for authenticated testing)</label>
-        <input v-model="vars.creds" placeholder="user:pass  or  token=…" />
-      </template>
-      <p v-else class="muted" style="margin-top:0">
-        Tool &amp; workflow parameters come from the template. Add any <b>scan-specific</b> extras below.
-      </p>
-
-      <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer">
-        <input type="checkbox" v-model="verbose" style="width:auto" />
-        Verbose logs (debug) — stream detailed step/tool output to the live log, to debug a workflow
+      <label class="btn ghost sm" style="margin:0">⬆ Upload a list
+        <input type="file" accept=".txt,.csv,text/plain" style="display:none" @change="onFile" />
       </label>
-
-      <label style="margin-top:6px">Custom parameters (this scan)</label>
-      <div v-for="(c, i) in vars.custom" :key="i" class="kvrow">
-        <input v-model="c.key" placeholder="--flag or key" />
-        <input v-model="c.value" placeholder="value (blank = boolean)" />
-        <button class="danger ghost icon" title="Remove" @click="rmCustom(i)">✕</button>
-      </div>
-      <button class="tonal sm" @click="addCustom">+ Add parameter</button>
-      <p v-if="argWarnings.length" class="muted" style="color:var(--bad);font-size:12px;margin-top:8px">
-        ⚠ <b>{{ selTmpl.spec.name }}</b> doesn't accept {{ argWarnings.join(', ') }} — pass tool-native flags via
-        an <code>--opt-args</code> value instead, or they'll be rejected when the scan runs.</p>
-
-      <label style="margin-top:14px">Command preview</label>
-      <pre class="cmd">{{ preview || 'Pick a template…' }}</pre>
-      <p v-if="isAgent && selProfile" class="muted" style="font-size:12px">
-        The API key for <b>{{ selProfile.name }}</b> is delivered as an env var at run time (never shown or logged).
-        <span v-if="!selProfile.has_key" style="color:var(--bad)"> — ⚠ this profile has NO key set; the scan will fail with “an LLM is required”.</span>
-      </p>
     </div>
+  </section>
+
+  <section class="step card">
+    <div class="step-h"><span class="num">2</span><h2>What should it do?</h2></div>
+    <div v-if="!templates.length" class="muted">Loading…</div>
+    <ScanTypePicker v-else :templates="templates" :kind="kind" v-model="templateId" />
+    <div v-if="chosen && chosen.kind === 'pipeline'" class="wfprev">
+      <div class="row" style="justify-content:space-between">
+        <b>How “{{ chosen.title }}” runs</b>
+        <router-link :to="'/workflows/' + chosen.id" class="muted" style="font-size:12.5px">open in the workflow builder →</router-link>
+      </div>
+      <div class="muted" style="font-size:12.5px;margin:2px 0 8px">Every box runs once per item it receives, as separate jobs on all
+        scanners; the wires show what each step hands to the next.</div>
+      <WorkflowGraph v-if="preview" :model-value="preview" mode="view" :height="380" :input-labels="inputLabels" />
+      <div v-else class="muted">loading the graph…</div>
+    </div>
+  </section>
+
+  <section class="step card">
+    <div class="step-h"><span class="num">3</span><h2>When?</h2></div>
+    <div class="seg">
+      <button type="button" :class="{ on: when === 'now' }" @click="when = 'now'">Run once, now</button>
+      <button type="button" :class="{ on: when === 'schedule' }" @click="when = 'schedule'">On a schedule (cron)</button>
+    </div>
+    <template v-if="when === 'schedule'">
+      <div style="margin-top:12px"><CronInput v-model:cron="cron" v-model:timezone="tz" @valid="(v, d) => { cronOk = v; cronDesc = d }" /></div>
+      <label class="chk"><input type="checkbox" v-model="firstNow" /> also run it right now</label>
+      <div class="muted" style="font-size:12.5px;margin-top:6px">
+        Creates a <router-link to="/schedulers">scheduler</router-link>. Each run is compared with the previous one, so you see
+        what is new, still open and fixed. If a run is still going at the next tick, that tick is skipped.
+      </div>
+    </template>
+
+    <div class="formgrid" style="margin-top:6px">
+      <div>
+        <label>Name <span class="muted">(optional)</span></label>
+        <input v-model="name" :placeholder="chosen ? chosen.title + (lines[0] ? ' — ' + lines[0] : '') : 'e.g. Weekly perimeter'" />
+      </div>
+    </div>
+
+    <button type="button" class="ghost sm" style="margin-top:10px" @click="showAdvanced = !showAdvanced">
+      {{ showAdvanced ? '▾' : '▸' }} Advanced: extra engine parameters</button>
+    <div v-if="showAdvanced" style="margin-top:6px">
+      <div class="muted" style="font-size:12.5px">Added to every job of this scan, e.g. <code>--header</code> =
+        <code>Cookie: session=…</code> for an authenticated scan. A tool that doesn't know a flag will fail that job.</div>
+      <div v-for="(p, i) in params" :key="i" class="kvrow" style="margin-top:6px">
+        <input v-model="p.flag" placeholder="--flag" />
+        <input v-model="p.value" placeholder="value (empty = on/off flag)" />
+        <button type="button" class="ghost danger sm" @click="params.splice(i, 1)">✕</button>
+      </div>
+      <button type="button" class="ghost sm" @click="addParam">+ Add parameter</button>
+    </div>
+  </section>
+
+  <div class="sumbar">
+    <div class="sumtext">
+      <b>{{ summary }}</b>
+      <div v-if="slots === 0" class="warn">No scanner is online — the scan will wait until one connects
+        (<router-link to="/scanners">Scanners</router-link>).</div>
+      <div v-if="err" class="err">{{ err }}</div>
+    </div>
+    <button class="primary" :disabled="!ready || busy" @click="start">
+      {{ busy ? 'Starting…' : (when === 'schedule' ? 'Create scheduler' : 'Start scan') }}</button>
   </div>
 </template>
 
 <style scoped>
-.pipe { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
-.pipe-stage {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2, var(--panel));
-}
-.pipe-stage.seed { border-style: dashed; }
-.pipe-stage.branch { margin-left: 22px; }
-.pipe-no {
-  flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
-  font-size: 12px; font-weight: 700; background: var(--accent); color: #fff;
-}
-.pipe-name { font-weight: 600; }
-.pipe-pick { flex: 1 1 auto; min-width: 0; }
-.pipe-arrow { flex: none; font-size: 11px; color: var(--muted); margin-left: 4px; width: 64px; }
-.pipe-branch { flex: none; display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
-.pipe-branch input { width: auto; }
+.step { margin-top: 14px; }
+.step-h { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.step-h h2 { margin: 0; }
+.num { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 13px;
+  background: var(--accent); color: var(--on-primary); flex: none; }
+.detect { color: var(--accent-ink); background: var(--wash); }
+.warnchip { color: var(--warn); }
+.wfprev { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--outline-variant); }
+.seg { display: inline-flex; border: 1px solid var(--outline-variant); border-radius: var(--radius-xl); overflow: hidden; }
+.seg button { border: 0; border-radius: 0; height: 38px; text-transform: none; letter-spacing: 0; font-weight: 500;
+  color: var(--on-surface-variant); background: transparent; }
+.seg button + button { border-left: 1px solid var(--outline-variant); }
+.seg button.on { background: var(--primary-container); color: var(--accent-ink); }
+.seg button:hover { box-shadow: none; color: var(--on-surface); background: var(--sc); }
+.chk { display: inline-flex; gap: 8px; align-items: center; cursor: pointer; margin-top: 12px; }
+.chk input { width: auto; }
+.sumbar { position: sticky; bottom: 0; margin: 18px -28px -24px; padding: 14px 28px; display: flex; gap: 16px;
+  align-items: center; justify-content: space-between; background: color-mix(in srgb, var(--sc) 94%, transparent);
+  border-top: 1px solid var(--outline-variant); backdrop-filter: blur(8px); z-index: 5; }
+.sumtext { min-width: 0; }
+.sumtext b { font-weight: 600; }
+.warn { color: var(--warn); font-size: 12.5px; margin-top: 2px; }
+.sumbar .err { margin: 2px 0 0; font-size: 13px; }
+@media (max-width: 640px) { .sumbar { margin: 18px -16px -16px; padding: 12px 16px; flex-direction: column; align-items: stretch; } }
 </style>
