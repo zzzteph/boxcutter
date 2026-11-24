@@ -4,27 +4,27 @@
 Runs inside the stock boxcutter image (`ghcr.io/zzzteph/boxcutter`). Standard library only, so it works when
 fetched and exec'd by the self-bootstrap one-liner. It:
 
-  - enrolls with a core server (server URL + enroll token, or username/password),
+  - enrolls with a core server (server URL + enroll token),
   - runs up to N concurrent job slots ("number of boxcutters"); each claims a job, runs `boxcutter <argv>`,
     streams the engine's stderr back as live events, and posts the findings envelope,
   - heartbeats status/slots/busy to the server,
-  - serves a tiny local control UI on 127.0.0.1:RUNNER_UI_PORT to set the server, enroll, and set N live.
+  - serves a tiny local control UI on RUNNER_UI_PORT (HTTP basic auth, admin/admin by default) to set the
+    server, enroll, and set N live.
 
 Config precedence: local file (.runner-config.json, written by the UI) over environment.
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import hmac
 import json
 import os
-import shutil
 import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -98,9 +98,6 @@ JOB_TOKENS: dict = {}                       # job_id -> run token, echoed on eve
 def load_config() -> dict:
     cfg = {"server_url": os.environ.get("SERVER_URL", "http://localhost:8000"),
            "enroll_token": os.environ.get("ENROLL_TOKEN", ""),
-           "api_key": os.environ.get("API_KEY", ""),          # optional: a system-user key can enroll too
-           "username": os.environ.get("RUNNER_USER", ""),
-           "password": os.environ.get("RUNNER_PASSWORD", ""),
            "concurrency": int(os.environ.get("CONCURRENCY", "2") or 2),
            "name": os.environ.get("RUNNER_NAME", os.uname().nodename if hasattr(os, "uname") else "runner"),
            "internal": os.environ.get("RUNNER_INTERNAL", "").strip().lower() not in ("", "0", "false", "no"),
@@ -147,13 +144,11 @@ def _enroll_locked() -> bool:
     body = {"name": CFG.get("name", "runner"), "version": VERSION, "engine_version": engine_version(),
             "slots": CFG.get("concurrency", 1),
             "host": CFG.get("name", ""), "ip": _IP, "internal": bool(CFG.get("internal"))}
-    if CFG.get("enroll_token"):
-        body["token"] = CFG["enroll_token"]
-    elif CFG.get("api_key"):
-        body["api_key"] = CFG["api_key"]
-    else:
-        body["username"] = CFG.get("username")
-        body["password"] = CFG.get("password")
+    if not CFG.get("enroll_token"):
+        with _LOCK:
+            STATE.update(connected=False, error="no enroll token set")
+        return False
+    body["token"] = CFG["enroll_token"]
     try:
         res = _req("POST", "/runner/enroll", body)
         CFG["token"] = res["runner_token"]
@@ -169,7 +164,7 @@ def _enroll_locked() -> bool:
 
 # ---- job execution ------------------------------------------------------------------------------------------
 def _scrub(text: str, secret_vals: list) -> str:
-    """Redact any secret value (LLM api key, etc.) from engine output before it leaves the runner."""
+    """Redact any per-job secret value from engine output before it leaves the runner."""
     for v in secret_vals:
         if v:
             text = text.replace(v, "***")
@@ -255,25 +250,6 @@ def engine_version() -> str:
     return _ENGINE_VERSION
 
 
-def _stage_workflow_files(files) -> str | None:
-    """Write the custom-workflow file(s) shipped with a job into a fresh temp dir and return it (for
-    BOXCUTTER_WORKFLOWS), or None if there are none. Names are reduced to a basename so an odd/hostile filename
-    can't escape the dir; a non-YAML extension is coerced to .yaml so load_specs picks it up."""
-    if not files or not isinstance(files, dict):
-        return None
-    try:
-        d = tempfile.mkdtemp(prefix="bxc_wf_")
-        for fname, text in files.items():
-            base = os.path.basename(str(fname)) or "workflow.yaml"
-            if not base.endswith((".yaml", ".yml")):
-                base += ".yaml"
-            with open(os.path.join(d, base), "w", encoding="utf-8") as fh:
-                fh.write(str(text))
-        return d
-    except Exception:  # noqa: BLE001 - a staging failure must not crash the job; it just won't resolve the wf
-        return None
-
-
 def run_job(job: dict, secrets: dict) -> dict:
     """Run `boxcutter <argv>`, streaming stderr as live steps and capturing stdout as the findings envelope /
     raw report. No idle timeout — a deep scan is legitimately silent for long stretches — and the only bound is
@@ -285,21 +261,9 @@ def run_job(job: dict, secrets: dict) -> dict:
         return _mock_run(job)
     env = dict(os.environ)
     env.update({k: str(v) for k, v in (secrets or {}).items()})
-    # A UI-authored (custom) workflow isn't baked into the image — the server ships its file with the job. Write
-    # it to a throwaway dir and point the engine at it via BOXCUTTER_WORKFLOWS so `boxcutter workflow <name>`
-    # resolves it (the engine merges this dir over its built-in library; see workflows.yaml_runner.load_specs).
-    wf_dir = _stage_workflow_files(job.get("workflow_files"))
-    if wf_dir:
-        env["BOXCUTTER_WORKFLOWS"] = wf_dir
-    # values to redact from any streamed line or captured output (never leak the LLM key back to the server)
+    # values to redact from any streamed line or captured output (any per-job secret the server sends)
     secret_vals = [str(v) for v in (secrets or {}).values() if v and len(str(v)) >= 6]
     cmd = BOXCUTTER_CMD + [str(a) for a in job["argv"]]
-    # For a workflow we also capture EVERY box's output (not just the final one) via --dump, so the scan's
-    # Assets explorer shows all the subdomains/hosts/URLs discovered along the way, not only the last step's.
-    dump_path = None
-    if job.get("argv") and str(job["argv"][0]) == "workflow":
-        dump_path = os.path.join(tempfile.gettempdir(), f"bc_dump_{job['id']}_{os.getpid()}.json")
-        cmd = cmd + ["--dump", dump_path]
     # a visible first step — tools emit their JSON to stdout at the end and are silent on stderr, so without
     # this the live-steps view would stay empty until (and unless) something prints to stderr.
     _emit(job["id"], _scrub("$ boxcutter " + " ".join(str(a) for a in job["argv"]), secret_vals), phase="run")
@@ -398,8 +362,6 @@ def run_job(job: dict, secrets: dict) -> dict:
     finally:
         if proc is not None:
             _kill_tree(proc)      # backstop: always reap the group (no-op if already gone) so nothing lingers
-        if wf_dir:
-            shutil.rmtree(wf_dir, ignore_errors=True)    # drop the staged custom-workflow file(s)
 
     envelope, error = {}, None
     text = "".join(out_buf).strip()
@@ -408,7 +370,7 @@ def run_job(job: dict, secrets: dict) -> dict:
         parsed = json.loads(text)
         if isinstance(parsed, dict) and ("data" in parsed or "success" in parsed):
             envelope = parsed             # structured findings for the diff; `report` keeps the raw JSON too
-    except Exception:  # noqa: BLE001 - non-JSON / partial stdout (e.g. irvin prints a markdown report)
+    except Exception:  # noqa: BLE001 - non-JSON / partial stdout
         pass
     if killed:
         error = killed                    # a killed job is failed, but its partial output above is preserved
@@ -416,44 +378,10 @@ def run_job(job: dict, secrets: dict) -> dict:
         error = f"exit {proc.returncode}"
     if report:
         report = _scrub(report, secret_vals)
-    # read the workflow var dump -> every box's produced hosts/URLs, so the server can store them all as assets
-    assets: list = []
-    if dump_path:
-        try:
-            with open(dump_path, encoding="utf-8") as fh:
-                assets = _assets_from_dump(json.load(fh))
-        except Exception:  # noqa: BLE001 - no dump / unreadable -> just the final envelope's items
-            pass
-        finally:
-            try:
-                os.remove(dump_path)
-            except OSError:
-                pass
-    if assets:
-        assets = [_scrub(a, secret_vals) for a in assets]
     if not cancelled:                     # a cancelled job already emitted "cancelled by server" above
         n = len(envelope.get("data") or []) if isinstance(envelope, dict) else 0
         _emit(job["id"], f"failed — {error}" if error else f"finished — {n} result item(s)", phase="run")
-    return {"envelope": envelope, "report": report, "error": error, "cancelled": cancelled, "assets": assets}
-
-
-def _assets_from_dump(dumped: dict) -> list:
-    """Flatten a workflow var dump ({varname: [values]}) into the de-duped list of string hosts/URLs every box
-    produced. Box-output vars are named ``n_<id>``; finding dicts are skipped (the envelope carries those)."""
-    seen: set = set()
-    out: list = []
-    for var, val in (dumped or {}).items():
-        if not isinstance(var, str) or not var.startswith("n_"):
-            continue
-        for x in (val if isinstance(val, list) else [val]):
-            if isinstance(x, str):
-                s = x.strip()
-                if s and s not in seen:
-                    seen.add(s)
-                    out.append(s[:2048])
-                    if len(out) >= 50000:
-                        return out
-    return out
+    return {"envelope": envelope, "report": report, "error": error, "cancelled": cancelled}
 
 
 def worker(idx: int) -> None:
@@ -612,7 +540,7 @@ def _heartbeat_once() -> None:
                 _disc(f"heartbeat {e.code}")
         except Exception as e:  # noqa: BLE001
             _disc(f"heartbeat: {e}")
-    elif CFG.get("server_url") and (CFG.get("enroll_token") or CFG.get("api_key") or CFG.get("username")):
+    elif CFG.get("server_url") and CFG.get("enroll_token"):
         enroll()
 
 
@@ -627,8 +555,8 @@ def heartbeat_loop() -> None:
         time.sleep(10)
 
 
-# ---- local control UI (login + dashboard) -------------------------------------------------------------------
-_SESSION = {"token": None}
+# ---- local control UI (HTTP basic auth + dashboard) ---------------------------------------------------------
+UI_USER = "admin"
 
 
 def _hash_pw(pw: str) -> str:
@@ -645,13 +573,15 @@ def _check_pw(pw: str, stored: str) -> bool:
 
 
 def _validate_login(username: str, password: str) -> bool:
-    """Local, self-contained login for the agent's own control UI. The single account is 'root'; its password
-    defaults to 'root' and can be changed here (stored hashed in the config). The agent NEVER delegates its
-    login to the server — a scanner stays manageable no matter the server's state or credentials."""
-    if username != "root":
+    """Local, self-contained basic auth for the agent's own control UI: one account, 'admin', whose password
+    defaults to 'admin' (or RUNNER_UI_PASSWORD) and can be changed here (stored hashed in the config). The agent
+    never delegates this to the server, so a scanner stays manageable whatever the server's state."""
+    if not hmac.compare_digest(username, UI_USER):
         return False
     stored = CFG.get("ui_password_hash")
-    return _check_pw(password, stored) if stored else (password == "root")
+    if stored:
+        return _check_pw(password, stored)
+    return hmac.compare_digest(password, os.environ.get("RUNNER_UI_PASSWORD", "admin") or "admin")
 
 
 # Material Design 3 (dark) — same theme/tokens as the boxcutter-server SPA, so the two UIs match.
@@ -682,22 +612,9 @@ box-shadow:0 1px 2px rgba(0,0,0,.3),0 1px 3px 1px rgba(0,0,0,.15)}
 .meter>div{height:100%;background:var(--primary)}
 </style>"""
 
-_LOGIN_HTML = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-               "<title>boxcutter scanner</title>" + _CSS + "<div class=wrap style='max-width:360px;margin-top:12vh'>"
-               "<h1>boxcutter scanner</h1><div class=card>"
-               "<label>Username</label><input id=u value=root>"
-               "<label>Password</label><input id=p type=password onkeyup='if(event.key==\"Enter\")login()'>"
-               "<p id=err class=bad></p><button style='width:100%' onclick=login()>Log in</button>"
-               "<p class=muted style='font-size:12px'>Default login: <b>root / root</b> — change it below after "
-               "signing in. This login is local to the scanner, not the server.</p></div></div><script>"
-               "async function login(){let r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},"
-               "body:JSON.stringify({username:u.value,password:p.value})});"
-               "if(r.ok)location.reload();else document.getElementById('err').textContent='invalid credentials';}"
-               "</script>")
-
 _DASH_HTML = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
               "<title>boxcutter scanner</title>" + _CSS + "<div class=wrap>"
-              "<div class=row><h1>boxcutter scanner</h1><button class=ghost onclick=logout()>Log out</button></div>"
+              "<div class=row><h1>boxcutter scanner</h1></div>"
               "<div class=card><b>Status:</b> <span id=st></span>"
               "<div class=muted style='font-size:12px;margin-top:4px'>IP: <span id=ip></span></div>"
               "<div class=muted style='font-size:12px'>boxcutter <span id=engine></span> "
@@ -712,8 +629,8 @@ _DASH_HTML = ("<!doctype html><meta charset=utf-8><meta name=viewport content='w
               "<button onclick=save()>Save &amp; connect</button>"
               "<button class=ghost id=drainbtn onclick=drain()>Pause (drain)</button></div></div>"
               "<div class=card><h2>Agent password</h2>"
-              "<div class=muted style='font-size:12px'>The scanner's own login (default root/root). Independent of the server.</div>"
-              "<label>New password</label><input id=newpw type=password placeholder='at least 4 characters'>"
+              "<div class=muted style='font-size:12px'>The scanner's own basic-auth login (default admin/admin). Independent of the server.</div>"
+              "<label>New password</label><input id=newpw type=password placeholder='at least 8 characters'>"
               "<div class=row style='justify-content:flex-start;gap:8px;margin-top:8px'>"
               "<button onclick=setpw()>Update password</button><span id=pwmsg class=muted></span></div></div>"
               "<div class=card><h2>Running now</h2><div id=slots class=muted>idle</div></div>"
@@ -735,27 +652,39 @@ _DASH_HTML = ("<!doctype html><meta charset=utf-8><meta name=viewport content='w
               "async function drain(){let c=parseInt(conc.value||'0');if(c>0)window._last=c;conc.value=(c>0?0:(window._last||2));await save();}"
               "async function save(){await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},"
               "body:JSON.stringify({server_url:server.value,enroll_token:token.value,concurrency:parseInt(conc.value||'0')})});_filled=false;refresh();}"
-              "async function logout(){await fetch('/logout',{method:'POST'});location.reload();}"
               "async function setpw(){let r=await fetch('/set-password',{method:'POST',headers:{'Content-Type':'application/json'},"
               "body:JSON.stringify({new_password:newpw.value})});"
-              "document.getElementById('pwmsg').textContent=r.ok?'\\u2713 updated':'too short (min 4)';newpw.value='';}"
+              "document.getElementById('pwmsg').textContent=r.ok?'\\u2713 updated - the browser will ask for it again':'too short (min 8)';newpw.value='';}"
               "setInterval(refresh,2000);refresh();</script>")
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body, ctype="application/json", cookie=None):
+    def _send(self, code, body, ctype="application/json"):
         b = body if isinstance(body, bytes) else body.encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b)))
-        if cookie:
-            self.send_header("Set-Cookie", cookie)
         self.end_headers()
         self.wfile.write(b)
 
     def _authed(self) -> bool:
-        tok = _SESSION.get("token")
-        return bool(tok) and ("bc_session=" + tok) in self.headers.get("Cookie", "")
+        h = self.headers.get("Authorization", "")
+        if not h.lower().startswith("basic "):
+            return False
+        try:
+            user, _, pw = base64.b64decode(h.split(" ", 1)[1].strip()).decode("utf-8").partition(":")
+        except Exception:  # noqa: BLE001
+            return False
+        return _validate_login(user, pw)
+
+    def _challenge(self):
+        b = b"authentication required"
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="boxcutter scanner", charset="UTF-8"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
 
     def _json_body(self) -> dict:
         n = int(self.headers.get("Content-Length", 0))
@@ -765,41 +694,31 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self):
+        if not self._authed():
+            return self._challenge()
         if self.path == "/state":
-            if not self._authed():
-                return self._send(401, "{}")
             with _LOCK:
                 self._send(200, json.dumps({**STATE, "concurrency": CFG.get("concurrency", 1),
                                             "server": CFG.get("server_url", "")}))
-        elif self._authed():
-            self._send(200, _DASH_HTML, "text/html")
         else:
-            self._send(200, _LOGIN_HTML, "text/html")
+            self._send(200, _DASH_HTML, "text/html")
 
     def do_POST(self):
-        if self.path == "/login":
-            b = self._json_body()
-            if _validate_login(b.get("username", ""), b.get("password", "")):
-                tok = os.urandom(16).hex()
-                _SESSION["token"] = tok
-                return self._send(200, json.dumps({"ok": True}),
-                                  cookie=f"bc_session={tok}; Path=/; HttpOnly; SameSite=Strict")
-            return self._send(401, json.dumps({"ok": False}))
-        if self.path == "/logout":
-            _SESSION["token"] = None
-            return self._send(200, json.dumps({"ok": True}), cookie="bc_session=; Path=/; Max-Age=0")
         if not self._authed():
-            return self._send(401, "{}")
+            return self._challenge()
         if self.path == "/config":
             body = self._json_body()
-            CFG.update({k: v for k, v in body.items() if k in ("server_url", "enroll_token", "api_key",
-                                                               "concurrency", "username", "password", "name")})
+            CFG.update({k: v for k, v in body.items() if k in ("server_url", "enroll_token", "concurrency", "name")
+                        and (k != "enroll_token" or v)})
             save_config(CFG)
+            CFG["token"] = ""                     # re-enroll against the (possibly new) server
+            with _LOCK:
+                STATE["connected"] = False
             enroll()
             return self._send(200, json.dumps({"ok": True}))
         if self.path == "/set-password":
             new = str(self._json_body().get("new_password", ""))
-            if len(new) < 4:
+            if len(new) < 8:
                 return self._send(400, json.dumps({"ok": False, "error": "password too short"}))
             CFG["ui_password_hash"] = _hash_pw(new)
             save_config(CFG)
@@ -836,7 +755,7 @@ def _run_supervisor() -> int:
         registry[f"worker-{i}"] = {"target": worker, "args": (i,), "thread": _spawn(worker, (i,))}
     registry["heartbeat"] = {"target": heartbeat_loop, "args": (), "thread": _spawn(heartbeat_loop)}
     _spawn(watchdog, (registry,))
-    if CFG.get("server_url") and (CFG.get("enroll_token") or CFG.get("api_key") or CFG.get("username")):
+    if CFG.get("server_url") and CFG.get("enroll_token"):
         enroll()
     port = UI_PORT
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
@@ -859,10 +778,6 @@ def main(argv=None) -> int:
     ap.add_argument("--server", metavar="URL", help="core server URL, e.g. https://scanner.example.com")
     ap.add_argument("--token", dest="enroll_token", metavar="TOKEN",
                     help="enroll token from the server's Scanners page")
-    ap.add_argument("--api-key", dest="api_key", metavar="KEY",
-                    help="enroll with a system-user API key instead of a token")
-    ap.add_argument("--user", metavar="NAME", help="enroll with username/password instead of a token")
-    ap.add_argument("--password", metavar="PW", help="password for --user")
     ap.add_argument("--concurrency", type=int, metavar="N",
                     help="number of boxcutter slots to run (0 = paused; default 2)")
     ap.add_argument("--name", metavar="NAME", help="display name shown on the server's Scanners page")
@@ -878,8 +793,7 @@ def main(argv=None) -> int:
         CFG.update(load_config())
     if a.mock:
         MOCK = True
-    for key, val in (("server_url", a.server), ("enroll_token", a.enroll_token), ("api_key", a.api_key),
-                     ("username", a.user), ("password", a.password), ("name", a.name)):
+    for key, val in (("server_url", a.server), ("enroll_token", a.enroll_token), ("name", a.name)):
         if val:
             CFG[key] = val
     if a.concurrency is not None:

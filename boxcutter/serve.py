@@ -1,5 +1,4 @@
-"""``boxcutter serve`` - run the boxcutter web server (API + built SPA) plus one built-in agent, in this
-container/host.
+"""``boxcutter serve`` - run the boxcutter web UI plus one built-in scanner agent, in this container/host.
 
 The server's own dependencies (FastAPI / uvicorn / SQLModel / ...) are deliberately NOT part of the lean
 engine. In the published image they live in a dedicated venv, and ``serve`` re-execs that interpreter when the
@@ -7,8 +6,8 @@ current one can't import uvicorn. To run ``serve`` from a source checkout, insta
 
     pip install -r requirements.txt   # then: boxcutter serve
 
-The built-in agent auto-enrolls to the local server and starts IDLE (0 slots) - raise it from the Scanners
-page, or run separate ``boxcutter agent`` hosts to scale out.
+The built-in agent auto-enrolls to the local server and runs 2 jobs in parallel by default (CONCURRENCY, or
+change it live from the Scanners page; 0 = idle). Run separate ``boxcutter agent`` hosts to scale out.
 """
 from __future__ import annotations
 
@@ -64,7 +63,7 @@ def _spawn_agent(port: int, token: str, data_dir: str):
     env["SERVER_URL"] = f"http://127.0.0.1:{port}"
     env["ENROLL_TOKEN"] = token
     env["RUNNER_INTERNAL"] = "1"                         # a permanent, non-removable singleton runner
-    env.setdefault("CONCURRENCY", "0")                  # idle by default - raise it from the Scanners page
+    env.setdefault("CONCURRENCY", "2")                  # change it live from the Scanners page (0 = idle)
     env.setdefault("RUNNER_CONFIG", os.path.join(data_dir, ".runner-config.json"))
     env.setdefault("RUNNER_NAME", "built-in")
     return subprocess.Popen([sys.executable, _BOXCUTTER, "agent"], env=env)
@@ -73,12 +72,12 @@ def _spawn_agent(port: int, token: str, data_dir: str):
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="boxcutter serve",
-        description="Run the boxcutter web UI/API server plus one built-in agent.")
+        description="Run the boxcutter web UI plus one built-in scanner agent.")
     ap.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
-    ap.add_argument("--no-agent", action="store_true", help="API/UI only - do not start the built-in agent")
+    ap.add_argument("--no-agent", action="store_true", help="UI only - do not start the built-in agent")
     ap.add_argument("--data-dir", default=os.environ.get("DATA_DIR", os.path.join(_SERVER_DIR, "data")),
-                    help="where the SQLite DB + JWT secret live (default: server/data)")
+                    help="where the SQLite DB and the built-in agent's config live (default: server/data)")
     a = ap.parse_args([] if argv is None else list(argv))
 
     py = _server_python()
@@ -87,8 +86,8 @@ def main(argv=None) -> int:
 
     env = dict(os.environ)
     env.setdefault("PYTHONUNBUFFERED", "1")
-    # so the /runner.py bootstrap endpoint can still serve the agent source in the merged image
-    env.setdefault("RUNNER_BOOTSTRAP_PATH", os.path.join(_ROOT, "boxcutter", "agent.py"))
+    os.makedirs(a.data_dir, exist_ok=True)
+    env.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(os.path.abspath(a.data_dir), "boxcutter.db"))
     # a shared enroll token: the server seeds it (ENROLL_TOKEN), the built-in agent enrolls with it
     token = env.get("ENROLL_TOKEN") or secrets.token_urlsafe(24)
     env["ENROLL_TOKEN"] = token
@@ -110,7 +109,7 @@ def main(argv=None) -> int:
 
     procs = {"server": server}
     if not a.no_agent:
-        _log("starting built-in agent (idle; raise its slots from the Scanners page)")
+        _log("starting built-in agent (change its parallel jobs from the Scanners page)")
         procs["agent"] = _spawn_agent(a.port, token, a.data_dir)
 
     def _shutdown(*_):
