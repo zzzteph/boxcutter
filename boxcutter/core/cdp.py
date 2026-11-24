@@ -832,9 +832,9 @@ class Chrome:
 
 # -- persistent sessions -----------------------------------------------------
 # A human working with an app keeps ONE browser open across many actions - it stays logged in, the SPA keeps
-# its route and in-memory state. IRVIN runs a whole engagement in ONE process, so a persistent session is just
-# a reused Chrome kept in this registry (no server/proxy process). browser-actions --session S attaches to the
-# live browser for S instead of spawning a fresh one; the caller closes it when the exploration is done.
+# its route and in-memory state. A persistent session is just a reused Chrome kept in this registry (no
+# server/proxy process): get_session(S) attaches to the live browser for S instead of spawning a fresh one; the
+# caller closes it when done.
 _SESSIONS: dict[str, Chrome] = {}
 
 

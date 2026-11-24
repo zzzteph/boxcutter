@@ -23,7 +23,7 @@ REQUIREMENTS: dict[str, str] = {
     "katana-crawl": "katana",
     "nuclei": "nuclei",
     "sqlmap": "/usr/share/sqlmap/sqlmap.py",
-    "harvest": "chromium-browser",
+    "harvest": "chromium-browser|chromium",
 }
 
 
@@ -35,6 +35,8 @@ def requirement_for(name: str) -> str | None:
 def available(requirement: str | None) -> bool:
     if not requirement:
         return True
+    if "|" in requirement:                     # alternatives, e.g. "chromium-browser|chromium"
+        return any(available(r) for r in requirement.split("|"))
     if requirement.startswith("py:"):          # a Python module (e.g. py:playwright)
         import importlib.util
         return importlib.util.find_spec(requirement[3:]) is not None

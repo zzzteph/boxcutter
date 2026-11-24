@@ -195,7 +195,7 @@ td.crit { color: var(--crit); font-weight: 500; }
 .tag::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 6px; }
 .kind-tool     { color: var(--accent-ink); background: var(--wash); }
 .kind-workflow { color: #d99a3f; background: rgba(217,154,63,.14); }
-.kind-ai_agent { color: var(--accent-bright); background: rgba(212,175,97,.15); }
+.kind-pipeline { color: var(--accent-bright); background: rgba(212,175,97,.15); }
 .tag.plain { color: var(--on-surface-variant); background: var(--sc-high); }
 
 /* ---- badges / states ---- */
