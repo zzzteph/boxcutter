@@ -14,7 +14,7 @@ const REASONS := {
 	"wall": "The water hit the wall.",
 	"oneway": "The water hit a one-way pipe from the wrong side.",
 	"clogged": "The water ran into a pipe that was already full.",
-	"locked": "The water hit a locked tile. Unlock the tiles ahead of it.",
+	"locked": "The water hit a closed block. Open the blocks ahead of it.",
 }
 
 var state := State.TITLE
@@ -29,8 +29,8 @@ var rng := RandomNumberGenerator.new()
 
 var renderer: BoardRenderer
 var atlas: SpriteAtlas
-var world_box: SubViewportContainer  ## PS1 mode: shows the low-res world, scaled up.
-var world_vp: SubViewport            ## PS1 mode: the world renders in here.
+var world_view: TextureRect          ## PS1 mode: shows the world viewport, scaled to the screen.
+var world_vp: SubViewport            ## PS1 mode: the world renders in here, at PS1_SHORT_SIDE lines.
 var is_touch := false
 var input_handler: InputHandler
 var ui: GameUI
@@ -127,22 +127,24 @@ func _ready() -> void:
 ## with nearest-neighbour sampling and run through the 15-bit dither shader.
 ## The HUD and menus stay on the full-resolution screen so text stays readable.
 func _build_world_viewport() -> void:
-	world_box = SubViewportContainer.new()
-	world_box.stretch = true
-	world_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	world_box.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	world_vp = SubViewport.new()
+	world_vp.disable_3d = true
+	world_vp.gui_disable_input = true
+	world_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	world_vp.size_2d_override_stretch = true
+	add_child(world_vp)
+	world_view = TextureRect.new()
+	world_view.texture = world_vp.get_texture()
+	world_view.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	world_view.stretch_mode = TextureRect.STRETCH_SCALE
+	world_view.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	world_view.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR if Tuning.SMOOTH_EDGES else CanvasItem.TEXTURE_FILTER_NEAREST
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://scripts/ps1_screen.gdshader")
 	mat.set_shader_parameter("levels", Tuning.PS1_COLOR_LEVELS)
 	mat.set_shader_parameter("dither", Tuning.PS1_DITHER)
-	world_box.material = mat
-	add_child(world_box)
-	world_vp = SubViewport.new()
-	world_vp.disable_3d = true
-	world_vp.gui_disable_input = true
-	world_vp.size_2d_override_stretch = true
-	world_vp.canvas_item_default_texture_filter = Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST
-	world_box.add_child(world_vp)
+	world_view.material = mat
+	add_child(world_view)
 
 
 func _notification(what: int) -> void:
@@ -778,22 +780,27 @@ func _compute_layout() -> void:
 		if win.content_scale_size != Vector2i(base, base):
 			win.content_scale_size = Vector2i(base, base)
 	view_size = get_viewport_rect().size
-	if world_box != null:
-		var shrink := maxi(1, roundi(minf(view_size.x, view_size.y) / Tuning.PS1_SHORT_SIDE))
-		if world_box.stretch_shrink != shrink:
-			world_box.stretch_shrink = shrink
-		if world_box.size != view_size:
-			world_box.position = Vector2.ZERO
-			world_box.size = view_size
+	if world_vp != null:
+		# Render the board at PS1_SHORT_SIDE lines (never above the screen's own pixels).
+		var phys := Vector2(win.size) if win != null and win.size.x > 0 else view_size
+		if phys.x < view_size.x * 0.5:
+			phys = view_size  # Headless / not-yet-sized window: use the virtual size.
+		var k := minf(1.0, Tuning.PS1_SHORT_SIDE / minf(phys.x, phys.y))
+		var target := Vector2i(maxi(16, roundi(phys.x * k)), maxi(16, roundi(phys.y * k)))
+		if world_vp.size != target:
+			world_vp.size = target
 		if world_vp.size_2d_override != Vector2i(view_size):
 			world_vp.size_2d_override = Vector2i(view_size)
-		px_scale = float(world_vp.size.x) / view_size.x if world_vp.size.x > 0 else 1.0
+		if world_view.size != view_size:
+			world_view.position = Vector2.ZERO
+			world_view.size = view_size
+		px_scale = float(world_vp.size.x) / view_size.x
 	else:
 		px_scale = float(win.size.x) / view_size.x if win != null and win.size.x > 0 and view_size.x > 0.0 else 1.0
 	is_touch = DisplayServer.is_touchscreen_available()
 	var min_rows := Tuning.MIN_VISIBLE_ROWS if view_size.y >= 600.0 else Tuning.MIN_VISIBLE_ROWS_COMPACT
 	portrait = view_size.x < view_size.y * 0.9
-	hud_h = _px(66.0)
+	hud_h = _px(56.0)
 	_slots = []
 	var n := Tuning.QUEUE_SIZE
 	if portrait:

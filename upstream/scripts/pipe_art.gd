@@ -22,13 +22,13 @@ static var _font: Font
 static var _tank_sb: StyleBoxFlat
 static var _base_sb: StyleBoxFlat
 ## Anti-aliasing for all vector art. Off in PS1 mode for hard pixel edges.
-static var aa := not Tuning.PS1_MODE
+static var aa := Tuning.SMOOTH_EDGES
 
 
 static func font() -> Font:
 	if _font == null:
 		var base: Font = ThemeDB.fallback_font
-		if Tuning.PS1_MODE and base is FontFile:
+		if not Tuning.SMOOTH_EDGES and base is FontFile:
 			# Hard-edged glyphs, snapped to whole pixels: a period-correct bitmap feel.
 			var ff := (base as FontFile).duplicate() as FontFile
 			ff.antialiasing = TextServer.FONT_ANTIALIASING_NONE
@@ -60,41 +60,30 @@ static func draw_tile_base(ci: CanvasItem, rect: Rect2, pal: Dictionary, checker
 	ci.draw_line(r.position + Vector2(T * 0.14, T * 0.03), Vector2(r.end.x - T * 0.14, r.position.y + T * 0.03), pal["tile_hi"], maxf(1.5, T * 0.03))
 
 
-## A locked, face-down tile: a riveted steel plate with a padlock.
+## A closed tile: a plain raised steel block (opening it shows what's under).
 static func draw_locked(ci: CanvasItem, rect: Rect2, pal: Dictionary) -> void:
 	if _base_sb == null:
 		_base_sb = StyleBoxFlat.new()
 	_base_sb.anti_aliasing = aa
 	var T := rect.size.x
 	var r := rect.grow(-T * 0.035)
-	var plate: Color = (pal["metal_dark"] as Color).lerp(pal["tile"], 0.35)
-	_base_sb.bg_color = plate
+	var block: Color = (pal["metal_dark"] as Color).lerp(pal["tile"], 0.4)
+	_base_sb.bg_color = block
 	_base_sb.set_corner_radius_all(int(T * 0.1))
-	_base_sb.border_width_bottom = int(maxf(2.0, T * 0.07))
-	_base_sb.border_color = plate.darkened(0.45)
+	_base_sb.border_width_bottom = int(maxf(2.0, T * 0.08))
+	_base_sb.border_color = block.darkened(0.45)
 	ci.draw_style_box(_base_sb, r)
 	_base_sb.border_width_bottom = 0
+	# Raised face: a lighter top edge and a slightly lighter centre panel.
 	var light: Color = (pal["metal"] as Color).lightened(0.1)
-	ci.draw_line(r.position + Vector2(T * 0.1, T * 0.04), Vector2(r.end.x - T * 0.1, r.position.y + T * 0.04), fade(light, 0.7), maxf(1.0, T * 0.03))
-	# Diagonal grooves across the plate.
-	for k in [-0.22, 0.0, 0.22]:
-		var a := rect.get_center() + Vector2(k - 0.18, 0.3) * T
-		var b := rect.get_center() + Vector2(k + 0.18, -0.3) * T
-		ci.draw_line(a, b, fade(plate.darkened(0.3), 0.6), maxf(1.0, T * 0.03))
-	# Rivets.
-	for cpos in [Vector2(0.17, 0.17), Vector2(0.83, 0.17), Vector2(0.17, 0.8), Vector2(0.83, 0.8)]:
+	ci.draw_line(r.position + Vector2(T * 0.1, T * 0.04), Vector2(r.end.x - T * 0.1, r.position.y + T * 0.04), fade(light, 0.7), maxf(1.0, T * 0.035))
+	_base_sb.bg_color = block.lightened(0.06)
+	_base_sb.set_corner_radius_all(int(T * 0.06))
+	ci.draw_style_box(_base_sb, Rect2(r.position + Vector2(T * 0.14, T * 0.14), r.size - Vector2(T * 0.28, T * 0.3)))
+	for cpos in [Vector2(0.15, 0.15), Vector2(0.85, 0.15), Vector2(0.15, 0.8), Vector2(0.85, 0.8)]:
 		var p: Vector2 = rect.position + cpos * T
-		ci.draw_circle(p, T * 0.045, plate.darkened(0.5))
-		ci.draw_circle(p - Vector2(T, T) * 0.01, T * 0.03, light)
-	# Padlock.
-	var c := rect.get_center() + Vector2(0, T * 0.05)
-	var brass: Color = pal["brass"]
-	ci.draw_arc(c + Vector2(0, -T * 0.08), T * 0.1, PI, TAU, 10, pal["metal_light"], maxf(2.0, T * 0.05), aa)
-	ci.draw_rect(Rect2(c + Vector2(-0.15, -0.08) * T, Vector2(0.3, 0.22) * T), brass.darkened(0.45))
-	ci.draw_rect(Rect2(c + Vector2(-0.13, -0.065) * T, Vector2(0.26, 0.19) * T), brass)
-	ci.draw_rect(Rect2(c + Vector2(-0.13, -0.065) * T, Vector2(0.26, 0.04) * T), brass.lightened(0.35))
-	ci.draw_circle(c + Vector2(0, 0.01) * T, T * 0.03, brass.darkened(0.7))
-	ci.draw_rect(Rect2(c + Vector2(-0.012, 0.02) * T, Vector2(0.024, 0.06) * T), brass.darkened(0.7))
+		ci.draw_circle(p, T * 0.04, block.darkened(0.5))
+		ci.draw_circle(p - Vector2(T, T) * 0.01, T * 0.025, light)
 
 
 static func fade(c: Color, a: float) -> Color:

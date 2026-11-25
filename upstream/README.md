@@ -5,8 +5,9 @@ assets: all art and sound are generated in code). Water climbs from a pump at
 the bottom of a pump station; unlock the tiles ahead of it, swap the pipes into
 place and keep the water rising as high as you can.
 
-The board is drawn in a PlayStation 1 style: rendered at 240 lines, scaled up
-with hard pixel edges, and cut down to 15-bit colour with a 4x4 ordered dither.
+The board has a light PlayStation 1 flavour: it renders at 480 lines (the PS1's
+hi-res mode) with 15-bit colour and a subtle ordered dither, then scales up
+smoothly.
 The menu and HUD use an industrial pump-station look (steel plates, rivets,
 hazard stripes, a pressure gauge on the nameplate) and stay sharp so they read
 well on phones.
@@ -41,17 +42,17 @@ resolution. The board takes about 130 draw calls, and game scripts take about
 The main menu has one button, NEW GAME. The game plays in unlock mode; set
 `DEFAULT_MODE` in `scripts/tuning.gd` to `"classic"` for the piece-queue game.
 
-- **Unlock** (like BioShock's hacking): every tile starts locked,
-  face-down. Click or tap a locked tile to flip it and see what's under it: a
+- **Unlock** (like BioShock's hacking): every tile starts as a closed steel
+  block. Click or tap a block to flip it open and see what's under it: a
   pipe, an open spot, a rock, or an alarm trap. Click a pipe to pick it up,
   then click an open spot or another pipe to swap them (click it again to put
-  it back). Water that reaches a locked tile spills, so unlock ahead of it. An
+  it back). Water that reaches a closed block spills, so open blocks ahead of it. An
   alarm costs 100 points and makes the water surge for a few seconds.
 - **Classic**: the board is open and you place pieces from a queue of five.
 
 **Milestone powers:** every 100 rows you get one **Flow-freeze** and one
 **Reveal**. Flow-freeze stops the water for 8 seconds while every pipe frosts
-over. Reveal unlocks every tile on the current map in one wave and disarms the
+over. Reveal opens every block on the current map in one wave and disarms the
 alarms. Their buttons appear next to FAST once you have charges (Q and E on a
 keyboard).
 
@@ -63,20 +64,21 @@ onto the water's path to buy time.
 
 | Action | Mouse / touch | Keyboard |
 | --- | --- | --- |
-| Unlock a tile (unlock mode) | Click / tap it | Arrows or WASD to move the cursor, Space / Enter to click |
+| Open a block (unlock mode) | Click / tap it | Arrows or WASD to move the cursor, Space / Enter to click |
 | Pick up a pipe, then swap it (unlock mode) | Click / tap the pipe, then the spot | Same |
 | Place the next piece (classic mode) | Click / tap an empty tile | Same |
 | Replace a dry pipe (classic, -50 points, 1 s lock) | Click / tap it | Same |
 | Fast-forward (x5 flow, x2 points, until game over) | FAST button | F |
 | Pick a wildcard piece | Picker buttons | 1-7 |
 | Flow-freeze / Reveal (after row 100) | Snowflake / eye buttons | Q / E |
-| Pause | Pause button | P / Esc |
-| Mute | Speaker button | M |
+| Pause | (pauses by itself when you switch apps) | P / Esc |
+| Mute | In the pause menu | M |
 | Restart | Play again | R |
 
 ## Rules
 
-- Water starts after a 10-second countdown and speeds up as it climbs.
+- Water starts after a 10-second countdown, shown on the pump's pressure gauge,
+  and speeds up as it climbs. The HUD shows just your height and score.
 - In unlock mode every row hides at least the pipes its guaranteed path needs,
   so unlocking a row and swapping pipes within it is always enough.
 - The run ends when water reaches an open pipe end, a wall, a rock, an empty tile,
@@ -112,7 +114,7 @@ Every difficulty knob is in [`scripts/tuning.gd`](scripts/tuning.gd):
 | `REPLACE_LOCK_TIME` / `REPLACE_PENALTY` | 1 s / 50 | Cost of replacing a pipe |
 | `PIECE_WEIGHTS` | 16,16,14,14,14,14,5 | Piece odds (crosses rarest) |
 | `DEFAULT_MODE` | "unlock" | Game mode ("unlock" or "classic") |
-| `UNLOCK_PIECE_FILL` | 0.72 | Chance a locked tile hides a pipe (else an open spot) |
+| `UNLOCK_PIECE_FILL` | 0.72 | Chance a closed block hides a pipe (else an open spot) |
 | `UNLOCK_SPINE_PIECE_CHANCE` | 0.5 | Chance a path tile already hides the pipe it needs |
 | `ALARM_START_ROW` / `ALARM_CHANCE` | 15 / 0.07 | Alarm traps |
 | `ALARM_SURGE_TIME` / `ALARM_SURGE_MULT` / `ALARM_PENALTY` | 4 s / 1.8x / 100 | Alarm cost |
@@ -133,7 +135,8 @@ Every difficulty knob is in [`scripts/tuning.gd`](scripts/tuning.gd):
 | `CAMERA_LEAD_FRACTION` / `CAMERA_STIFFNESS` | 0.33 / 3.0 | Camera follow |
 | `KEEP_ROWS_BELOW` / `GENERATE_AHEAD` | 20 / 8 | Rows kept below / generated above |
 | `PS1_MODE` | true | PS1 look on or off (off = smooth, anti-aliased, full resolution) |
-| `PS1_SHORT_SIDE` | 240 | Low-res pixels across the screen's short side |
+| `PS1_SHORT_SIDE` | 480 | Board pixels across the screen's short side (240 = chunky PS1) |
+| `SMOOTH_EDGES` | true | Anti-aliased art and smooth scaling (false = hard pixel edges) |
 | `PS1_COLOR_LEVELS` / `PS1_DITHER` | 31 / 1.0 | Colour steps per channel (31 = 15-bit) and dither strength |
 | `UI_BASE_MAX` / `UI_BASE_MIN` | 720 / 480 | Virtual resolution on big screens / phones (smaller = bigger UI) |
 | `MIN_VISIBLE_ROWS` / `MIN_VISIBLE_ROWS_COMPACT` | 7.5 / 5.5 | Rows that always fit on screen / on short screens (fewer = bigger tiles) |

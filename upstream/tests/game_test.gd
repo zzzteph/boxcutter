@@ -329,6 +329,8 @@ func _run() -> void:
 	game.reveals = 2
 	await frames(2)
 	check(game.ui.btn_freeze.visible and game.ui.btn_reveal.visible, "power buttons appear once you have charges")
+	var screen := Rect2(Vector2.ZERO, game.view_size)
+	check(screen.encloses(game.ui.btn_freeze.get_global_rect()) and screen.encloses(game.ui.btn_reveal.get_global_rect()), "power buttons are fully on screen")
 	click(game.ui.btn_reveal.get_global_rect().get_center())
 	await frames(1)
 	var still_hidden := 0

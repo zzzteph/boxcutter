@@ -725,7 +725,7 @@ func _draw_queue_bg(ci: CanvasItem) -> void:
 		if game.held_piece >= 0:
 			msg = "%s an open spot or another pipe to swap them. %s it again to put it back." % [verb, verb]
 		else:
-			msg = "%s a locked tile to unlock it. %s a pipe, then a spot, to move it." % [verb, verb]
+			msg = "%s a block to open it. %s a pipe, then a spot, to move it." % [verb, verb]
 		var fsz := int(clampf(hint.size.y * 0.2, 13.0, 17.0)) if game.portrait else 16
 		ci.draw_multiline_string_outline(f, hint.position + Vector2(0, fsz), msg, HORIZONTAL_ALIGNMENT_LEFT, hint.size.x, fsz, -1, 4, Color(0, 0, 0, 0.8))
 		ci.draw_multiline_string(f, hint.position + Vector2(0, fsz), msg, HORIZONTAL_ALIGNMENT_LEFT, hint.size.x, fsz, -1, Color(0.85, 0.95, 1.0, 0.9))

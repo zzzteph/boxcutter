@@ -19,20 +19,6 @@ class IconButton:
 		var s := minf(size.x, size.y)
 		var col := Color.WHITE
 		match kind:
-			"pause":
-				draw_rect(Rect2(c + Vector2(-0.2, -0.22) * s, Vector2(0.13, 0.44) * s), col)
-				draw_rect(Rect2(c + Vector2(0.07, -0.22) * s, Vector2(0.13, 0.44) * s), col)
-			"sound_on", "sound_off":
-				var pts := PackedVector2Array()
-				for p in [Vector2(-0.28, -0.09), Vector2(-0.14, -0.09), Vector2(0.0, -0.22), Vector2(0.0, 0.22), Vector2(-0.14, 0.09), Vector2(-0.28, 0.09)]:
-					pts.append(c + p * s)
-				draw_colored_polygon(pts, col)
-				if kind == "sound_on":
-					draw_arc(c + Vector2(0.02, 0) * s, 0.12 * s, -0.9, 0.9, 10, col, maxf(2.0, s * 0.05), true)
-					draw_arc(c + Vector2(0.02, 0) * s, 0.22 * s, -0.9, 0.9, 12, col, maxf(2.0, s * 0.05), true)
-				else:
-					draw_line(c + Vector2(0.08, -0.12) * s, c + Vector2(0.3, 0.12) * s, Color("ff5a4a"), maxf(2.0, s * 0.06), true)
-					draw_line(c + Vector2(0.08, 0.12) * s, c + Vector2(0.3, -0.12) * s, Color("ff5a4a"), maxf(2.0, s * 0.06), true)
 			"ff":
 				var fc := Color("ffd23a") if lit else col
 				var h := s * 0.2
@@ -101,13 +87,9 @@ var game  ## The Game node (main.gd).
 var root: Control
 var hud: Panel
 var stat_values := {}
-var btn_pause: IconButton
-var btn_mute: IconButton
 var btn_ff: IconButton
 var btn_freeze: IconButton
 var btn_reveal: IconButton
-var countdown_label: Label
-var countdown_sub: Label
 var banner: Label
 var toast: Label
 var title_screen: Control
@@ -127,14 +109,11 @@ var _last_view := Vector2.ZERO
 var _last_portrait := false
 var _banner_tween: Tween
 var _toast_tween: Tween
-var _last_count := -1
-var _speed_col := Color.WHITE
 var _ff_lit := false
 var _picker_zone := -1
 var _scaled := []          ## [Label, base font size, base outline] scaled to the screen width.
 var _key_buttons := []     ## [Button, mouse/keyboard text, touch text]
 var _picker_label: Label
-var _best_box: Control
 var _flash: ColorRect
 var _flash_tween: Tween
 
@@ -310,25 +289,20 @@ func _build_hud() -> void:
 	hb.add_theme_constant_override("separation", 6)
 	hb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud.add_child(hb)
-	for key in ["SCORE", "BEST", "HEIGHT", "MULT", "SPEED"]:
+	# The HUD shows the two things that matter: height and score.
+	hb.alignment = BoxContainer.ALIGNMENT_CENTER
+	hb.add_theme_constant_override("separation", 48)
+	for key in ["HEIGHT", "SCORE"]:
 		var vb := VBoxContainer.new()
-		vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		vb.custom_minimum_size = Vector2(130, 0)
 		vb.add_theme_constant_override("separation", -6)
 		vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var cap := _label(key, 13, Color(1, 1, 1, 0.55), 0)
-		var val := _label("0", 27, Color.WHITE, 6)
-		val.clip_text = false
+		var cap := _label(key, 14, Color(0.56, 0.72, 0.8), 0)
+		var val := _label("0", 30, Color.WHITE, 6)
 		vb.add_child(cap)
 		vb.add_child(val)
 		hb.add_child(vb)
 		stat_values[key] = val
-		stat_values[key + "_cap"] = cap
-		if key == "BEST":
-			_best_box = vb
-	btn_pause = _icon_button("pause", func(): game.toggle_pause())
-	btn_mute = _icon_button("sound_on", func(): game.toggle_mute())
-	hb.add_child(btn_pause)
-	hb.add_child(btn_mute)
 	btn_ff = _icon_button("ff", func(): game.activate_fast_forward())
 	btn_ff.caption = "FAST x5"
 	root.add_child(btn_ff)
@@ -341,12 +315,6 @@ func _build_hud() -> void:
 
 
 func _build_center_labels() -> void:
-	countdown_label = _slabel("", 150, Color("ffffff"), 22)
-	countdown_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-	root.add_child(countdown_label)
-	countdown_sub = _slabel("", 30, WATER.lightened(0.3), 10)
-	countdown_sub.set_anchors_preset(Control.PRESET_FULL_RECT)
-	root.add_child(countdown_sub)
 	banner = _slabel("", 54, Color("ffd23a"), 16)
 	banner.set_anchors_preset(Control.PRESET_FULL_RECT)
 	banner.modulate.a = 0.0
@@ -472,7 +440,6 @@ func show_play() -> void:
 	over_screen.visible = false
 	hud.visible = true
 	btn_ff.visible = true
-	_last_count = -1
 
 
 func show_pause(p: bool) -> void:
@@ -539,53 +506,18 @@ func refresh() -> void:
 		btn_ff.position = ff_rect.position
 		btn_ff.size = ff_rect.size
 
-	_set_text(stat_values["SCORE"], "%d" % game.score)
-	_set_text(stat_values["BEST"], "%d" % maxi(game.best, game.score))
 	_set_text(stat_values["HEIGHT"], "%d" % game.height)
-	_set_text(stat_values["MULT"], "x%.1f" % game.multiplier())
-	var spd: float = game.effective_speed()
-	var tag := ""
-	if game.fast_forward:
-		tag = " FF"
-	elif game.slow_timer > 0.0:
-		tag = " SLOW"
-	_set_text(stat_values["SPEED"], "%.2fx%s" % [spd, tag])
-	if game.freeze_timer > 0.0:
-		_set_text(stat_values["SPEED"], "FROZEN")
-	var scol := Color("bff0ff") if game.freeze_timer > 0.0 else (Color("ffd23a") if game.fast_forward else (Color("8ad8ff") if game.slow_timer > 0.0 else Color.WHITE))
-	if scol != _speed_col:
-		_speed_col = scol
-		(stat_values["SPEED"] as Label).add_theme_color_override("font_color", scol)
+	_set_text(stat_values["SCORE"], "%d" % game.score)
 
 	_refresh_powers()
 	if btn_ff.lit != game.fast_forward:
 		btn_ff.lit = game.fast_forward
 		btn_ff.queue_redraw()
-	var mk := "sound_off" if game.sfx.muted else "sound_on"
-	if btn_mute.kind != mk:
-		btn_mute.kind = mk
-		btn_mute.queue_redraw()
 	var mt := "SOUND: OFF" if game.sfx.muted else "SOUND: ON"
 	if not game.is_touch:
 		mt += "  (M)"
 	if pause_mute.text != mt:
 		pause_mute.text = mt
-
-	# Countdown.
-	if game.state == game.State.COUNTDOWN and not game.paused:
-		var n := int(ceil(game.countdown))
-		_set_text(countdown_sub, "PUMP STARTS IN")
-		_set_text(countdown_label, "%d" % n)
-		var frac: float = game.countdown - floor(game.countdown)
-		var s := 1.0 + 0.25 * pow(frac, 3.0)
-		countdown_label.pivot_offset = countdown_label.size * 0.5
-		countdown_label.scale = Vector2(s, s)
-		countdown_label.modulate.a = 0.35 if n > 3 else 0.95
-		countdown_sub.modulate.a = 0.8
-		_last_count = n
-	elif countdown_label.text != "" and not (game.paused and game.state == game.State.COUNTDOWN):
-		countdown_label.text = ""
-		countdown_sub.text = ""
 
 	if over_new.visible:
 		over_new.modulate = Color.from_hsv(0.13, 0.6 + 0.4 * sin(game.time * 6.0), 1.0)
@@ -646,14 +578,6 @@ func _apply_layout() -> void:
 		l.add_theme_constant_override("outline_size", maxi(2, int(e[2] * k)))
 	for e in _key_buttons:
 		(e[0] as Button).text = e[2] if touch else e[1]
-	var narrow := vs.x < 620.0
-	_best_box.visible = not narrow
-	for key in ["SCORE", "BEST", "HEIGHT", "MULT", "SPEED"]:
-		(stat_values[key] as Label).add_theme_font_size_override("font_size", 24 if narrow else 27)
-		(stat_values[key + "_cap"] as Label).add_theme_font_size_override("font_size", 14 if narrow else 13)
-	var bs := 56.0 if touch or narrow else 52.0
-	btn_pause.custom_minimum_size = Vector2(bs, bs)
-	btn_mute.custom_minimum_size = Vector2(bs, bs)
 	var unlock: bool = game.mode == "unlock"
 	logo.fit_width(vs.x - 24.0)
 	over_reason.custom_minimum_size = Vector2(minf(420.0, vs.x - 96.0), 0)
@@ -669,10 +593,6 @@ func _apply_layout() -> void:
 	var hb := hud.get_node("Stats") as HBoxContainer
 	hb.position = Vector2(10, 4)
 	hb.size = Vector2(vs.x - 20, game.hud_h - 8)
-	countdown_label.position = Vector2(0, -40)
-	countdown_label.size = vs
-	countdown_sub.position = Vector2(0, -150)
-	countdown_sub.size = vs
 	banner.position = Vector2(0, -vs.y * 0.22)
 	banner.size = vs
 	toast.position = Vector2(20, -vs.y * 0.5 + game.hud_h + 40)

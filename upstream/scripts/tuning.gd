@@ -11,8 +11,9 @@ const MIN_VISIBLE_ROWS := 7.5        ## Rows that always fit on screen (fewer = 
 const MIN_VISIBLE_ROWS_COMPACT := 5.5 ## Same, on short screens (phones held sideways).
 
 # --- Look -------------------------------------------------------------------
-const PS1_MODE := true               ## Low-res, dithered, 15-bit colour, no anti-aliasing.
-const PS1_SHORT_SIDE := 240          ## Low-res pixels across the screen's short side (the PS1 ran 240 lines).
+const PS1_MODE := true               ## Board rendered at a fixed low resolution with 15-bit colour.
+const PS1_SHORT_SIDE := 480          ## Board pixels across the screen's short side (PS1: 240, or 480 in hi-res mode).
+const SMOOTH_EDGES := true           ## Anti-aliased art and smooth scaling (false = hard pixel edges).
 const PS1_COLOR_LEVELS := 31.0       ## Colour steps per channel (31 = the PS1's 15-bit colour).
 const PS1_DITHER := 1.0              ## Ordered-dither strength (0 = off).
 
@@ -43,7 +44,7 @@ const PIECE_WEIGHTS := [16, 16, 14, 14, 14, 14, 5]
 
 # --- Unlock mode (BioShock-style hacking) -----------------------------------
 const DEFAULT_MODE := "unlock"       ## "unlock" (face-down tiles you flip and move) or "classic" (piece queue).
-const UNLOCK_PIECE_FILL := 0.72      ## Chance a locked tile hides a pipe (otherwise an empty slot).
+const UNLOCK_PIECE_FILL := 0.72      ## Chance a closed block hides a pipe (otherwise an empty slot).
 const UNLOCK_SPINE_PIECE_CHANCE := 0.5 ## Chance a guaranteed-path tile already hides the pipe it needs.
 const ALARM_START_ROW := 15          ## Alarm traps appear from this row.
 const ALARM_CHANCE := 0.07           ## Chance per hidden empty slot to be an alarm.
