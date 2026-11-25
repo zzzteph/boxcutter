@@ -363,7 +363,7 @@ func _build_over() -> void:
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 8)
 	panel.add_child(vb)
-	vb.add_child(_slabel("GOO SPILLED!", 64, Color("ff8a3a"), 14))
+	vb.add_child(_slabel("WATER SPILLED!", 64, Color("ff8a3a"), 14))
 	over_reason = _slabel("", 22, Color(1, 1, 1, 0.85), 6)
 	over_reason.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vb.add_child(over_reason)
@@ -498,7 +498,7 @@ func refresh() -> void:
 	# Countdown.
 	if game.state == game.State.COUNTDOWN and not game.paused:
 		var n := int(ceil(game.countdown))
-		_set_text(countdown_sub, "GOO FLOWS IN")
+		_set_text(countdown_sub, "WATER FLOWS IN")
 		_set_text(countdown_label, "%d" % n)
 		var frac: float = game.countdown - floor(game.countdown)
 		var s := 1.0 + 0.25 * pow(frac, 3.0)

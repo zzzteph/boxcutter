@@ -14,6 +14,9 @@ const W_GOO := 0.21
 const FLANGE_LEN := 0.58
 const FLANGE_DEPTH := 0.10
 const NARROW_SCALE := 0.6     ## Width of a narrow pipe relative to a normal one.
+const W_BULGE := 0.74         ## Reservoir: width of the swollen middle section.
+const W_BULGE_GOO := 0.42     ## Reservoir: width of the goo chamber inside it.
+const BULGE_T0 := 0.2         ## Reservoir: where the chamber starts along the pipe.
 
 static var _font: Font
 static var _tank_sb: StyleBoxFlat
@@ -149,7 +152,7 @@ static func _flange(ci: CanvasItem, center: Vector2, T: float, side: int, dark: 
 static func draw_pipe(ci: CanvasItem, center: Vector2, T: float, piece: int, pal: Dictionary,
 		tile: Tile = null, alpha := 1.0, time := 0.0, bubbles := true, narrow := false) -> void:
 	var oneway := tile != null and tile.special == Tile.SP_ONEWAY
-	# Narrow pipes: a thin tube between full-size couplings, with a yellow collar.
+	# Narrow pipes: the same steel, as a thin tube between full-size couplings.
 	var thin := narrow or (tile != null and tile.narrow)
 	var k := NARROW_SCALE if thin else 1.0
 	var reservoir := tile != null and tile.special == Tile.SP_RESERVOIR
@@ -158,13 +161,6 @@ static func draw_pipe(ci: CanvasItem, center: Vector2, T: float, piece: int, pal
 	var light: Color = fade(pal["metal_light"], alpha)
 	var shade: Color = fade((pal["brass"] if oneway else pal["metal"]).darkened(0.35), alpha)
 	var chan: Color = fade((pal["brass"] if oneway else pal["metal"]).darkened(0.55), alpha)
-	if thin:
-		# Copper, so narrow pipes stand out even at PS1 resolution (one-way pipes are brass).
-		metal = fade(Color("d0703c"), alpha)
-		dark = fade(Color("4a1e0c"), alpha)
-		light = fade(Color("ffc8a4"), alpha)
-		shade = fade(Color("8c4224"), alpha)
-		chan = fade(Color("3a1408"), alpha)
 	var chans := Pieces.channels(piece)
 	for i in chans.size():
 		var a: int = chans[i][0]
@@ -176,19 +172,26 @@ static func draw_pipe(ci: CanvasItem, center: Vector2, T: float, piece: int, pal
 		_flange(ci, center, T, a, dark, metal, light)
 		_flange(ci, center, T, b, dark, metal, light)
 		if thin:
-			# One dark crimp ring in the middle.
-			stroke(ci, center, T, a, b, W_OUTLINE * T * 0.85, dark, 0.44, 0.56)
+			# A small coupling ring in the middle, like the flanges.
+			stroke(ci, center, T, a, b, W_OUTLINE * T * 0.8, dark, 0.45, 0.55)
+			stroke(ci, center, T, a, b, W_BODY * T * 0.72, metal, 0.465, 0.535)
 		stroke(ci, center, T, a, b, W_CHANNEL * T * k, chan)
 		stroke(ci, center, T, a, b, W_CHANNEL * T * k * 0.35, fade(Color(0, 0, 0, 0.35), alpha), 0.0, 1.0, W_CHANNEL * T * k * 0.25)
+		if reservoir:
+			_bulge(ci, center, T, a, b, dark, metal, light, shade, chan, alpha)
 		if oneway:
 			_chevrons(ci, center, T, tile.oneway_entry, Pieces.exit_dir(piece, tile.oneway_entry), fade(pal["brass"].lightened(0.45), alpha))
-		if tile != null and not reservoir:
+		if tile != null:
 			var ch := i if piece == Pieces.CROSS else 0
 			if tile.fill_entry[ch] >= 0:
 				var en: int = tile.fill_entry[ch]
-				goo(ci, center, T, en, Pieces.exit_dir(piece, en), tile.fill[ch], tile.fill_color[ch], alpha, time, tile.rnd + i * 37, bubbles, k)
-	if reservoir:
-		_tank(ci, center, T, tile, pal, alpha, time)
+				var ex := Pieces.exit_dir(piece, en)
+				goo(ci, center, T, en, ex, tile.fill[ch], tile.fill_color[ch], alpha, time, tile.rnd + i * 37, bubbles, k)
+				if reservoir and tile.fill[ch] > BULGE_T0:
+					# The wide chamber fills as the goo crawls through it.
+					var t1 := minf(tile.fill[ch], 1.0 - BULGE_T0)
+					stroke(ci, center, T, en, ex, W_BULGE_GOO * T, fade(tile.fill_color[ch], alpha), BULGE_T0, t1)
+					stroke(ci, center, T, en, ex, W_BULGE_GOO * T * 0.25, fade(tile.fill_color[ch].lightened(0.6), 0.85 * alpha), BULGE_T0, t1, W_BULGE_GOO * T * 0.22)
 
 
 ## Goo inside a channel, from the entry side up to progress p.
@@ -226,51 +229,22 @@ static func _sb() -> StyleBoxFlat:
 	return _tank_sb
 
 
-## Reservoir: a big glass tank the goo slowly fills.
-static func _tank(ci: CanvasItem, center: Vector2, T: float, tile: Tile, pal: Dictionary, alpha: float, time: float) -> void:
-	var p: float = tile.fill[0] if tile.fill_entry[0] >= 0 else 0.0
-	var en: int = tile.fill_entry[0]
-	var ex: int = Pieces.exit_dir(tile.piece, en) if en >= 0 else -1
-	if en >= 0:
-		goo(ci, center, T, en, ex, minf(1.0, p * 9.0) * 0.12, tile.fill_color[0], alpha)
-	var size := Vector2(0.80, 0.80) * T
-	var rect := Rect2(center - size * 0.5, size)
-	var sb := _sb()
-	sb.bg_color = fade(pal["metal_dark"], alpha)
-	sb.set_corner_radius_all(int(T * 0.16))
-	sb.set_border_width_all(0)
-	ci.draw_style_box(sb, rect)
-	var inner := rect.grow(-T * 0.07)
-	sb.bg_color = fade(pal["channel"].lightened(0.08), alpha)
-	sb.set_corner_radius_all(int(T * 0.11))
-	ci.draw_style_box(sb, inner)
-	if p > 0.0:
-		var gcol: Color = tile.fill_color[0]
-		var h := inner.size.y * p
-		var lr := Rect2(inner.position.x, inner.end.y - h, inner.size.x, h)
-		sb.bg_color = fade(gcol, alpha)
-		sb.set_corner_radius_all(int(T * 0.11) if p > 0.85 else 0)
-		sb.corner_radius_bottom_left = int(T * 0.11)
-		sb.corner_radius_bottom_right = int(T * 0.11)
-		ci.draw_style_box(sb, lr)
-		if p < 1.0:
-			var wave := PackedVector2Array()
-			for i in 9:
-				var x := inner.position.x + inner.size.x * i / 8.0
-				wave.append(Vector2(x, inner.end.y - h + sin(time * 5.0 + i * 1.3) * T * 0.015))
-			ci.draw_polyline(wave, fade(gcol.lightened(0.6), alpha), maxf(2.0, T * 0.03), aa)
-	for k in [0.25, 0.5, 0.75]:
-		var y: float = inner.end.y - inner.size.y * k
-		ci.draw_line(Vector2(inner.end.x - T * 0.12, y), Vector2(inner.end.x - T * 0.03, y), fade(pal["metal_light"], 0.6 * alpha), maxf(1.0, T * 0.02))
-	ci.draw_line(inner.position + Vector2(T * 0.07, T * 0.08), Vector2(inner.position.x + T * 0.07, inner.end.y - T * 0.12),
-			fade(Color.WHITE, 0.28 * alpha), maxf(2.0, T * 0.045), aa)
-	for corner in [rect.position, Vector2(rect.end.x, rect.position.y), rect.end, Vector2(rect.position.x, rect.end.y)]:
-		var cc: Vector2 = corner + (center - corner).normalized() * T * 0.06
-		ci.draw_circle(cc, T * 0.025, fade(pal["metal_light"], 0.8 * alpha))
-	if en >= 0 and p >= 0.88:
-		# Goo spilling out of the tank into the exit stub.
-		var t1 := lerpf(0.9, 1.0, clampf((p - 0.88) / 0.12, 0.0, 1.0))
-		stroke(ci, center, T, en, ex, W_GOO * T, fade(tile.fill_color[0], alpha), 0.9, t1)
+## Reservoir: the same steel pipe swelling into a wide chamber in the middle,
+## which the goo takes a long time to fill.
+static func _bulge(ci: CanvasItem, center: Vector2, T: float, a: int, b: int,
+		dark: Color, metal: Color, light: Color, shade: Color, chan: Color, alpha: float) -> void:
+	var t0 := BULGE_T0 - 0.04
+	var t1 := 1.0 - t0
+	stroke(ci, center, T, a, b, W_BULGE * T + W_OUTLINE * T * 0.2, dark, t0, t1)
+	stroke(ci, center, T, a, b, W_BULGE * T, metal, t0, t1)
+	stroke(ci, center, T, a, b, W_HILITE * T * 1.4, fade(light, 0.8), t0, t1, W_BULGE * T * 0.32)
+	stroke(ci, center, T, a, b, W_HILITE * T * 1.4, shade, t0, t1, -W_BULGE * T * 0.32)
+	# Rings where the pipe widens.
+	for r in [[t0, t0 + 0.05], [t1 - 0.05, t1]]:
+		stroke(ci, center, T, a, b, W_BULGE * T + W_OUTLINE * T * 0.3, dark, r[0], r[1])
+		stroke(ci, center, T, a, b, W_BULGE * T * 0.96, metal.lightened(0.08), r[0] + 0.01, r[1] - 0.01)
+	stroke(ci, center, T, a, b, W_BULGE_GOO * T * 1.1, chan, BULGE_T0, 1.0 - BULGE_T0)
+	stroke(ci, center, T, a, b, W_BULGE_GOO * T * 0.4, fade(Color(0, 0, 0, 0.35), alpha), BULGE_T0, 1.0 - BULGE_T0, W_BULGE_GOO * T * 0.3)
 
 
 ## The goo source: a pump tank with a riser going north.

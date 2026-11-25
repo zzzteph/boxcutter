@@ -7,8 +7,8 @@ extends RefCounted
 # --- Board ------------------------------------------------------------------
 const COLS := 7                      ## Board width in tiles.
 const SOURCE_COL := 3                ## Column of the goo source (row 0).
-const MIN_VISIBLE_ROWS := 10.0       ## Rows that always fit on screen (sets tile size).
-const MIN_VISIBLE_ROWS_COMPACT := 7.0 ## Same, on short screens (phones held sideways).
+const MIN_VISIBLE_ROWS := 7.5        ## Rows that always fit on screen (fewer = bigger tiles).
+const MIN_VISIBLE_ROWS_COMPACT := 5.5 ## Same, on short screens (phones held sideways).
 
 # --- Look -------------------------------------------------------------------
 const PS1_MODE := true               ## Low-res, dithered, 15-bit colour, no anti-aliasing.

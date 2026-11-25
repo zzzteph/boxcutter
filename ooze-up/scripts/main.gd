@@ -8,13 +8,13 @@ extends Node2D
 enum State { TITLE, COUNTDOWN, RUNNING, SPILL, GAMEOVER }
 
 const REASONS := {
-	"rock": "The goo smashed into a rock.",
-	"empty": "The goo poured out onto an empty tile.",
-	"leak": "The goo leaked out of an open pipe end.",
-	"wall": "The goo hit the wall.",
-	"oneway": "The goo hit a one-way pipe from the wrong side.",
-	"clogged": "The goo ran into a pipe that was already full.",
-	"locked": "The goo hit a locked tile. Unlock the tiles ahead of it.",
+	"rock": "The water smashed into a rock.",
+	"empty": "The water poured out onto an empty tile.",
+	"leak": "The water leaked out of an open pipe end.",
+	"wall": "The water hit the wall.",
+	"oneway": "The water hit a one-way pipe from the wrong side.",
+	"clogged": "The water ran into a pipe that was already full.",
+	"locked": "The water hit a locked tile. Unlock the tiles ahead of it.",
 }
 
 var state := State.TITLE
@@ -283,7 +283,7 @@ func _update_spill(dt: float) -> void:
 		renderer.burst(spill["p"], spill["col"], 2, 2.2, 0.06, 0.8, 9.0)
 	if spill_timer <= 0.0:
 		state = State.GAMEOVER
-		ui.show_game_over(REASONS.get(last_reason, "The goo spilled."), score, height, best, new_best)
+		ui.show_game_over(REASONS.get(last_reason, "The water spilled."), score, height, best, new_best)
 
 
 func _ensure_rows() -> void:
@@ -533,7 +533,7 @@ func _trigger_alarm(wp: Vector2) -> void:
 	sfx.play("alarm")
 	renderer.burst(wp, Color("ff3a2a"), 30, 4.0, 0.08, 0.9)
 	renderer.float_text(wp, "ALARM! -%d" % Tuning.ALARM_PENALTY, Color("ff5a4a"), 0.36, 1.3)
-	ui.show_toast("ALARM!  The goo surges", Color("ff5a4a"))
+	ui.show_toast("ALARM!  The water surges", Color("ff5a4a"))
 	ui.flash(Color(1.0, 0.1, 0.05, 0.35))
 
 

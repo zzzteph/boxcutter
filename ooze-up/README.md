@@ -46,9 +46,9 @@ The main menu has one button, NEW GAME. The game plays in unlock mode; set
   alarm costs 100 points and makes the goo surge for a few seconds.
 - **Classic**: the board is open and you place pieces from a queue of five.
 
-**Narrow pipes** (copper, with a crimp in the middle) connect like normal
-pipes but the goo takes 2.5x as long to get through them, so swap them onto
-the goo's path to buy time.
+**Narrow pipes** (thinner steel tubes with a ring in the middle) connect like
+normal pipes but the goo takes 2.5x as long to get through them, so swap them
+onto the goo's path to buy time.
 
 ## Controls
 
@@ -76,7 +76,8 @@ the goo's path to buy time.
 - Scoring: +10 per filled segment, +100 for a cross filled both ways, and every
   25 rows add +0.5x to the multiplier. Fast-forward doubles all points.
 - Obstacles grow with height: rocks, one-way pipes (brass, with arrows) and
-  reservoirs (tanks that take 4x as long to fill and buy you time).
+  reservoirs (fixed pipes that swell into a wide chamber and take 4x as long to
+  fill, which buys you time).
 - Power-ups (picked up when goo passes): **Slow-mo** (half speed for 8 s) and
   **Wildcard** (choose any piece).
 - Every 50 rows the zone changes: Sewer > Factory > Neon > Magma > Space, then
@@ -124,7 +125,7 @@ Every difficulty knob is in [`scripts/tuning.gd`](scripts/tuning.gd):
 | `PS1_SHORT_SIDE` | 240 | Low-res pixels across the screen's short side |
 | `PS1_COLOR_LEVELS` / `PS1_DITHER` | 31 / 1.0 | Colour steps per channel (31 = 15-bit) and dither strength |
 | `UI_BASE_MAX` / `UI_BASE_MIN` | 720 / 480 | Virtual resolution on big screens / phones (smaller = bigger UI) |
-| `MIN_VISIBLE_ROWS` / `MIN_VISIBLE_ROWS_COMPACT` | 10 / 7 | Rows that always fit on screen / on short screens |
+| `MIN_VISIBLE_ROWS` / `MIN_VISIBLE_ROWS_COMPACT` | 7.5 / 5.5 | Rows that always fit on screen / on short screens (fewer = bigger tiles) |
 
 Each zone also scales the obstacle mix (`rock_mult`, `oneway_mult`, ...) in
 [`scripts/zones.gd`](scripts/zones.gd).
