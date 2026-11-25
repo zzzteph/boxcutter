@@ -14,6 +14,7 @@ func _initialize() -> void:
 	test_cross_both_ways()
 	test_block_reasons()
 	test_reservoir_is_slow()
+	test_narrow_is_slow()
 	test_generator_solvable()
 	test_unlock_generator_solvable()
 	test_memory_discard()
@@ -249,6 +250,22 @@ func test_reservoir_is_slow() -> void:
 	check(absf(f.progress - 1.0 / Tuning.RESERVOIR_FILL_FACTOR) < 1e-4, "reservoir fills %sx slower" % Tuning.RESERVOIR_FILL_FACTOR)
 
 
+func test_narrow_is_slow() -> void:
+	var g := empty_grid(5)
+	var t := put(g, 3, 2, P.NE)
+	t.narrow = true
+	var f := Flow.new()
+	f.begin(g, 3, 2, P.N, Color.GREEN)
+	f.advance(g, 1.0, Color.GREEN)
+	check(absf(f.progress - 1.0 / Tuning.NARROW_FILL_FACTOR) < 1e-4, "narrow pipe fills %sx slower" % Tuning.NARROW_FILL_FACTOR)
+	check(P.item_piece(P.item(P.SE, true)) == P.SE and P.item_narrow(P.item(P.SE, true)), "items keep piece and narrow flag")
+	check(not P.item_narrow(P.item(P.CROSS, true)), "crosses are never narrow")
+	check(P.icon_index(P.item(P.NW, true)) == 7 + P.NW and P.icon_index(P.H) == P.H, "icon index for narrow pieces")
+	var u := Tile.new()
+	u.set_item(P.item(P.H, true))
+	check(u.piece == P.H and u.narrow and u.get_item() == P.item(P.H, true), "tile round-trips an item")
+
+
 func test_generator_solvable() -> void:
 	var rows := 420
 	var seeds := 250
@@ -258,7 +275,6 @@ func test_generator_solvable() -> void:
 	var bad_run := 0
 	var seen_oneway := 0
 	var seen_res := 0
-	var seen_bonus := 0
 	var seen_pu := 0
 	for s in seeds:
 		var g := Grid.new()
@@ -291,8 +307,6 @@ func test_generator_solvable() -> void:
 					seen_oneway += 1
 				if t.special == Tile.SP_RESERVOIR:
 					seen_res += 1
-				if t.bonus > 0:
-					seen_bonus += 1
 				if t.powerup != Tile.PU_NONE:
 					seen_pu += 1
 			if open < Tuning.COLS - Tuning.MAX_ROCKS_PER_ROW:
@@ -320,8 +334,8 @@ func test_generator_solvable() -> void:
 	check(bad_rows == 0, "no row is sealed by rocks (%d bad rows)" % bad_rows)
 	check(bad_bfs == 0, "BFS finds a way to the top on every seed (%d failed)" % bad_bfs)
 	check(bad_run == 0, "goo laid along the spine reaches row %d on every seed (%d failed)" % [rows, bad_run])
-	check(seen_oneway > 0 and seen_res > 0 and seen_bonus > 0 and seen_pu > 0, "all obstacle kinds appear")
-	print("generator: %d seeds x %d rows, one-way %d, reservoirs %d, bonus %d, power-ups %d" % [seeds, rows, seen_oneway, seen_res, seen_bonus, seen_pu])
+	check(seen_oneway > 0 and seen_res > 0 and seen_pu > 0, "all obstacle kinds appear")
+	print("generator: %d seeds x %d rows, one-way %d, reservoirs %d, power-ups %d" % [seeds, rows, seen_oneway, seen_res, seen_pu])
 
 
 ## Can goo get from the source to `top_row` if the player fills free tiles freely?
@@ -364,6 +378,7 @@ func test_unlock_generator_solvable() -> void:
 	var bad_alarm := 0
 	var bad_run := 0
 	var alarms := 0
+	var narrows := 0
 	for s in seeds:
 		var g := Grid.new()
 		var gen := LevelGenerator.new()
@@ -376,6 +391,8 @@ func test_unlock_generator_solvable() -> void:
 				var t := g.get_tile(c, r)
 				if not t.hidden:
 					bad_hidden += 1
+				if t.narrow:
+					narrows += 1
 				if t.alarm:
 					alarms += 1
 					if t.spine or t.piece >= 0:
@@ -407,8 +424,9 @@ func test_unlock_generator_solvable() -> void:
 						continue
 					if need.has(c2) and P.piece_for(need[c2][0], need[c2][1]) == want:
 						continue
-					o.piece = t.piece
-					t.piece = want
+					var moved := t.get_item()
+					t.set_item(o.get_item())
+					o.set_item(moved)
 					break
 		var f := Flow.new()
 		f.begin(g, Tuning.SOURCE_COL, 0, P.S, Color.GREEN)
@@ -424,6 +442,7 @@ func test_unlock_generator_solvable() -> void:
 	check(bad_stock == 0, "unlock mode: each row hides the pipes its path needs (%d short)" % bad_stock)
 	check(bad_alarm == 0 and alarms > 0, "unlock mode: alarms sit only in empty off-path slots (%d bad, %d total)" % [bad_alarm, alarms])
 	check(bad_run == 0, "unlock mode: swapping within each row gets the goo to row %d on every seed (%d failed)" % [rows, bad_run])
+	check(narrows > 0, "unlock mode: narrow pipes turn up (%d)" % narrows)
 	var g2 := empty_grid(4)
 	put(g2, 3, 1, P.V)
 	g2.get_tile(3, 2).hidden = true

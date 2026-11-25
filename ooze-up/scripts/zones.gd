@@ -21,7 +21,7 @@ static func _build() -> void:
 			"metal": _c("8fa3ab"), "metal_dark": _c("2f3b40"), "metal_light": _c("dce8ec"),
 			"brass": _c("c9973a"), "brass_dark": _c("5a3d12"),
 			"channel": _c("101818"), "goo": _c("7dff3a"), "accent": _c("b6ff7a"), "wall": _c("44575c"),
-			"rock_mult": 1.0, "bonus_mult": 1.0, "oneway_mult": 0.6, "reservoir_mult": 0.7, "powerup_mult": 1.0,
+			"rock_mult": 1.0, "oneway_mult": 0.6, "reservoir_mult": 0.7, "powerup_mult": 1.0,
 		},
 		{
 			"name": "FACTORY", "deco": "gears",
@@ -31,7 +31,7 @@ static func _build() -> void:
 			"metal": _c("b0a89c"), "metal_dark": _c("3b342d"), "metal_light": _c("f3ece0"),
 			"brass": _c("d6a03a"), "brass_dark": _c("5f3f0f"),
 			"channel": _c("15110e"), "goo": _c("ffd23a"), "accent": _c("ff9d3a"), "wall": _c("6a4a2c"),
-			"rock_mult": 1.1, "bonus_mult": 1.0, "oneway_mult": 1.4, "reservoir_mult": 1.0, "powerup_mult": 1.0,
+			"rock_mult": 1.1, "oneway_mult": 1.4, "reservoir_mult": 1.0, "powerup_mult": 1.0,
 		},
 		{
 			"name": "NEON", "deco": "grid",
@@ -41,7 +41,7 @@ static func _build() -> void:
 			"metal": _c("a8b4d8"), "metal_dark": _c("2a2850"), "metal_light": _c("ffffff"),
 			"brass": _c("3af0ff"), "brass_dark": _c("0b4a5a"),
 			"channel": _c("0c0718"), "goo": _c("ff3df2"), "accent": _c("3af0ff"), "wall": _c("ff3df2"),
-			"rock_mult": 0.9, "bonus_mult": 1.6, "oneway_mult": 1.0, "reservoir_mult": 1.0, "powerup_mult": 1.2,
+			"rock_mult": 0.9, "oneway_mult": 1.0, "reservoir_mult": 1.0, "powerup_mult": 1.2,
 		},
 		{
 			"name": "MAGMA", "deco": "embers",
@@ -51,7 +51,7 @@ static func _build() -> void:
 			"metal": _c("a08070"), "metal_dark": _c("3a2018"), "metal_light": _c("ffd8c0"),
 			"brass": _c("e0b050"), "brass_dark": _c("5a3010"),
 			"channel": _c("120807"), "goo": _c("ff8a1a"), "accent": _c("ffd23a"), "wall": _c("6a2a18"),
-			"rock_mult": 1.35, "bonus_mult": 1.0, "oneway_mult": 1.0, "reservoir_mult": 1.5, "powerup_mult": 1.1,
+			"rock_mult": 1.35, "oneway_mult": 1.0, "reservoir_mult": 1.5, "powerup_mult": 1.1,
 		},
 		{
 			"name": "SPACE", "deco": "stars",
@@ -61,7 +61,7 @@ static func _build() -> void:
 			"metal": _c("c8d4e8"), "metal_dark": _c("343c56"), "metal_light": _c("ffffff"),
 			"brass": _c("ffc94a"), "brass_dark": _c("5a4010"),
 			"channel": _c("060814"), "goo": _c("3af0ff"), "accent": _c("a070ff"), "wall": _c("4a5a8a"),
-			"rock_mult": 1.05, "bonus_mult": 1.3, "oneway_mult": 1.4, "reservoir_mult": 1.2, "powerup_mult": 1.2,
+			"rock_mult": 1.05, "oneway_mult": 1.4, "reservoir_mult": 1.2, "powerup_mult": 1.2,
 		},
 	]
 

@@ -33,25 +33,3 @@ static func save_best(score: int) -> void:
 	if err != OK and not OS.has_feature("web"):
 		push_warning("Could not save high score (error %d)" % err)
 
-
-## Small persistent settings (game mode). Browser: localStorage; elsewhere: the config file.
-static func load_setting(key: String, default_value: Variant) -> Variant:
-	if OS.has_feature("web"):
-		var v = JavaScriptBridge.eval(
-				"(function(){try{return window.localStorage.getItem('ooze_up_%s');}catch(e){return null;}})()" % key, true)
-		if v != null and str(v) != "" and str(v) != "null":
-			return str(v)
-	var cfg := ConfigFile.new()
-	if cfg.load(PATH) == OK:
-		return cfg.get_value("settings", key, default_value)
-	return default_value
-
-
-static func save_setting(key: String, value: Variant) -> void:
-	if OS.has_feature("web"):
-		JavaScriptBridge.eval(
-				"(function(){try{window.localStorage.setItem('ooze_up_%s', %s);}catch(e){}})()" % [key, JSON.stringify(str(value))], true)
-	var cfg := ConfigFile.new()
-	cfg.load(PATH)
-	cfg.set_value("settings", key, value)
-	cfg.save(PATH)

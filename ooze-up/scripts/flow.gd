@@ -71,6 +71,8 @@ static func check_enter(t: Tile, side: int) -> String:
 static func time_factor(t: Tile) -> float:
 	if t != null and t.special == Tile.SP_RESERVOIR:
 		return Tuning.RESERVOIR_FILL_FACTOR
+	if t != null and t.narrow:
+		return Tuning.NARROW_FILL_FACTOR
 	return 1.0
 
 

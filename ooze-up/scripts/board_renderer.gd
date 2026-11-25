@@ -364,15 +364,10 @@ func _draw_fx_sprites(ci: CanvasItem) -> void:
 		var tex := atlas.tile_tex(Zones.index_for_row(r))
 		for c in Tuning.COLS:
 			var t := grid.get_tile(c, r)
-			if t == null or t.hidden or (t.bonus <= 0 and t.powerup == Tile.PU_NONE):
+			if t == null or t.hidden or t.powerup == Tile.PU_NONE:
 				continue
 			var rect := tile_rect(c, r)
 			var bob := Vector2(0, snap(sin(time * 3.0 + c * 1.3 + r) * T * 0.02))
-			if t.bonus > 0:
-				if t.piece < 0:
-					ci.draw_texture_rect_region(tex, Rect2(rect.position + bob, rect.size), atlas.region(SpriteAtlas.coin_cell(t.bonus)))
-				else:
-					_icon(ci, tex, SpriteAtlas.COIN_SMALL, rect.position + Vector2(T * 0.2, T * 0.2) + bob, T * 0.13 / SpriteAtlas.COIN_R)
 			if t.powerup != Tile.PU_NONE:
 				var cell := SpriteAtlas.PU + t.powerup - 1
 				if t.piece < 0:
@@ -389,7 +384,7 @@ func _draw_fx_sprites(ci: CanvasItem) -> void:
 			ghost = game.held_piece
 		if ghost >= 0:
 			var tex := atlas.tile_tex(Zones.index_for_row(cell.y))
-			ci.draw_texture_rect_region(tex, tile_rect(cell.x, cell.y), atlas.region(SpriteAtlas.EMPTY + ghost), Color(0.5, 0.5, 0.5, 0.5))
+			ci.draw_texture_rect_region(tex, tile_rect(cell.x, cell.y), atlas.region(SpriteAtlas.item_cell(ghost)), Color(0.5, 0.5, 0.5, 0.5))
 
 
 ## Draw an atlas cell centred on `center`, `size` pixels across.
@@ -433,8 +428,8 @@ func _draw_fx(ci: CanvasItem) -> void:
 						var tt := fposmod(time * 0.55 + float((t.rnd + ch * 37) & 0xffff) / 997.0, 1.0)
 						var bp := center + Pieces.path_point(en, Pieces.exit_dir(t.piece, en), tt) * T
 						ci.draw_texture_rect(atlas.disk, Rect2(bp - Vector2(br, br), Vector2(br, br) * 2.0), false, PipeArt.fade(t.fill_color[ch].lightened(0.75), 0.75))
-			if not t.hidden and (t.bonus > 0 or t.powerup != Tile.PU_NONE):
-				var col := Color("ffc928") if t.bonus > 0 else PipeArt.powerup_color(t.powerup)
+			if not t.hidden and t.powerup != Tile.PU_NONE:
+				var col := PipeArt.powerup_color(t.powerup)
 				ci.draw_rect(tile_rect(c, r).grow(-T * 0.075), PipeArt.fade(col, 0.25 + 0.35 * pulse), false, maxf(2.0, T * 0.045))
 	# Unlock mode: the picked-up pipe gets a bright pulsing frame.
 	if game.held_piece >= 0 and game.held_from.x >= 0:
@@ -473,8 +468,6 @@ func _draw_hover(ci: CanvasItem, T: float) -> void:
 		match mode:
 			"replace":
 				col = Color("ffb030")
-			"bomb":
-				col = Color("ff4a3a")
 			"flip":
 				col = Color("6ad8ff")
 			"drop":
@@ -490,11 +483,6 @@ func _draw_hover(ci: CanvasItem, T: float) -> void:
 			var txt := "-%d" % Tuning.REPLACE_PENALTY
 			ci.draw_string_outline(f, rect.position + Vector2(0, T * 0.95), txt, HORIZONTAL_ALIGNMENT_CENTER, T, fs, 4, Color.BLACK)
 			ci.draw_string(f, rect.position + Vector2(0, T * 0.95), txt, HORIZONTAL_ALIGNMENT_CENTER, T, fs, col)
-		elif mode == "bomb":
-			var c := rect.get_center()
-			ci.draw_arc(c, T * 0.3, 0, TAU, 24, col, maxf(2.0, T * 0.04), true)
-			ci.draw_rect(Rect2(c.x - T * 0.4, c.y - 1.5, T * 0.8, 3), col)
-			ci.draw_rect(Rect2(c.x - 1.5, c.y - T * 0.4, 3, T * 0.8), col)
 
 
 func _draw_spill(ci: CanvasItem, T: float) -> void:
@@ -611,7 +599,7 @@ func _deco(pal: Dictionary, alpha: float) -> void:
 
 func _queue_signature() -> String:
 	# Includes whether each animation is running, so the frame after it ends is redrawn too.
-	return "%s|%d|%s|%d|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s" % [str(game.queue), game.zone_index, game.portrait, game.bombs,
+	return "%s|%d|%s|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s" % [str(game.queue), game.zone_index, game.portrait,
 			ceili(game.slow_timer), game.state, game.queue_rect, atlas.icon_px, atlas.tile_px,
 			game.queue_shift > 0.0, game.lock_timer > 0.0, game.wildcards, game.mode, game.held_piece, game.is_touch]
 
@@ -680,8 +668,6 @@ func _chips() -> Array:
 	var y := st.get_center().y
 	var out := []
 	var items := []
-	if game.bombs > 0:
-		items.append([Tile.PU_BOMB, "x%d" % game.bombs])
 	if game.slow_timer > 0.0:
 		items.append([Tile.PU_SLOW, "%ds" % ceili(game.slow_timer)])
 	if game.wildcards > 0:

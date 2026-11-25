@@ -106,16 +106,6 @@ func _make_reservoir(t: Tile, piece: int) -> void:
 	t.special = Tile.SP_RESERVOIR
 
 
-func _bonus_value(r: int) -> int:
-	var roll := rng.randf()
-	var tier := 0
-	if roll < 0.12 + minf(0.15, r * 0.0005):
-		tier = 2
-	elif roll < 0.5:
-		tier = 1
-	return Tuning.BONUS_VALUES[tier]
-
-
 # --- row construction ----------------------------------------------------------
 
 func _make_row(r: int) -> Array:
@@ -207,14 +197,7 @@ func _make_row(r: int) -> Array:
 		elif r >= Tuning.RESERVOIR_START_ROW and rng.randf() < Tuning.RESERVOIR_CHANCE * float(zone["reservoir_mult"]):
 			_make_reservoir(t, P.V if rng.randf() < 0.6 else P.H)
 
-	# 5) Bonus tiles on free cells.
-	if r >= Tuning.BONUS_START_ROW:
-		for c in Tuning.COLS:
-			var t: Tile = tiles[c]
-			if t.is_free() and rng.randf() < Tuning.BONUS_CHANCE * float(zone["bonus_mult"]):
-				t.bonus = _bonus_value(r)
-
-	# 6) Power-ups, on or right next to the path so they're reachable.
+	# 5) Power-ups, on or right next to the path so they're reachable.
 	if r >= Tuning.POWERUP_START_ROW and r - last_powerup_row >= Tuning.POWERUP_MIN_GAP \
 			and rng.randf() < Tuning.POWERUP_CHANCE * float(zone["powerup_mult"]):
 		var lo := maxi(0, mini(a, b) - 1)
@@ -222,7 +205,7 @@ func _make_row(r: int) -> Array:
 		var cand := []
 		for c in range(lo, hi + 1):
 			var t: Tile = tiles[c]
-			if t.is_free() and t.bonus == 0:
+			if t.is_free():
 				cand.append(c)
 		if not cand.is_empty():
 			var t: Tile = tiles[cand[rng.randi_range(0, cand.size() - 1)]]
@@ -271,6 +254,8 @@ func _fill_unlock(tiles: Array, need: Dictionary, r: int) -> void:
 		var t: Tile = tiles[spots[i]]
 		if rng.randf() < Tuning.UNLOCK_PIECE_FILL:
 			t.piece = _weighted(Tuning.PIECE_WEIGHTS)
-		elif r >= Tuning.ALARM_START_ROW and not t.spine and t.bonus == 0 and t.powerup == Tile.PU_NONE \
+			# Some spare pipes are narrow: they work the same but the goo crawls.
+			t.narrow = t.piece != P.CROSS and r >= Tuning.NARROW_START_ROW and rng.randf() < Tuning.NARROW_CHANCE
+		elif r >= Tuning.ALARM_START_ROW and not t.spine and t.powerup == Tile.PU_NONE \
 				and rng.randf() < Tuning.ALARM_CHANCE:
 			t.alarm = true

@@ -80,33 +80,14 @@ func _run() -> void:
 	check(game.state == S.TITLE, "starts on the title screen")
 	check(game.ui.title_screen.visible, "title overlay visible")
 
-	# --- a click anywhere on the title starts (nothing in the menu may swallow it) ---
-	var missed := []
-	for fy in [0.2, 0.5, 0.8]:
-		for fx in [0.2, 0.5, 0.8]:
-			game.go_to_title()
-			await frames(1)
-			var pt := Vector2(game.view_size.x * fx, game.view_size.y * fy)
-			if game.ui._mode_button.get_global_rect().has_point(pt):
-				continue  # That's the mode switch, tested below.
-			click(pt)
-			await frames(1)
-			if game.state != S.COUNTDOWN:
-				missed.append(Vector2(fx, fy))
-	check(missed.is_empty(), "every point on the title screen starts the game (missed %s)" % [missed])
-	game.go_to_title()
+	# --- the menu: one NEW GAME button; clicking elsewhere does nothing ---
+	check(game.ui.title_screen.visible and game.ui.new_game_button.is_visible_in_tree(), "the menu shows a NEW GAME button")
+	click(Vector2(game.view_size.x * 0.5, game.view_size.y * 0.92))
+	await frames(1)
+	check(game.state == S.TITLE, "clicking beside the button does not start a game")
+	click(game.ui.new_game_button.get_global_rect().get_center())
 	await frames(2)
-	click(game.ui._mode_button.get_global_rect().get_center())
-	await frames(1)
-	check(game.state == S.TITLE and game.mode == "unlock", "the mode button switches mode without starting")
-	click(game.ui._mode_button.get_global_rect().get_center())
-	await frames(1)
-	check(game.mode == "classic", "the mode button switches back")
-	game.go_to_title()
-	await frames(1)
-	click(game.view_size * 0.5)
-	await frames(2)
-	check(game.state == S.COUNTDOWN, "click starts the countdown")
+	check(game.state == S.COUNTDOWN, "NEW GAME starts the countdown")
 	check(not game.ui.title_screen.visible, "title hidden")
 	check(game.countdown > 9.0, "10 second countdown")
 
@@ -116,7 +97,7 @@ func _run() -> void:
 	click(tile_center(3, 1))
 	await frames(1)
 	var t31: Tile = game.grid.get_tile(3, 1)
-	check(t31.piece == next, "click places the next queued piece")
+	check(t31.get_item() == next, "click places the next queued piece")
 	check(game.queue[0] == second and game.queue.size() == Tuning.QUEUE_SIZE, "queue advances and refills")
 
 	# --- replacing costs a lock and points ---
@@ -139,11 +120,7 @@ func _run() -> void:
 	var top_row := int(game.cam.y + game.cam.visible_rows) + 2
 	check(game.try_place(2, top_row) == "no", "tiles above the screen are not placeable")
 
-	# --- bomb, wildcard, pause, mute ---
-	game.bombs = 1
-	click(tile_center(4, 1))
-	await frames(1)
-	check(game.bombs == 0 and game.grid.get_tile(4, 1).piece == -1, "bomb clears a dry pipe for free")
+	# --- wildcard, pause, mute ---
 	game.wildcards = 1
 	await frames(1)
 	check(game.ui.picker.visible, "wildcard picker appears")
@@ -187,6 +164,10 @@ func _run() -> void:
 	await frames(1)
 	for spec in [[3, 1, P.V], [3, 2, P.CROSS], [3, 3, P.SE], [4, 3, P.SW], [4, 2, P.NW], [2, 2, P.NE], [2, 3, P.V], [2, 4, P.V]]:
 		game.debug_set_piece(spec[0], spec[1], spec[2])
+	var above: Tile = game.grid.get_tile(2, 5)  # Make sure the loop ends on an empty tile.
+	above.kind = Tile.EMPTY
+	above.clear_pipe()
+	above.powerup = Tile.PU_NONE
 	key(KEY_F)
 	await frames(1)
 	check(game.state == S.RUNNING and game.fast_forward, "F during countdown starts the flow in fast-forward")
@@ -227,7 +208,7 @@ func _run() -> void:
 	check(game.height_speed() > 2.5, "flow speeds up with height (%.2fx)" % game.height_speed())
 	check(peak_rows <= Tuning.KEEP_ROWS_BELOW + 40, "rows in memory stay bounded (peak %d)" % peak_rows)
 	check(game.grid.floor_row > 100, "old rows discarded (floor at %d)" % game.grid.floor_row)
-	print("long run: height %d, score %d, crosses %d, bonuses %d, bombs %d, wildcards %d" % [game.height, game.score, game.crosses, game.bonuses, game.bombs, game.wildcards])
+	print("long run: height %d, score %d, crosses %d, wildcards %d" % [game.height, game.score, game.crosses, game.wildcards])
 
 	# Stop laying pipe: the run must end on its own.
 	guard = 0
@@ -270,7 +251,7 @@ func _run() -> void:
 				dst = Vector2i(c, r)
 	check(src.x >= 0 and dst.x >= 0, "unlocked rows hold pipes and open spots")
 	if src.x >= 0 and dst.x >= 0:
-		var piece: int = game.grid.get_tile(src.x, src.y).piece
+		var piece: int = game.grid.get_tile(src.x, src.y).get_item()
 		click(tile_center(src.x, src.y))
 		await frames(1)
 		check(game.held_piece == piece and game.held_from == src, "clicking a pipe picks it up")
@@ -280,8 +261,23 @@ func _run() -> void:
 		click(tile_center(src.x, src.y))
 		click(tile_center(dst.x, dst.y))
 		await frames(1)
-		check(game.grid.get_tile(dst.x, dst.y).piece == piece and game.grid.get_tile(src.x, src.y).piece == -1 and game.held_piece == -1,
+		check(game.grid.get_tile(dst.x, dst.y).get_item() == piece and game.grid.get_tile(src.x, src.y).piece == -1 and game.held_piece == -1,
 				"clicking an open spot moves the pipe there")
+	# A narrow pipe stays narrow when it is moved.
+	var nsrc: Tile = game.grid.get_tile(1, 1)
+	var ndst: Tile = game.grid.get_tile(5, 1)
+	for t in [nsrc, ndst]:
+		t.hidden = false
+		t.kind = Tile.EMPTY
+		t.fixed = false
+		t.special = Tile.SP_NONE
+	nsrc.set_item(P.item(P.V, true))
+	ndst.set_item(-1)
+	game.grid.touch(1)
+	click(tile_center(1, 1))
+	click(tile_center(5, 1))
+	await frames(1)
+	check(ndst.piece == P.V and ndst.narrow and not nsrc.narrow and nsrc.piece == -1, "a narrow pipe stays narrow when moved")
 	# An alarm trap.
 	var trap: Tile = null
 	for c in Tuning.COLS:

@@ -13,6 +13,7 @@ const W_CHANNEL := 0.13
 const W_GOO := 0.21
 const FLANGE_LEN := 0.58
 const FLANGE_DEPTH := 0.10
+const NARROW_SCALE := 0.6     ## Width of a narrow pipe relative to a normal one.
 
 static var _font: Font
 static var _tank_sb: StyleBoxFlat
@@ -146,41 +147,54 @@ static func _flange(ci: CanvasItem, center: Vector2, T: float, side: int, dark: 
 
 ## A pipe piece. With `tile`, draws its goo, one-way arrows and reservoir tank.
 static func draw_pipe(ci: CanvasItem, center: Vector2, T: float, piece: int, pal: Dictionary,
-		tile: Tile = null, alpha := 1.0, time := 0.0, bubbles := true) -> void:
+		tile: Tile = null, alpha := 1.0, time := 0.0, bubbles := true, narrow := false) -> void:
 	var oneway := tile != null and tile.special == Tile.SP_ONEWAY
+	# Narrow pipes: a thin tube between full-size couplings, with a yellow collar.
+	var thin := narrow or (tile != null and tile.narrow)
+	var k := NARROW_SCALE if thin else 1.0
 	var reservoir := tile != null and tile.special == Tile.SP_RESERVOIR
 	var metal: Color = fade(pal["brass"] if oneway else pal["metal"], alpha)
 	var dark: Color = fade(pal["brass_dark"] if oneway else pal["metal_dark"], alpha)
 	var light: Color = fade(pal["metal_light"], alpha)
 	var shade: Color = fade((pal["brass"] if oneway else pal["metal"]).darkened(0.35), alpha)
 	var chan: Color = fade((pal["brass"] if oneway else pal["metal"]).darkened(0.55), alpha)
+	if thin:
+		# Copper, so narrow pipes stand out even at PS1 resolution (one-way pipes are brass).
+		metal = fade(Color("d0703c"), alpha)
+		dark = fade(Color("4a1e0c"), alpha)
+		light = fade(Color("ffc8a4"), alpha)
+		shade = fade(Color("8c4224"), alpha)
+		chan = fade(Color("3a1408"), alpha)
 	var chans := Pieces.channels(piece)
 	for i in chans.size():
 		var a: int = chans[i][0]
 		var b: int = chans[i][1]
-		stroke(ci, center, T, a, b, W_OUTLINE * T, dark)
-		stroke(ci, center, T, a, b, W_BODY * T, metal)
-		stroke(ci, center, T, a, b, W_HILITE * T, fade(light, 0.8), 0.0, 1.0, W_BODY * T * 0.3)
-		stroke(ci, center, T, a, b, W_HILITE * T, shade, 0.0, 1.0, -W_BODY * T * 0.3)
+		stroke(ci, center, T, a, b, W_OUTLINE * T * k, dark)
+		stroke(ci, center, T, a, b, W_BODY * T * k, metal)
+		stroke(ci, center, T, a, b, W_HILITE * T * k, fade(light, 0.8), 0.0, 1.0, W_BODY * T * k * 0.3)
+		stroke(ci, center, T, a, b, W_HILITE * T * k, shade, 0.0, 1.0, -W_BODY * T * k * 0.3)
 		_flange(ci, center, T, a, dark, metal, light)
 		_flange(ci, center, T, b, dark, metal, light)
-		stroke(ci, center, T, a, b, W_CHANNEL * T, chan)
-		stroke(ci, center, T, a, b, W_CHANNEL * T * 0.35, fade(Color(0, 0, 0, 0.35), alpha), 0.0, 1.0, W_CHANNEL * T * 0.25)
+		if thin:
+			# One dark crimp ring in the middle.
+			stroke(ci, center, T, a, b, W_OUTLINE * T * 0.85, dark, 0.44, 0.56)
+		stroke(ci, center, T, a, b, W_CHANNEL * T * k, chan)
+		stroke(ci, center, T, a, b, W_CHANNEL * T * k * 0.35, fade(Color(0, 0, 0, 0.35), alpha), 0.0, 1.0, W_CHANNEL * T * k * 0.25)
 		if oneway:
 			_chevrons(ci, center, T, tile.oneway_entry, Pieces.exit_dir(piece, tile.oneway_entry), fade(pal["brass"].lightened(0.45), alpha))
 		if tile != null and not reservoir:
 			var ch := i if piece == Pieces.CROSS else 0
 			if tile.fill_entry[ch] >= 0:
 				var en: int = tile.fill_entry[ch]
-				goo(ci, center, T, en, Pieces.exit_dir(piece, en), tile.fill[ch], tile.fill_color[ch], alpha, time, tile.rnd + i * 37, bubbles)
+				goo(ci, center, T, en, Pieces.exit_dir(piece, en), tile.fill[ch], tile.fill_color[ch], alpha, time, tile.rnd + i * 37, bubbles, k)
 	if reservoir:
 		_tank(ci, center, T, tile, pal, alpha, time)
 
 
 ## Goo inside a channel, from the entry side up to progress p.
 static func goo(ci: CanvasItem, center: Vector2, T: float, en: int, ex: int, p: float, col: Color,
-		alpha := 1.0, time := 0.0, rnd := 0, bubbles := true) -> void:
-	var w := W_GOO * T
+		alpha := 1.0, time := 0.0, rnd := 0, bubbles := true, w_scale := 1.0) -> void:
+	var w := W_GOO * T * w_scale
 	var c := fade(col, alpha)
 	stroke(ci, center, T, en, ex, w, c, 0.0, p)
 	stroke(ci, center, T, en, ex, w * 0.3, fade(col.lightened(0.6), 0.85 * alpha), 0.0, p, w * 0.22)
@@ -322,33 +336,10 @@ static func draw_rock(ci: CanvasItem, center: Vector2, T: float, tile: Tile, pal
 	ci.draw_line(center + Vector2(-0.05, 0.05) * T, center + Vector2(0.1, 0.16) * T, fade(pal["rock_dark"], 0.8), maxf(1.5, T * 0.025), aa)
 
 
-static func draw_coin(ci: CanvasItem, pos: Vector2, radius: float, value: int, time: float, show_text := true, bob := true) -> void:
-	if bob:
-		pos.y += sin(time * 3.0 + pos.x * 0.05) * radius * 0.08
-	ci.draw_circle(pos + Vector2(radius * 0.1, radius * 0.16), radius, Color(0, 0, 0, 0.3))
-	ci.draw_circle(pos, radius, Color("8a5a00"))
-	ci.draw_circle(pos, radius * 0.84, Color("ffc928"))
-	ci.draw_circle(pos + Vector2(-0.2, -0.2) * radius, radius * 0.4, Color(1, 1, 0.8, 0.35))
-	var star := PackedVector2Array()
-	var spin := time * 1.5
-	for i in 10:
-		var rr := radius * (0.55 if i % 2 == 0 else 0.24)
-		star.append(pos + Vector2.from_angle(-PI / 2 + i * PI / 5 + sin(spin) * 0.1) * rr)
-	ci.draw_colored_polygon(star, Color("fff6c0"))
-	if show_text:
-		var fs := int(maxf(10.0, radius * 0.75))
-		var txt := "+%d" % value
-		var tp := pos + Vector2(-radius * 2.0, radius + fs * 1.0)
-		ci.draw_string_outline(font(), tp, txt, HORIZONTAL_ALIGNMENT_CENTER, radius * 4.0, fs, int(fs * 0.35), Color(0.2, 0.1, 0.0))
-		ci.draw_string(font(), tp, txt, HORIZONTAL_ALIGNMENT_CENTER, radius * 4.0, fs, Color("fff2a0"))
-
-
 static func powerup_color(kind: int) -> Color:
 	match kind:
 		Tile.PU_SLOW:
 			return Color("4ab8ff")
-		Tile.PU_BOMB:
-			return Color("ff4a3a")
 		Tile.PU_WILD:
 			return Color("d66bff")
 	return Color.WHITE
@@ -369,15 +360,6 @@ static func draw_powerup(ci: CanvasItem, pos: Vector2, radius: float, kind: int,
 			ci.draw_line(pos, pos + Vector2.from_angle(t - PI / 2) * radius * 0.55, Color("0d3a66"), maxf(2.0, radius * 0.12), aa)
 			ci.draw_line(pos, pos + Vector2.from_angle(t * 0.08 - PI / 2 + 2.0) * radius * 0.38, Color("0d3a66"), maxf(2.0, radius * 0.14), aa)
 			ci.draw_circle(pos, radius * 0.1, Color("ff4a3a"))
-		Tile.PU_BOMB:
-			ci.draw_line(pos + Vector2(radius * 0.35, -radius * 0.7), pos + Vector2(radius * 0.7, -radius * 1.05), Color("c89a5a"), maxf(2.0, radius * 0.12), aa)
-			var flick := 0.7 + 0.3 * sin(time * 30.0)
-			ci.draw_circle(pos + Vector2(radius * 0.72, -radius * 1.08), radius * 0.2 * flick, Color("ffd23a"))
-			ci.draw_circle(pos + Vector2(radius * 0.72, -radius * 1.08), radius * 0.1 * flick, Color.WHITE)
-			ci.draw_circle(pos, radius * 0.9, Color("101014"))
-			ci.draw_circle(pos, radius * 0.78, Color("2e2e38"))
-			ci.draw_circle(pos + Vector2(-0.3, -0.3) * radius, radius * 0.24, Color(1, 1, 1, 0.45))
-			ci.draw_rect(Rect2(pos + Vector2(radius * 0.12, -radius * 0.95), Vector2(radius * 0.4, radius * 0.3)), Color("55555f"))
 		Tile.PU_WILD:
 			var hue := fposmod(time * 0.25, 1.0)
 			ci.draw_circle(pos, radius, Color.from_hsv(hue, 0.8, 0.5))

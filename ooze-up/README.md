@@ -35,15 +35,20 @@ resolution. The board takes about 130 draw calls, and game scripts take about
 
 ## Modes
 
-Pick the mode on the title screen (the choice is remembered).
+The main menu has one button, NEW GAME. The game plays in unlock mode; set
+`DEFAULT_MODE` in `scripts/tuning.gd` to `"classic"` for the piece-queue game.
 
-- **Unlock** (default, like BioShock's hacking): every tile starts locked,
+- **Unlock** (like BioShock's hacking): every tile starts locked,
   face-down. Click or tap a locked tile to flip it and see what's under it: a
   pipe, an open spot, a rock, or an alarm trap. Click a pipe to pick it up,
   then click an open spot or another pipe to swap them (click it again to put
   it back). Goo that reaches a locked tile spills, so unlock ahead of it. An
   alarm costs 100 points and makes the goo surge for a few seconds.
 - **Classic**: the board is open and you place pieces from a queue of five.
+
+**Narrow pipes** (copper, with a crimp in the middle) connect like normal
+pipes but the goo takes 2.5x as long to get through them, so swap them onto
+the goo's path to buy time.
 
 ## Controls
 
@@ -68,14 +73,12 @@ Pick the mode on the title screen (the choice is remembered).
   a pipe that is already full, or a one-way pipe from the wrong side.
 - Pieces: straight horizontal and vertical, four corners and a cross. A cross can
   be filled twice, once each way, for +100.
-- Scoring: +10 per filled segment, bonus tiles add their value, and every 25 rows
-  add +0.5x to the multiplier. Fast-forward doubles all points.
-- Obstacles grow with height: rocks, then bonus tiles, one-way pipes (brass, with
-  arrows) and reservoirs (tanks that take 4x as long to fill and buy you time).
-- Power-ups (picked up when goo passes): **Slow-mo** (half speed for 8 s),
-  **Bomb** (your next click on a rock or dry pipe clears it for free; clicking an
-  empty tile still places a piece and keeps the bomb), **Wildcard** (choose the
-  next piece).
+- Scoring: +10 per filled segment, +100 for a cross filled both ways, and every
+  25 rows add +0.5x to the multiplier. Fast-forward doubles all points.
+- Obstacles grow with height: rocks, one-way pipes (brass, with arrows) and
+  reservoirs (tanks that take 4x as long to fill and buy you time).
+- Power-ups (picked up when goo passes): **Slow-mo** (half speed for 8 s) and
+  **Wildcard** (choose any piece).
 - Every 50 rows the zone changes: Sewer > Factory > Neon > Magma > Space, then
   the cycle repeats.
 - The level is always solvable: each row carries a guaranteed path that only
@@ -97,7 +100,7 @@ Every difficulty knob is in [`scripts/tuning.gd`](scripts/tuning.gd):
 | `RESERVOIR_FILL_FACTOR` | 4 | How much slower reservoirs fill |
 | `REPLACE_LOCK_TIME` / `REPLACE_PENALTY` | 1 s / 50 | Cost of replacing a pipe |
 | `PIECE_WEIGHTS` | 16,16,14,14,14,14,5 | Piece odds (crosses rarest) |
-| `DEFAULT_MODE` | "unlock" | Mode on first launch ("unlock" or "classic") |
+| `DEFAULT_MODE` | "unlock" | Game mode ("unlock" or "classic") |
 | `UNLOCK_PIECE_FILL` | 0.72 | Chance a locked tile hides a pipe (else an open spot) |
 | `UNLOCK_SPINE_PIECE_CHANCE` | 0.5 | Chance a path tile already hides the pipe it needs |
 | `ALARM_START_ROW` / `ALARM_CHANCE` | 15 / 0.07 | Alarm traps |
@@ -108,11 +111,11 @@ Every difficulty knob is in [`scripts/tuning.gd`](scripts/tuning.gd):
 | `SAFE_ROWS` | 5 | Obstacle-free rows at the start |
 | `ROCK_BASE` / `ROCK_PER_ROW` / `ROCK_MAX` | 0.10 / 0.0025 / 0.40 | Rock density and growth |
 | `MAX_ROCKS_PER_ROW` | 4 | Hard cap per row |
-| `BONUS_START_ROW` / `BONUS_CHANCE` / `BONUS_VALUES` | 12 / 0.045 / 50,100,250 | Bonus tiles |
 | `ONEWAY_START_ROW` / `ONEWAY_CHANCE` / `ONEWAY_ON_PATH_CHANCE` | 35 / 0.035 / 0.09 | One-way pipes |
 | `RESERVOIR_START_ROW` / `RESERVOIR_CHANCE` / `RESERVOIR_ON_PATH_CHANCE` | 55 / 0.012 / 0.06 | Reservoirs |
 | `POWERUP_START_ROW` / `POWERUP_CHANCE` / `POWERUP_MIN_GAP` | 8 / 0.12 / 6 | Power-up frequency |
-| `POWERUP_WEIGHTS` | 40,35,25 | Slow-mo, bomb, wildcard odds |
+| `POWERUP_WEIGHTS` | 55,45 | Slow-mo, wildcard odds |
+| `NARROW_FILL_FACTOR` / `NARROW_CHANCE` / `NARROW_START_ROW` | 2.5 / 0.16 / 3 | Narrow pipes: slowdown, how often, from which row |
 | `SPINE_SHIFT_WEIGHTS` | 40,38,16,6 | How far the guaranteed path drifts sideways per row |
 | `ZONE_ROWS` | 50 | Rows per zone |
 | `CAMERA_LEAD_FRACTION` / `CAMERA_STIFFNESS` | 0.33 / 3.0 | Camera follow |
@@ -123,7 +126,7 @@ Every difficulty knob is in [`scripts/tuning.gd`](scripts/tuning.gd):
 | `UI_BASE_MAX` / `UI_BASE_MIN` | 720 / 480 | Virtual resolution on big screens / phones (smaller = bigger UI) |
 | `MIN_VISIBLE_ROWS` / `MIN_VISIBLE_ROWS_COMPACT` | 10 / 7 | Rows that always fit on screen / on short screens |
 
-Each zone also scales the obstacle mix (`rock_mult`, `bonus_mult`, ...) in
+Each zone also scales the obstacle mix (`rock_mult`, `oneway_mult`, ...) in
 [`scripts/zones.gd`](scripts/zones.gd).
 
 ## Code map
@@ -144,7 +147,7 @@ Each zone also scales the obstacle mix (`rock_mult`, `bonus_mult`, ...) in
 | `ps1_screen.gdshader` | 15-bit colour and ordered dither for the low-res board |
 | `input_handler.gd` | Mouse, touch and keyboard |
 | `ui.gd` | HUD, banners, title / pause / game-over screens |
-| `title_backdrop.gd` | The main screen's background: gradient, bubbles, flowing pipes |
+| `title_backdrop.gd` | The menu's background: gradient, bubbles, flowing pipes |
 | `sfx.gd` | Synthesised sound effects |
 | `save_data.gd` | High score (localStorage on the web, a config file elsewhere) |
 
@@ -161,7 +164,7 @@ godot --headless --fixed-fps 60 --script res://tests/game_test.gd
 `run_tests.gd` checks every piece from every entry side, the cross both ways,
 every way the goo can be stopped, and generates 250 seeds x 420 rows to prove
 each one solvable. `game_test.gd` drives the real scene with input events:
-placing, replacing, bombs, wildcards, pause, the countdown, a cross scored in
+the NEW GAME menu, placing, replacing, unlocking and swapping, narrow pipes, alarms, wildcards, pause, the countdown, a cross scored in
 game, and a 165-row run through four zones.
 
 For profiling in a browser, add `?fps` to the URL to log frame rate and draw

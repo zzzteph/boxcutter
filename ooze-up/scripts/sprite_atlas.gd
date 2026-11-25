@@ -2,7 +2,7 @@
 ##  SPRITE ATLAS - the vector art, rasterised once per zone into textures.
 ## ============================================================================
 ## Drawing a pipe with vector calls costs ~15 GPU draw calls. Instead every
-## static look (tile, dry/full pipe, rock, wall, pickup...) is painted once into
+## static look (tile, dry/full/narrow pipe, rock, wall, power-up, locked plate) is painted once into
 ## an off-screen SubViewport at the exact on-screen pixel size, and the board
 ## draws textured quads that the renderer batches together. Atlas textures hold
 ## premultiplied alpha, so whatever draws them uses `premult_material`.
@@ -24,15 +24,14 @@ const RES_FULL := 38      ## + 0 vertical / 1 horizontal
 const ROCK := 40          ## + variant (8)
 const ROCK_VARIANTS := 8
 const WALL := 48
-const COIN_SMALL := 49
-const COIN := 50          ## + value tier (3)
-const PU := 53            ## + power-up kind - 1 (3)
-const LOCKED := 56        ## Unlock mode: a face-down tile.
-const COUNT := 57
+const PU := 49            ## + power-up kind - 1 (2)
+const LOCKED := 51        ## Unlock mode: a face-down tile.
+const NARROW := 52        ## + piece (6): narrow pipes, dry.
+const NARROW_FULL := 58   ## + piece (6): narrow pipes, full of goo.
+const COUNT := 64
 const GRID := 8
 const GUTTER := 2
 
-const COIN_R := 0.42      ## Coin radius in the small-coin cell, as a fraction of the cell.
 const PU_R := 0.36        ## Power-up radius in its cell.
 
 
@@ -45,11 +44,12 @@ class Painter:
 
 	func _draw() -> void:
 		var pal := Zones.theme(zone)
-		var n := Pieces.COUNT if icons else SpriteAtlas.COUNT
+		var n := Pieces.ICON_COUNT if icons else SpriteAtlas.COUNT
 		for i in n:
 			var rect := Rect2(SpriteAtlas.cell_origin(i, cell), Vector2(cell, cell))
 			if icons:
-				PipeArt.draw_pipe(self, rect.get_center(), cell, i, pal)
+				# Icons 0-6: the pieces; 7-12: narrow versions of pieces 0-5.
+				PipeArt.draw_pipe(self, rect.get_center(), cell, i % Pieces.COUNT, pal, null, 1.0, 0.0, false, i >= Pieces.COUNT)
 			else:
 				SpriteAtlas.paint_cell(self, i, rect, pal)
 
@@ -121,7 +121,7 @@ func ensure(tile_pixels: int, icon_pixels: int) -> bool:
 	for vps in [_tile_vps, _icon_vps]:
 		var icons: bool = vps == _icon_vps
 		var cell := icon_px if icons else tile_px
-		var n := Pieces.COUNT if icons else COUNT
+		var n := Pieces.ICON_COUNT if icons else COUNT
 		var stride := cell + GUTTER * 2
 		var cols := mini(n, GRID)
 		var rows := int(ceil(n / float(GRID)))
@@ -146,8 +146,14 @@ func region(i: int) -> Rect2:
 	return Rect2(cell_origin(i, tile_px), Vector2(tile_px, tile_px))
 
 
-func icon_region(piece: int) -> Rect2:
-	return Rect2(cell_origin(piece, icon_px), Vector2(icon_px, icon_px))
+## Icon for a pipe item (piece, or narrow piece).
+func icon_region(it: int) -> Rect2:
+	return Rect2(cell_origin(Pieces.icon_index(it), icon_px), Vector2(icon_px, icon_px))
+
+
+## Tile-atlas cell showing a dry pipe item (for hover ghosts).
+static func item_cell(it: int) -> int:
+	return (NARROW if Pieces.item_narrow(it) else EMPTY) + Pieces.item_piece(it)
 
 
 ## The atlas cell that shows tile `t` as it is now, or -1 if it must be drawn live
@@ -164,6 +170,8 @@ static func sprite_for(t: Tile) -> int:
 	for ch in 2:
 		if full[ch] and t.fill[ch] < 1.0:
 			return -1
+	if t.narrow:
+		return (NARROW_FULL if full[0] else NARROW) + p
 	match t.special:
 		Tile.SP_RESERVOIR:
 			return (RES_FULL if full[0] else RES) + (0 if p == Pieces.V else 1)
@@ -180,11 +188,6 @@ static func sprite_for(t: Tile) -> int:
 			return CROSS_V
 		return EMPTY + p
 	return (FULL if full[0] else EMPTY) + p
-
-
-static func coin_cell(value: int) -> int:
-	var tier := Tuning.BONUS_VALUES.find(value)
-	return COIN + clampi(tier, 0, 2)
 
 
 static var _shapes: Array = []
@@ -253,20 +256,22 @@ static func paint_cell(ci: CanvasItem, i: int, rect: Rect2, pal: Dictionary) -> 
 		ci.draw_rect(Rect2(x + ww * 0.2, rect.position.y, ww * 0.15, T), wall.lightened(0.3))
 		ci.draw_circle(Vector2(x + ww * 0.5, c.y), ww * 0.16, wall.darkened(0.5))
 		ci.draw_circle(Vector2(x + ww * 0.45, c.y - ww * 0.04), ww * 0.08, wall.lightened(0.4))
-	elif i == COIN_SMALL:
-		PipeArt.draw_coin(ci, c, T * COIN_R, 0, 0.0, false, false)
-	elif i >= COIN and i < COIN + 3:
-		PipeArt.draw_coin(ci, c + Vector2(0, -T * 0.06), T * 0.22, Tuning.BONUS_VALUES[i - COIN], 0.0, true, false)
-	elif i >= PU and i < PU + 3:
+	elif i >= PU and i < PU + 2:
 		PipeArt.draw_powerup(ci, c, T * PU_R, i - PU + 1, 0.0, false)
 	elif i == LOCKED:
 		PipeArt.draw_locked(ci, rect, pal)
+	elif i >= NARROW and i < NARROW + 6:
+		PipeArt.draw_pipe(ci, c, T, i - NARROW, pal, null, 1.0, 0.0, false, true)
+	elif i >= NARROW_FULL and i < NARROW_FULL + 6:
+		_paint_full(ci, c, T, i - NARROW_FULL, pal, [true, false], Tile.SP_NONE, -1, true)
 
 
-static func _paint_full(ci: CanvasItem, c: Vector2, T: float, piece: int, pal: Dictionary, full: Array, special: int, entry: int) -> void:
+static func _paint_full(ci: CanvasItem, c: Vector2, T: float, piece: int, pal: Dictionary, full: Array, special: int, entry: int,
+		narrow := false) -> void:
 	var goo: Color = pal["goo"]
 	var t := Tile.new()
 	t.piece = piece
+	t.narrow = narrow
 	t.special = special
 	t.oneway_entry = entry
 	var chans := Pieces.channels(piece)
@@ -278,5 +283,5 @@ static func _paint_full(ci: CanvasItem, c: Vector2, T: float, piece: int, pal: D
 			t.fill[ch] = 1.0
 			t.fill_color[ch] = goo
 			# Baked glow halo under the pipe.
-			PipeArt.stroke(ci, c, T, a, b, PipeArt.W_GOO * T * 2.5, PipeArt.fade(goo, 0.16))
+			PipeArt.stroke(ci, c, T, a, b, PipeArt.W_GOO * T * (1.6 if narrow else 2.5), PipeArt.fade(goo, 0.16))
 	PipeArt.draw_pipe(ci, c, T, piece, pal, t, 1.0, 0.0, false)

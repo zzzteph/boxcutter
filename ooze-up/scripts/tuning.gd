@@ -30,6 +30,9 @@ const FAST_FORWARD_SCORE_MULT := 2.0 ## Points multiplier while fast-forwarding.
 const SLOWMO_MULT := 0.5             ## Flow multiplier while slow-mo is active.
 const SLOWMO_DURATION := 8.0         ## Seconds of slow-mo per pickup.
 const RESERVOIR_FILL_FACTOR := 4.0   ## Reservoir tiles take this many times longer to fill.
+const NARROW_FILL_FACTOR := 2.5      ## Narrow pipes take this many times longer to fill.
+const NARROW_CHANCE := 0.16          ## Chance a pipe (hidden or in the queue) is narrow.
+const NARROW_START_ROW := 3          ## Narrow pipes turn up from this row (unlock mode).
 
 # --- Placement --------------------------------------------------------------
 const QUEUE_SIZE := 5                ## Pieces shown in the queue.
@@ -68,9 +71,6 @@ const ROCK_BASE := 0.10              ## Rock chance per off-path tile at SAFE_RO
 const ROCK_PER_ROW := 0.0025         ## Extra rock chance per row.
 const ROCK_MAX := 0.40               ## Rock chance cap (before zone multiplier).
 const MAX_ROCKS_PER_ROW := 4         ## Never more rocks than this in one row.
-const BONUS_START_ROW := 12          ## Bonus tiles appear from this row.
-const BONUS_CHANCE := 0.045          ## Chance per free tile.
-const BONUS_VALUES := [50, 100, 250] ## Possible bonus values (rarer to the right).
 const ONEWAY_START_ROW := 35         ## One-way pipes appear from this row.
 const ONEWAY_CHANCE := 0.035         ## Chance per free off-path tile.
 const ONEWAY_ON_PATH_CHANCE := 0.09  ## Chance per row that the safe path gets a one-way pipe.
@@ -80,8 +80,8 @@ const RESERVOIR_ON_PATH_CHANCE := 0.06 ## Chance per row that the safe path gets
 const POWERUP_START_ROW := 8         ## Power-ups appear from this row.
 const POWERUP_CHANCE := 0.12         ## Chance per row (after the minimum gap).
 const POWERUP_MIN_GAP := 6           ## Minimum rows between power-ups.
-## Power-up weights: slow-mo, bomb, wildcard.
-const POWERUP_WEIGHTS := [40, 35, 25]
+## Power-up weights: slow-mo, wildcard.
+const POWERUP_WEIGHTS := [55, 45]
 ## How far the guaranteed path drifts sideways per row: weights for 0, 1, 2, 3 columns.
 const SPINE_SHIFT_WEIGHTS := [40, 38, 16, 6]
 

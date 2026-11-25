@@ -24,7 +24,7 @@ var grid := Grid.new()
 var gen := LevelGenerator.new()
 var flow := Flow.new()
 var cam := GameCamera.new()
-var queue: Array[int] = []
+var queue: Array[int] = []        ## Classic mode: upcoming pipe items (see Pieces.item).
 var rng := RandomNumberGenerator.new()
 
 var renderer: BoardRenderer
@@ -43,7 +43,6 @@ var height := 0            ## Highest row the goo has reached.
 var countdown := 0.0
 var fast_forward := false
 var slow_timer := 0.0
-var bombs := 0
 var wildcards := 0
 var lock_timer := 0.0
 var queue_shift := 0.0     ## 1 -> 0 slide animation after a placement.
@@ -53,12 +52,11 @@ var spill := {}
 var spill_timer := 0.0
 var new_best := false
 var crosses := 0
-var bonuses := 0
 var last_reason := ""
 var _beeped := 0
 # Unlock mode
 var held_from := Vector2i(-1, -1)  ## Tile whose pipe is picked up ((-1,-1) = from a wildcard).
-var held_piece := -1               ## Pipe in hand, -1 = empty hand.
+var held_piece := -1               ## Pipe item in hand (see Pieces.item), -1 = empty hand.
 var surge_timer := 0.0             ## Alarm surge time left.
 var flips := 0
 var alarms := 0
@@ -109,9 +107,6 @@ func _ready() -> void:
 	ui.game = self
 	add_child(ui)
 	best = SaveData.load_best()
-	var saved_mode := str(SaveData.load_setting("mode", Tuning.DEFAULT_MODE))
-	if saved_mode == "unlock" or saved_mode == "classic":
-		mode = saved_mode
 	_read_debug_flags()
 	_compute_layout()
 	new_board(rng.randi())
@@ -164,7 +159,6 @@ func new_board(seed_value: int) -> void:
 	height = 0
 	fast_forward = false
 	slow_timer = 0.0
-	bombs = 0
 	wildcards = 0
 	lock_timer = 0.0
 	queue_shift = 0.0
@@ -173,7 +167,6 @@ func new_board(seed_value: int) -> void:
 	spill_timer = 0.0
 	new_best = false
 	crosses = 0
-	bonuses = 0
 	last_reason = ""
 	countdown = Tuning.COUNTDOWN_TIME
 	_beeped = 0
@@ -193,15 +186,6 @@ func start_run() -> void:
 	state = State.COUNTDOWN
 	ui.show_play()
 	sfx.play("click")
-
-
-func set_mode(m: String) -> void:
-	if m == mode or (m != "unlock" and m != "classic"):
-		return
-	mode = m
-	SaveData.save_setting("mode", m)
-	if state == State.TITLE:
-		new_board(rng.randi())
 
 
 func go_to_title() -> void:
@@ -233,9 +217,9 @@ func _random_piece() -> int:
 				break
 		# Avoid three of the same piece in a row.
 		var n := queue.size()
-		if not (n >= 2 and queue[n - 1] == p and queue[n - 2] == p):
+		if not (n >= 2 and Pieces.item_piece(queue[n - 1]) == p and Pieces.item_piece(queue[n - 2]) == p):
 			break
-	return p
+	return Pieces.item(p, rng.randf() < Tuning.NARROW_CHANCE)
 
 
 # --- frame update --------------------------------------------------------------------
@@ -356,13 +340,8 @@ func _handle_event(e: Dictionary) -> void:
 					sfx.play("zone")
 			var t: Tile = e["tile"]
 			var wp := Vector2(e["col"] + 0.5, e["row"] + 0.5)
-			if t.bonus > 0:
-				var pts := add_points(t.bonus)
-				bonuses += 1
-				renderer.burst(wp, Color("ffd23a"), 28, 4.0, 0.08, 0.9)
-				renderer.float_text(wp, "+%d" % pts, Color("ffe27a"))
-				sfx.play("bonus")
-				t.bonus = 0
+			if t.narrow:
+				renderer.float_text(wp, "SLOW", Color("e8c020"), 0.28, 0.8)
 			if t.powerup != Tile.PU_NONE:
 				_apply_powerup(t.powerup, wp)
 				t.powerup = Tile.PU_NONE
@@ -390,10 +369,6 @@ func _apply_powerup(kind: int, wp: Vector2) -> void:
 			slow_timer += Tuning.SLOWMO_DURATION
 			ui.show_toast("SLOW-MO!  Half speed for %ds" % int(Tuning.SLOWMO_DURATION), col)
 			renderer.float_text(wp, "SLOW-MO", col)
-		Tile.PU_BOMB:
-			bombs += 1
-			ui.show_toast("BOMB!  %s a rock or a dry pipe to blast it" % ("Tap" if is_touch else "Click"), col)
-			renderer.float_text(wp, "BOMB", col)
 		Tile.PU_WILD:
 			wildcards += 1
 			ui.show_toast("WILDCARD!  Choose any piece", col)
@@ -436,20 +411,14 @@ func is_tile_visible(c: int, r: int) -> bool:
 	return cy >= board_rect.position.y and cy <= board_rect.end.y
 
 
-func _bombable(t: Tile) -> bool:
-	return not t.hidden and (t.kind == Tile.ROCK or (t.kind == Tile.EMPTY and t.piece >= 0 and not t.has_goo()))
-
-
-## What clicking tile (c, r) would do. Classic: place, replace, bomb, locked
-## or no. Unlock: flip, pick, drop, deselect, bomb or no.
+## What clicking tile (c, r) would do. Classic: place, replace, locked or no.
+## Unlock: flip, pick, drop, deselect or no.
 func placement_mode(c: int, r: int) -> String:
 	var t := grid.get_tile(c, r)
 	if t == null or not is_tile_visible(c, r):
 		return "no"
 	if mode == "unlock":
 		return _unlock_action(t, c, r)
-	if bombs > 0 and _bombable(t):
-		return "bomb"
 	if t.kind != Tile.EMPTY or t.has_goo() or t.fixed:
 		return "no"
 	if lock_timer > 0.0:
@@ -465,14 +434,12 @@ func try_place(c: int, r: int) -> String:
 	var action := placement_mode(c, r)
 	var t := grid.get_tile(c, r)
 	var wp := Vector2(c + 0.5, r + 0.5)
-	if action == "bomb" or action == "place" or action == "replace":
+	if action == "place" or action == "replace":
 		grid.touch(r)
 		renderer.animate_row(r, time + 0.45)
 	match action:
-		"bomb":
-			_bomb(t, wp)
 		"place", "replace":
-			t.piece = queue.pop_front()
+			t.set_item(queue.pop_front())
 			queue.append(_random_piece())
 			queue_shift = 1.0
 			t.placed_at = time
@@ -493,18 +460,6 @@ func try_place(c: int, r: int) -> String:
 	return action
 
 
-func _bomb(t: Tile, wp: Vector2) -> void:
-	bombs -= 1
-	t.kind = Tile.EMPTY
-	t.shape = PackedVector2Array()
-	t.clear_pipe()
-	renderer.burst(wp, Color("ff9a3a"), 34, 5.0, 0.1, 0.8, 4.0)
-	renderer.burst(wp, Color(0.55, 0.55, 0.55), 16, 3.0, 0.08, 0.9, 8.0, false)
-	renderer.float_text(wp, "BOOM!", Color("ff9a3a"))
-	cam.add_shake(0.35)
-	sfx.play("bomb")
-
-
 # --- unlock mode (BioShock-style) -------------------------------------------------------------
 
 func _unlock_action(t: Tile, c: int, r: int) -> String:
@@ -516,9 +471,6 @@ func _unlock_action(t: Tile, c: int, r: int) -> String:
 		if t.is_slot() or t.is_loose():
 			return "drop"
 		return "no"
-	# In unlock mode loose pipes are picked up, so bombs are for rocks and fixed pipes.
-	if bombs > 0 and not t.hidden and (t.kind == Tile.ROCK or (t.kind == Tile.EMPTY and t.fixed and not t.has_goo())):
-		return "bomb"
 	if t.is_loose():
 		return "pick"
 	return "no"
@@ -547,20 +499,20 @@ func _unlock_click(c: int, r: int) -> String:
 				_trigger_alarm(wp)
 		"pick":
 			held_from = Vector2i(c, r)
-			held_piece = t.piece
+			held_piece = t.get_item()
 			sfx.play("pick")
 		"deselect":
 			_clear_hand()
 			sfx.play("click")
 		"drop":
 			var src: Tile = grid.get_tile(held_from.x, held_from.y) if held_from.x >= 0 else null
-			var old := t.piece
-			t.piece = held_piece
+			var old := t.get_item()
+			t.set_item(held_piece)
 			t.placed_at = time
 			grid.touch(r)
 			renderer.animate_row(r, time + 0.45)
 			if src != null:
-				src.piece = old
+				src.set_item(old)
 				if old >= 0:
 					src.placed_at = time
 				grid.touch(held_from.y)
@@ -568,10 +520,6 @@ func _unlock_click(c: int, r: int) -> String:
 			_clear_hand()
 			sfx.play("place", 0.95 + randf() * 0.1)
 			renderer.burst(wp, Color(1, 1, 1, 0.7), 6, 1.5, 0.05, 0.35, 0.0, false)
-		"bomb":
-			_bomb(t, wp)
-			grid.touch(r)
-			renderer.animate_row(r, time + 0.45)
 		_:
 			sfx.play("deny")
 	return action
@@ -599,7 +547,7 @@ func _check_hand() -> void:
 	if held_piece < 0 or held_from.x < 0:
 		return
 	var t := grid.get_tile(held_from.x, held_from.y)
-	if t == null or not t.is_loose() or t.piece != held_piece or not is_tile_visible(held_from.x, held_from.y):
+	if t == null or not t.is_loose() or t.get_item() != held_piece or not is_tile_visible(held_from.x, held_from.y):
 		_clear_hand()
 
 
@@ -613,9 +561,6 @@ func on_pointer_move(pos: Vector2, touch := false) -> void:
 
 
 func on_pointer_press(pos: Vector2, touch := false) -> void:
-	if state == State.TITLE:
-		start_run()
-		return
 	if state != State.COUNTDOWN and state != State.RUNNING or paused:
 		return
 	if not board_rect.has_point(pos):
@@ -846,7 +791,7 @@ func _autoplay_step() -> void:
 func debug_set_piece(c: int, r: int, piece: int) -> void:
 	var t := grid.get_tile(c, r)
 	if t != null and t.kind == Tile.EMPTY and not t.has_goo():
-		t.piece = piece
+		t.set_item(piece)
 		t.placed_at = time
 		grid.touch(r)
 		renderer.animate_row(r, time + 0.45)

@@ -21,11 +21,32 @@ const CROSS := 6  ## ┼
 const COUNT := 7
 
 const NAMES := ["─", "│", "┌", "┐", "└", "┘", "┼"]
+
+## A pipe "item" (what the queue and the hand hold) is a piece id plus
+## NARROW_BIT for the narrow, slow variant. Crosses are never narrow.
+const NARROW_BIT := 8
+const ICON_COUNT := 13    ## Icons: the 7 pieces, then narrow versions of the first 6.
 const OPENINGS := [[E, W], [N, S], [S, E], [S, W], [N, E], [N, W], [N, E, S, W]]
 ## Grid step per direction as (col, row), row up.
 const DIR_VEC := [Vector2i(0, 1), Vector2i(1, 0), Vector2i(0, -1), Vector2i(-1, 0)]
 ## Side midpoints in tile-local screen units (center = 0,0, y down, tile = 1x1).
 const SIDE_MID := [Vector2(0, -0.5), Vector2(0.5, 0), Vector2(0, 0.5), Vector2(-0.5, 0)]
+
+
+static func item(piece: int, narrow: bool) -> int:
+	return piece | (NARROW_BIT if narrow and piece != CROSS else 0)
+
+
+static func item_piece(it: int) -> int:
+	return it & 7
+
+
+static func item_narrow(it: int) -> bool:
+	return (it & NARROW_BIT) != 0
+
+
+static func icon_index(it: int) -> int:
+	return 7 + (it & 7) if item_narrow(it) else it & 7
 
 
 static func opposite(d: int) -> int:

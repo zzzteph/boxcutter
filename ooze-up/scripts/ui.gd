@@ -73,8 +73,7 @@ var countdown_sub: Label
 var banner: Label
 var toast: Label
 var title_screen: Control
-var title_best: Label
-var title_prompt: Label
+var new_game_button: Button
 var pause_screen: Control
 var pause_mute: Button
 var over_screen: Control
@@ -95,10 +94,8 @@ var _ff_lit := false
 var _picker_zone := -1
 var _scaled := []          ## [Label, base font size, base outline] scaled to the screen width.
 var _key_buttons := []     ## [Button, mouse/keyboard text, touch text]
-var _help: Label
 var _picker_label: Label
 var _best_box: Control
-var _mode_button: Button
 var _flash: ColorRect
 var _flash_tween: Tween
 
@@ -329,41 +326,19 @@ func _build_title() -> void:
 	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
 	title_screen.add_child(backdrop)
 	title_screen.move_child(backdrop, 0)
+	# A simple menu: the name and one button.
 	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 10)
+	vb.add_theme_constant_override("separation", 36)
 	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_center_of(title_screen).add_child(vb)
 	var logo := _slabel("OOZE UP!", 120, Color("7dff3a"), 30)
 	logo.add_theme_color_override("font_outline_color", Color("0b3a12"))
 	vb.add_child(logo)
-	var tag := _slabel("Lay pipes. Keep the goo flowing. Climb forever.", 24, Color("d8f5d0"), 8)
-	tag.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	vb.add_child(tag)
-	var sp := Control.new()
-	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE  # Spacers must not swallow taps.
-	sp.custom_minimum_size = Vector2(0, 26)
-	vb.add_child(sp)
-	title_prompt = _slabel("CLICK TO START", 40, Color("ffffff"), 12)
-	vb.add_child(title_prompt)
-	_mode_button = _button("", func():
-		game.set_mode("classic" if game.mode == "unlock" else "unlock")
-		_apply_layout(), 420)
-	_mode_button.custom_minimum_size = Vector2(0, 54)
-	_mode_button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	vb.add_child(_mode_button)
-	title_best = _slabel("BEST: 0", 28, Color("ffd23a"), 8)
-	vb.add_child(title_best)
-	var sp2 := Control.new()
-	sp2.mouse_filter = Control.MOUSE_FILTER_IGNORE  # Spacers must not swallow taps.
-	sp2.custom_minimum_size = Vector2(0, 16)
-	vb.add_child(sp2)
-	_help = _slabel("", 16, Color(1, 1, 1, 0.75), 4)
-	_help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	vb.add_child(_help)
-	title_screen.gui_input.connect(func(ev: InputEvent):
-		if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
-			title_screen.accept_event()
-			game.start_run())
+	new_game_button = _button("NEW GAME", func(): game.start_run(), 300)
+	new_game_button.custom_minimum_size = Vector2(300, 76)
+	new_game_button.add_theme_font_size_override("font_size", 36)
+	new_game_button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	vb.add_child(new_game_button)
 
 
 func _build_pause() -> void:
@@ -411,7 +386,6 @@ func _build_over() -> void:
 # --- screens --------------------------------------------------------------------------------
 
 func show_title(best: int) -> void:
-	title_best.text = "BEST: %d" % best
 	title_screen.visible = true
 	pause_screen.visible = false
 	over_screen.visible = false
@@ -537,8 +511,6 @@ func refresh() -> void:
 		countdown_label.text = ""
 		countdown_sub.text = ""
 
-	if title_screen.visible:
-		title_prompt.modulate.a = 0.55 + 0.45 * sin(game.time * 4.0)
 	if over_new.visible:
 		over_new.modulate = Color.from_hsv(0.13, 0.6 + 0.4 * sin(game.time * 6.0), 1.0)
 
@@ -581,22 +553,7 @@ func _apply_layout() -> void:
 	var bs := 56.0 if touch or narrow else 52.0
 	btn_pause.custom_minimum_size = Vector2(bs, bs)
 	btn_mute.custom_minimum_size = Vector2(bs, bs)
-	title_prompt.text = "TAP TO START" if touch else "CLICK TO START"
 	var unlock: bool = game.mode == "unlock"
-	_mode_button.text = "MODE: UNLOCK  (BioShock-style)" if unlock else "MODE: CLASSIC  (piece queue)"
-	var verb := "Tap" if touch else "Click"
-	if unlock:
-		_help.text = "%s a locked tile to unlock it and see what's under it. %s a pipe, then a spot, to swap them. Locked tiles stop the goo, and some hide alarm traps." % [verb, verb]
-	elif touch:
-		_help.text = "Tap a tile to place the next piece. Tap a dry pipe to swap it (-50 points, 1 s lock)."
-	else:
-		_help.text = "Click a tile to place the next piece. Click a dry pipe to replace it (-50 points, 1 s lock)."
-	if touch:
-		_help.text += "\nFAST: goo x5, points x2 until you spill."
-	else:
-		_help.text += "\nF: fast-forward (x5 flow, x2 points)   P / Esc: pause   M: mute   R: restart\n" + \
-				"Arrows / WASD + Space: play with the keyboard   1-7: pick a wildcard piece"
-	_help.custom_minimum_size = Vector2(minf(560.0, vs.x - 48.0), 0)
 	over_reason.custom_minimum_size = Vector2(minf(420.0, vs.x - 96.0), 0)
 	var what := "Pick any piece to place" if unlock else "Pick your next piece"
 	_picker_label.text = "WILDCARD! " + what + ("" if touch else " (1-7)")
