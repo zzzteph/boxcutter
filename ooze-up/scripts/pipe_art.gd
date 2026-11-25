@@ -17,12 +17,22 @@ const FLANGE_DEPTH := 0.10
 static var _font: Font
 static var _tank_sb: StyleBoxFlat
 static var _base_sb: StyleBoxFlat
+## Anti-aliasing for all vector art. Off in PS1 mode for hard pixel edges.
+static var aa := not Tuning.PS1_MODE
 
 
 static func font() -> Font:
 	if _font == null:
+		var base: Font = ThemeDB.fallback_font
+		if Tuning.PS1_MODE and base is FontFile:
+			# Hard-edged glyphs, snapped to whole pixels: a period-correct bitmap feel.
+			var ff := (base as FontFile).duplicate() as FontFile
+			ff.antialiasing = TextServer.FONT_ANTIALIASING_NONE
+			ff.hinting = TextServer.HINTING_NORMAL
+			ff.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
+			base = ff
 		var fv := FontVariation.new()
-		fv.base_font = ThemeDB.fallback_font
+		fv.base_font = base
 		fv.variation_embolden = 0.9
 		_font = fv
 	return _font
@@ -32,7 +42,7 @@ static func font() -> Font:
 static func draw_tile_base(ci: CanvasItem, rect: Rect2, pal: Dictionary, checker: bool) -> void:
 	if _base_sb == null:
 		_base_sb = StyleBoxFlat.new()
-		_base_sb.anti_aliasing = true
+		_base_sb.anti_aliasing = aa
 	var T := rect.size.x
 	var r := rect.grow(-T * 0.035)
 	var base: Color = pal["tile"]
@@ -68,7 +78,7 @@ static func stroke(ci: CanvasItem, center: Vector2, T: float, a: int, b: int, wi
 				perp = -perp
 			q0 += perp * shift
 			q1 += perp * shift
-		ci.draw_line(q0, q1, color, width, true)
+		ci.draw_line(q0, q1, color, width, aa)
 	else:
 		var ma: Vector2 = Pieces.SIDE_MID[a]
 		var mb: Vector2 = Pieces.SIDE_MID[b]
@@ -80,7 +90,7 @@ static func stroke(ci: CanvasItem, center: Vector2, T: float, a: int, b: int, wi
 			var mid := Vector2.from_angle(a0 + d * 0.5)
 			r += shift if mid.dot(Vector2(-1, -1)) > 0.0 else -shift
 		var n := maxi(3, int(ceil(16.0 * (t1 - t0))) + 1)
-		ci.draw_arc(center + c * T, r, a0 + d * t0, a0 + d * t1, n, color, width, true)
+		ci.draw_arc(center + c * T, r, a0 + d * t0, a0 + d * t1, n, color, width, aa)
 
 
 static func _flange(ci: CanvasItem, center: Vector2, T: float, side: int, dark: Color, metal: Color, light: Color) -> void:
@@ -155,13 +165,13 @@ static func _chevrons(ci: CanvasItem, center: Vector2, T: float, en: int, ex: in
 		var tan := (p2 - p).normalized()
 		var perp := Vector2(-tan.y, tan.x)
 		var pts := PackedVector2Array([p - tan * 0.05 * T + perp * 0.075 * T, p + tan * 0.06 * T, p - tan * 0.05 * T - perp * 0.075 * T])
-		ci.draw_polyline(pts, col, maxf(2.0, T * 0.045), true)
+		ci.draw_polyline(pts, col, maxf(2.0, T * 0.045), aa)
 
 
 static func _sb() -> StyleBoxFlat:
 	if _tank_sb == null:
 		_tank_sb = StyleBoxFlat.new()
-		_tank_sb.anti_aliasing = true
+		_tank_sb.anti_aliasing = aa
 	return _tank_sb
 
 
@@ -197,12 +207,12 @@ static func _tank(ci: CanvasItem, center: Vector2, T: float, tile: Tile, pal: Di
 			for i in 9:
 				var x := inner.position.x + inner.size.x * i / 8.0
 				wave.append(Vector2(x, inner.end.y - h + sin(time * 5.0 + i * 1.3) * T * 0.015))
-			ci.draw_polyline(wave, fade(gcol.lightened(0.6), alpha), maxf(2.0, T * 0.03), true)
+			ci.draw_polyline(wave, fade(gcol.lightened(0.6), alpha), maxf(2.0, T * 0.03), aa)
 	for k in [0.25, 0.5, 0.75]:
 		var y: float = inner.end.y - inner.size.y * k
 		ci.draw_line(Vector2(inner.end.x - T * 0.12, y), Vector2(inner.end.x - T * 0.03, y), fade(pal["metal_light"], 0.6 * alpha), maxf(1.0, T * 0.02))
 	ci.draw_line(inner.position + Vector2(T * 0.07, T * 0.08), Vector2(inner.position.x + T * 0.07, inner.end.y - T * 0.12),
-			fade(Color.WHITE, 0.28 * alpha), maxf(2.0, T * 0.045), true)
+			fade(Color.WHITE, 0.28 * alpha), maxf(2.0, T * 0.045), aa)
 	for corner in [rect.position, Vector2(rect.end.x, rect.position.y), rect.end, Vector2(rect.position.x, rect.end.y)]:
 		var cc: Vector2 = corner + (center - corner).normalized() * T * 0.06
 		ci.draw_circle(cc, T * 0.025, fade(pal["metal_light"], 0.8 * alpha))
@@ -241,14 +251,14 @@ static func draw_source(ci: CanvasItem, center: Vector2, T: float, tile: Tile, p
 		var by := inner.end.y - inner.size.y * fposmod(i * 0.37 + time * 0.6, 1.0)
 		ci.draw_circle(Vector2(bx, by), T * 0.03, goo_col.lightened(0.5))
 	ci.draw_line(inner.position + Vector2(T * 0.06, T * 0.05), Vector2(inner.end.x - T * 0.06, inner.position.y + T * 0.05),
-			fade(Color.WHITE, 0.35), maxf(2.0, T * 0.03), true)
+			fade(Color.WHITE, 0.35), maxf(2.0, T * 0.03), aa)
 	# Pressure gauge: fills as the countdown runs out.
 	var gc := center + Vector2(0.0, 0.2) * T
 	ci.draw_circle(gc, T * 0.15, dark)
 	ci.draw_circle(gc, T * 0.12, Color(0.95, 0.95, 0.9))
 	var ang := lerpf(PI * 0.75, PI * 2.25, clampf(countdown_frac, 0.0, 1.0))
-	ci.draw_arc(gc, T * 0.09, PI * 0.75, ang, 16, Color(0.9, 0.2, 0.15), maxf(2.0, T * 0.03), true)
-	ci.draw_line(gc, gc + Vector2.from_angle(ang) * T * 0.1, Color(0.15, 0.15, 0.15), maxf(2.0, T * 0.025), true)
+	ci.draw_arc(gc, T * 0.09, PI * 0.75, ang, 16, Color(0.9, 0.2, 0.15), maxf(2.0, T * 0.03), aa)
+	ci.draw_line(gc, gc + Vector2.from_angle(ang) * T * 0.1, Color(0.15, 0.15, 0.15), maxf(2.0, T * 0.025), aa)
 
 
 static func draw_rock(ci: CanvasItem, center: Vector2, T: float, tile: Tile, pal: Dictionary) -> void:
@@ -272,7 +282,7 @@ static func draw_rock(ci: CanvasItem, center: Vector2, T: float, tile: Tile, pal
 		var a := float((r >> (k * 5)) % 360) * PI / 180.0
 		var d := 0.12 + float((r >> (k * 3 + 2)) % 10) / 60.0
 		ci.draw_circle(center + Vector2.from_angle(a) * d * T, T * (0.025 + 0.01 * k), fade(pal["rock_dark"], 0.7))
-	ci.draw_line(center + Vector2(-0.05, 0.05) * T, center + Vector2(0.1, 0.16) * T, fade(pal["rock_dark"], 0.8), maxf(1.5, T * 0.025), true)
+	ci.draw_line(center + Vector2(-0.05, 0.05) * T, center + Vector2(0.1, 0.16) * T, fade(pal["rock_dark"], 0.8), maxf(1.5, T * 0.025), aa)
 
 
 static func draw_coin(ci: CanvasItem, pos: Vector2, radius: float, value: int, time: float, show_text := true, bob := true) -> void:
@@ -319,11 +329,11 @@ static func draw_powerup(ci: CanvasItem, pos: Vector2, radius: float, kind: int,
 				var a := i * TAU / 12.0
 				ci.draw_line(pos + Vector2.from_angle(a) * radius * 0.62, pos + Vector2.from_angle(a) * radius * 0.74, Color("0d3a66"), maxf(1.0, radius * 0.06))
 			var t := time * 0.6
-			ci.draw_line(pos, pos + Vector2.from_angle(t - PI / 2) * radius * 0.55, Color("0d3a66"), maxf(2.0, radius * 0.12), true)
-			ci.draw_line(pos, pos + Vector2.from_angle(t * 0.08 - PI / 2 + 2.0) * radius * 0.38, Color("0d3a66"), maxf(2.0, radius * 0.14), true)
+			ci.draw_line(pos, pos + Vector2.from_angle(t - PI / 2) * radius * 0.55, Color("0d3a66"), maxf(2.0, radius * 0.12), aa)
+			ci.draw_line(pos, pos + Vector2.from_angle(t * 0.08 - PI / 2 + 2.0) * radius * 0.38, Color("0d3a66"), maxf(2.0, radius * 0.14), aa)
 			ci.draw_circle(pos, radius * 0.1, Color("ff4a3a"))
 		Tile.PU_BOMB:
-			ci.draw_line(pos + Vector2(radius * 0.35, -radius * 0.7), pos + Vector2(radius * 0.7, -radius * 1.05), Color("c89a5a"), maxf(2.0, radius * 0.12), true)
+			ci.draw_line(pos + Vector2(radius * 0.35, -radius * 0.7), pos + Vector2(radius * 0.7, -radius * 1.05), Color("c89a5a"), maxf(2.0, radius * 0.12), aa)
 			var flick := 0.7 + 0.3 * sin(time * 30.0)
 			ci.draw_circle(pos + Vector2(radius * 0.72, -radius * 1.08), radius * 0.2 * flick, Color("ffd23a"))
 			ci.draw_circle(pos + Vector2(radius * 0.72, -radius * 1.08), radius * 0.1 * flick, Color.WHITE)

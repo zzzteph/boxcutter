@@ -76,7 +76,19 @@ func _run() -> void:
 	check(game.state == S.TITLE, "starts on the title screen")
 	check(game.ui.title_screen.visible, "title overlay visible")
 
-	# --- start with a click anywhere ---
+	# --- a click anywhere on the title starts (nothing in the menu may swallow it) ---
+	var missed := []
+	for fy in [0.2, 0.5, 0.8]:
+		for fx in [0.2, 0.5, 0.8]:
+			game.go_to_title()
+			await frames(1)
+			click(Vector2(game.view_size.x * fx, game.view_size.y * fy))
+			await frames(1)
+			if game.state != S.COUNTDOWN:
+				missed.append(Vector2(fx, fy))
+	check(missed.is_empty(), "every point on the title screen starts the game (missed %s)" % [missed])
+	game.go_to_title()
+	await frames(1)
 	click(game.view_size * 0.5)
 	await frames(2)
 	check(game.state == S.COUNTDOWN, "click starts the countdown")

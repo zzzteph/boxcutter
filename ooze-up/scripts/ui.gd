@@ -93,6 +93,11 @@ var _last_count := -1
 var _speed_col := Color.WHITE
 var _ff_lit := false
 var _picker_zone := -1
+var _scaled := []          ## [Label, base font size, base outline] scaled to the screen width.
+var _key_buttons := []     ## [Button, mouse/keyboard text, touch text]
+var _help: Label
+var _picker_label: Label
+var _best_box: Control
 
 
 func _ready() -> void:
@@ -117,15 +122,20 @@ func _box(bg: Color, border: Color, radius := 14, bw := 3, shadow := 6) -> Style
 	sb.bg_color = bg
 	sb.border_color = border
 	sb.set_border_width_all(bw)
-	sb.set_corner_radius_all(radius)
+	sb.set_corner_radius_all(mini(radius, 3) if Tuning.PS1_MODE else radius)
 	sb.shadow_color = Color(0, 0, 0, 0.45)
 	sb.shadow_size = shadow
 	sb.shadow_offset = Vector2(0, 3)
+	if Tuning.PS1_MODE and shadow > 0:
+		# Hard, offset drop shadow, like a 32-bit era menu.
+		sb.shadow_color = Color(0, 0, 0, 0.7)
+		sb.shadow_size = 1
+		sb.shadow_offset = Vector2(5, 5)
 	sb.content_margin_left = 16
 	sb.content_margin_right = 16
 	sb.content_margin_top = 8
 	sb.content_margin_bottom = 8
-	sb.anti_aliasing = true
+	sb.anti_aliasing = PipeArt.aa
 	return sb
 
 
@@ -162,6 +172,20 @@ func _label(text: String, size: int, col := Color.WHITE, outline := 8) -> Label:
 	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return l
+
+
+## A label whose font size follows the screen width (big screens keep `size`).
+func _slabel(text: String, size: int, col := Color.WHITE, outline := 8) -> Label:
+	var l := _label(text, size, col, outline)
+	_scaled.append([l, size, outline])
+	return l
+
+
+## A button whose caption drops its keyboard hint on touch screens.
+func _kbutton(key_text: String, touch_text: String, cb: Callable) -> Button:
+	var b := _button(key_text, cb)
+	_key_buttons.append([b, key_text, touch_text])
+	return b
 
 
 func _button(text: String, cb: Callable, min_w := 260) -> Button:
@@ -229,6 +253,9 @@ func _build_hud() -> void:
 		vb.add_child(val)
 		hb.add_child(vb)
 		stat_values[key] = val
+		stat_values[key + "_cap"] = cap
+		if key == "BEST":
+			_best_box = vb
 	btn_pause = _icon_button("pause", func(): game.toggle_pause())
 	btn_mute = _icon_button("sound_on", func(): game.toggle_mute())
 	hb.add_child(btn_pause)
@@ -239,18 +266,18 @@ func _build_hud() -> void:
 
 
 func _build_center_labels() -> void:
-	countdown_label = _label("", 150, Color("ffffff"), 22)
+	countdown_label = _slabel("", 150, Color("ffffff"), 22)
 	countdown_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.add_child(countdown_label)
-	countdown_sub = _label("", 30, Color("b6ff7a"), 10)
+	countdown_sub = _slabel("", 30, Color("b6ff7a"), 10)
 	countdown_sub.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.add_child(countdown_sub)
-	banner = _label("", 54, Color("ffd23a"), 16)
+	banner = _slabel("", 54, Color("ffd23a"), 16)
 	banner.set_anchors_preset(Control.PRESET_FULL_RECT)
 	banner.modulate.a = 0.0
 	root.add_child(banner)
-	toast = _label("", 26, Color.WHITE, 8)
-	toast.set_anchors_preset(Control.PRESET_FULL_RECT)
+	toast = _slabel("", 26, Color.WHITE, 8)
+	toast.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	toast.modulate.a = 0.0
 	root.add_child(toast)
 
@@ -261,7 +288,8 @@ func _build_picker() -> void:
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 6)
 	picker.add_child(vb)
-	vb.add_child(_label("WILDCARD! Pick your next piece (1-7)", 20, Color("e8b0ff"), 6))
+	_picker_label = _slabel("WILDCARD! Pick your next piece (1-7)", 20, Color("e8b0ff"), 6)
+	vb.add_child(_picker_label)
 	var hb := HBoxContainer.new()
 	hb.add_theme_constant_override("separation", 6)
 	hb.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -289,26 +317,27 @@ func _build_title() -> void:
 	vb.add_theme_constant_override("separation", 10)
 	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_center_of(title_screen).add_child(vb)
-	var logo := _label("OOZE UP!", 120, Color("7dff3a"), 30)
+	var logo := _slabel("OOZE UP!", 120, Color("7dff3a"), 30)
 	logo.add_theme_color_override("font_outline_color", Color("0b3a12"))
 	vb.add_child(logo)
-	vb.add_child(_label("Lay pipes. Keep the goo flowing. Climb forever.", 24, Color("d8f5d0"), 8))
+	var tag := _slabel("Lay pipes. Keep the goo flowing. Climb forever.", 24, Color("d8f5d0"), 8)
+	tag.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vb.add_child(tag)
 	var sp := Control.new()
+	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE  # Spacers must not swallow taps.
 	sp.custom_minimum_size = Vector2(0, 26)
 	vb.add_child(sp)
-	title_prompt = _label("CLICK OR TAP TO START", 40, Color("ffffff"), 12)
+	title_prompt = _slabel("CLICK TO START", 40, Color("ffffff"), 12)
 	vb.add_child(title_prompt)
-	title_best = _label("BEST: 0", 28, Color("ffd23a"), 8)
+	title_best = _slabel("BEST: 0", 28, Color("ffd23a"), 8)
 	vb.add_child(title_best)
 	var sp2 := Control.new()
+	sp2.mouse_filter = Control.MOUSE_FILTER_IGNORE  # Spacers must not swallow taps.
 	sp2.custom_minimum_size = Vector2(0, 16)
 	vb.add_child(sp2)
-	var help := _label("Click / tap a tile: place the next piece  -  click a dry pipe to replace it (-50, 1s lock)\n" +
-			"F: fast-forward (x5 flow, x2 points)   P / Esc: pause   M: mute   R: restart\n" +
-			"Arrows / WASD + Space: place with the keyboard   1-7: pick a wildcard piece", 16, Color(1, 1, 1, 0.7), 4)
-	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	help.custom_minimum_size = Vector2(560, 0)
-	vb.add_child(help)
+	_help = _slabel("", 16, Color(1, 1, 1, 0.75), 4)
+	_help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vb.add_child(_help)
 	title_screen.gui_input.connect(func(ev: InputEvent):
 		if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
 			title_screen.accept_event()
@@ -322,9 +351,9 @@ func _build_pause() -> void:
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 14)
 	panel.add_child(vb)
-	vb.add_child(_label("PAUSED", 64, Color("7dff3a"), 14))
-	vb.add_child(_button("RESUME  (P)", func(): game.toggle_pause()))
-	vb.add_child(_button("RESTART  (R)", func(): game.start_run()))
+	vb.add_child(_slabel("PAUSED", 64, Color("7dff3a"), 14))
+	vb.add_child(_kbutton("RESUME  (P)", "RESUME", func(): game.toggle_pause()))
+	vb.add_child(_kbutton("RESTART  (R)", "RESTART", func(): game.start_run()))
 	pause_mute = _button("SOUND: ON  (M)", func(): game.toggle_mute())
 	vb.add_child(pause_mute)
 	vb.add_child(_button("MAIN MENU", func(): game.go_to_title()))
@@ -337,10 +366,11 @@ func _build_over() -> void:
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 8)
 	panel.add_child(vb)
-	vb.add_child(_label("GOO SPILLED!", 64, Color("ff8a3a"), 14))
-	over_reason = _label("", 22, Color(1, 1, 1, 0.85), 6)
+	vb.add_child(_slabel("GOO SPILLED!", 64, Color("ff8a3a"), 14))
+	over_reason = _slabel("", 22, Color(1, 1, 1, 0.85), 6)
+	over_reason.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vb.add_child(over_reason)
-	over_score = _label("", 54, Color.WHITE, 12)
+	over_score = _slabel("", 54, Color.WHITE, 12)
 	vb.add_child(over_score)
 	over_height = _label("", 26, Color("b6ff7a"), 6)
 	vb.add_child(over_height)
@@ -349,9 +379,10 @@ func _build_over() -> void:
 	over_new = _label("NEW BEST!", 36, Color("ffd23a"), 10)
 	vb.add_child(over_new)
 	var sp := Control.new()
+	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE  # Spacers must not swallow taps.
 	sp.custom_minimum_size = Vector2(0, 8)
 	vb.add_child(sp)
-	vb.add_child(_button("PLAY AGAIN  (R)", func(): game.start_run()))
+	vb.add_child(_kbutton("PLAY AGAIN  (R)", "PLAY AGAIN", func(): game.start_run()))
 	vb.add_child(_button("MAIN MENU", func(): game.go_to_title()))
 
 
@@ -454,7 +485,9 @@ func refresh() -> void:
 	if btn_mute.kind != mk:
 		btn_mute.kind = mk
 		btn_mute.queue_redraw()
-	var mt := "SOUND: OFF  (M)" if game.sfx.muted else "SOUND: ON  (M)"
+	var mt := "SOUND: OFF" if game.sfx.muted else "SOUND: ON"
+	if not game.is_touch:
+		mt += "  (M)"
 	if pause_mute.text != mt:
 		pause_mute.text = mt
 
@@ -501,6 +534,38 @@ func refresh() -> void:
 
 func _apply_layout() -> void:
 	var vs: Vector2 = game.view_size
+	var touch: bool = game.is_touch
+	# Text scales down on narrow screens so headings never run off the edge.
+	var k := clampf(vs.x / 680.0, 0.6, 1.0)
+	for e in _scaled:
+		var l: Label = e[0]
+		l.add_theme_font_size_override("font_size", maxi(12, int(e[1] * k)))
+		l.add_theme_constant_override("outline_size", maxi(2, int(e[2] * k)))
+	for e in _key_buttons:
+		(e[0] as Button).text = e[2] if touch else e[1]
+	var narrow := vs.x < 620.0
+	_best_box.visible = not narrow
+	for key in ["SCORE", "BEST", "HEIGHT", "MULT", "SPEED"]:
+		(stat_values[key] as Label).add_theme_font_size_override("font_size", 24 if narrow else 27)
+		(stat_values[key + "_cap"] as Label).add_theme_font_size_override("font_size", 14 if narrow else 13)
+	var bs := 56.0 if touch or narrow else 52.0
+	btn_pause.custom_minimum_size = Vector2(bs, bs)
+	btn_mute.custom_minimum_size = Vector2(bs, bs)
+	title_prompt.text = "TAP TO START" if touch else "CLICK TO START"
+	if touch:
+		_help.text = "Tap a tile to place the next piece. Tap a dry pipe to swap it (-50 points, 1 s lock).\nFAST: goo x5, points x2 until you spill."
+	else:
+		_help.text = "Click a tile: place the next piece  -  click a dry pipe to replace it (-50, 1 s lock)\n" + \
+				"F: fast-forward (x5 flow, x2 points)   P / Esc: pause   M: mute   R: restart\n" + \
+				"Arrows / WASD + Space: place with the keyboard   1-7: pick a wildcard piece"
+	_help.custom_minimum_size = Vector2(minf(560.0, vs.x - 48.0), 0)
+	over_reason.custom_minimum_size = Vector2(minf(420.0, vs.x - 96.0), 0)
+	_picker_label.text = "WILDCARD! Pick your next piece" if touch else "WILDCARD! Pick your next piece (1-7)"
+	var pb := clampf((vs.x - 110.0) / 7.0, 40.0, 62.0)
+	for art in picker_buttons:
+		(art.get_parent() as Control).custom_minimum_size = Vector2(pb, pb)
+	picker.reset_size()
+	_picker_zone = -1
 	hud.position = Vector2.ZERO
 	hud.size = Vector2(vs.x, game.hud_h)
 	var hb := hud.get_node("Stats") as HBoxContainer
@@ -512,5 +577,5 @@ func _apply_layout() -> void:
 	countdown_sub.size = vs
 	banner.position = Vector2(0, -vs.y * 0.22)
 	banner.size = vs
-	toast.position = Vector2(0, -vs.y * 0.5 + game.hud_h + 40)
-	toast.size = vs
+	toast.position = Vector2(20, -vs.y * 0.5 + game.hud_h + 40)
+	toast.size = Vector2(vs.x - 40, vs.y)

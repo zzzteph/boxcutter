@@ -27,6 +27,9 @@ var rng := RandomNumberGenerator.new()
 
 var renderer: BoardRenderer
 var atlas: SpriteAtlas
+var world_box: SubViewportContainer  ## PS1 mode: shows the low-res world, scaled up.
+var world_vp: SubViewport            ## PS1 mode: the world renders in here.
+var is_touch := false
 var input_handler: InputHandler
 var ui: GameUI
 var sfx: Sfx
@@ -85,7 +88,11 @@ func _ready() -> void:
 	renderer = BoardRenderer.new()
 	renderer.game = self
 	renderer.atlas = atlas
-	add_child(renderer)
+	if Tuning.PS1_MODE:
+		_build_world_viewport()
+		world_vp.add_child(renderer)
+	else:
+		add_child(renderer)
 	input_handler = InputHandler.new()
 	input_handler.game = self
 	add_child(input_handler)
@@ -98,6 +105,28 @@ func _ready() -> void:
 	new_board(rng.randi())
 	state = State.TITLE
 	ui.show_title(best)
+
+
+## PS1 mode: the board renders into a low-resolution viewport that is scaled up
+## with nearest-neighbour sampling and run through the 15-bit dither shader.
+## The HUD and menus stay on the full-resolution screen so text stays readable.
+func _build_world_viewport() -> void:
+	world_box = SubViewportContainer.new()
+	world_box.stretch = true
+	world_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	world_box.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://scripts/ps1_screen.gdshader")
+	mat.set_shader_parameter("levels", Tuning.PS1_COLOR_LEVELS)
+	mat.set_shader_parameter("dither", Tuning.PS1_DITHER)
+	world_box.material = mat
+	add_child(world_box)
+	world_vp = SubViewport.new()
+	world_vp.disable_3d = true
+	world_vp.gui_disable_input = true
+	world_vp.size_2d_override_stretch = true
+	world_vp.canvas_item_default_texture_filter = Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST
+	world_box.add_child(world_vp)
 
 
 func _notification(what: int) -> void:
@@ -333,7 +362,7 @@ func _apply_powerup(kind: int, wp: Vector2) -> void:
 			renderer.float_text(wp, "SLOW-MO", col)
 		Tile.PU_BOMB:
 			bombs += 1
-			ui.show_toast("BOMB!  Click a rock or a dry pipe to blast it", col)
+			ui.show_toast("BOMB!  %s a rock or a dry pipe to blast it" % ("Tap" if is_touch else "Click"), col)
 			renderer.float_text(wp, "BOMB", col)
 		Tile.PU_WILD:
 			wildcards += 1
@@ -543,9 +572,30 @@ func _px(v: float) -> float:
 
 
 func _compute_layout() -> void:
-	view_size = get_viewport_rect().size
 	var win := get_window()
-	px_scale = float(win.size.x) / view_size.x if win != null and win.size.x > 0 and view_size.x > 0.0 else 1.0
+	if win != null and win.size.x > 0:
+		# Pick the virtual resolution from the screen's real (logical) size, so
+		# phones get a smaller base and therefore bigger text and buttons.
+		var ds := DisplayServer.screen_get_scale()
+		var logical := minf(win.size.x, win.size.y) / (ds if ds > 0.0 else 1.0)
+		var base := clampi(int(logical), Tuning.UI_BASE_MIN, Tuning.UI_BASE_MAX)
+		if win.content_scale_size != Vector2i(base, base):
+			win.content_scale_size = Vector2i(base, base)
+	view_size = get_viewport_rect().size
+	if world_box != null:
+		var shrink := maxi(1, roundi(minf(view_size.x, view_size.y) / Tuning.PS1_SHORT_SIDE))
+		if world_box.stretch_shrink != shrink:
+			world_box.stretch_shrink = shrink
+		if world_box.size != view_size:
+			world_box.position = Vector2.ZERO
+			world_box.size = view_size
+		if world_vp.size_2d_override != Vector2i(view_size):
+			world_vp.size_2d_override = Vector2i(view_size)
+		px_scale = float(world_vp.size.x) / view_size.x if world_vp.size.x > 0 else 1.0
+	else:
+		px_scale = float(win.size.x) / view_size.x if win != null and win.size.x > 0 and view_size.x > 0.0 else 1.0
+	is_touch = DisplayServer.is_touchscreen_available()
+	var min_rows := Tuning.MIN_VISIBLE_ROWS if view_size.y >= 600.0 else Tuning.MIN_VISIBLE_ROWS_COMPACT
 	portrait = view_size.x < view_size.y * 0.9
 	hud_h = _px(66.0)
 	_slots = []
@@ -554,7 +604,7 @@ func _compute_layout() -> void:
 		var bottom_h := clampf(view_size.y * 0.12, 110.0, 150.0)
 		var avail_w := view_size.x - 40.0
 		var avail_h := view_size.y - hud_h - bottom_h
-		T = _tile_size(minf(avail_w / Tuning.COLS, avail_h / Tuning.MIN_VISIBLE_ROWS))
+		T = _tile_size(minf(avail_w / Tuning.COLS, avail_h / min_rows))
 		var bw := T * Tuning.COLS
 		board_rect = Rect2(_px((view_size.x - bw) * 0.5), hud_h, bw, _px(view_size.y - bottom_h) - hud_h)
 		queue_rect = Rect2(8.0, board_rect.end.y + 6.0, view_size.x - 16.0, bottom_h - 14.0)
@@ -574,23 +624,38 @@ func _compute_layout() -> void:
 		var panel_w := clampf(view_size.x * 0.17, 150.0, 220.0)
 		var avail_w := view_size.x - panel_w - 80.0
 		var avail_h := view_size.y - hud_h
-		T = _tile_size(minf(avail_w / Tuning.COLS, avail_h / Tuning.MIN_VISIBLE_ROWS))
+		T = _tile_size(minf(avail_w / Tuning.COLS, avail_h / min_rows))
 		var bw := T * Tuning.COLS
 		var total := bw + 30.0 + panel_w
 		var x0 := _px((view_size.x - total) * 0.5)
 		board_rect = Rect2(x0, hud_h, bw, _px(view_size.y) - hud_h)
 		queue_rect = Rect2(board_rect.end.x + 30.0, hud_h + 12.0, panel_w, view_size.y - hud_h - 24.0)
-		ff_rect = Rect2(queue_rect.position.x + 12.0, queue_rect.end.y - 92.0, panel_w - 24.0, 80.0)
-		var avail := ff_rect.position.y - queue_rect.position.y - 40.0 - 70.0 - (n - 1) * 10.0 - 14.0
-		var s0 := minf(panel_w - 40.0, avail / (1.0 + (n - 1) * 0.58))
-		var s1 := s0 * 0.58
 		var cx := queue_rect.get_center().x
 		var y := queue_rect.position.y + 40.0
-		_slots.append(Rect2(cx - s0 * 0.5, y, s0, s0))
-		y += s0 + 14.0
-		for i in n - 1:
-			_slots.append(Rect2(cx - s1 * 0.5, y, s1, s1))
-			y += s1 + 10.0
+		if view_size.y >= 600.0:
+			# Tall screen: the next piece on top, the rest stacked below it.
+			ff_rect = Rect2(queue_rect.position.x + 12.0, queue_rect.end.y - 92.0, panel_w - 24.0, 80.0)
+			var avail := ff_rect.position.y - queue_rect.position.y - 40.0 - 70.0 - (n - 1) * 10.0 - 14.0
+			var s0 := minf(panel_w - 40.0, avail / (1.0 + (n - 1) * 0.58))
+			var s1 := s0 * 0.58
+			_slots.append(Rect2(cx - s0 * 0.5, y, s0, s0))
+			y += s0 + 14.0
+			for i in n - 1:
+				_slots.append(Rect2(cx - s1 * 0.5, y, s1, s1))
+				y += s1 + 10.0
+		else:
+			# Short screen (phone held sideways): the next piece, then one row of the rest.
+			ff_rect = Rect2(queue_rect.position.x + 12.0, queue_rect.end.y - 70.0, panel_w - 24.0, 58.0)
+			var gap := 6.0
+			var s1 := (panel_w - 24.0 - gap * (n - 2)) / (n - 1)
+			var s0 := minf(panel_w - 40.0, ff_rect.position.y - y - s1 - 14.0 - 44.0)
+			_slots.append(Rect2(cx - s0 * 0.5, y, s0, s0))
+			y += s0 + 10.0
+			var x := queue_rect.position.x + 12.0
+			for i in n - 1:
+				_slots.append(Rect2(x, y, s1, s1))
+				x += s1 + gap
+			y += s1 + 4.0
 		status_rect = Rect2(queue_rect.position.x + 10.0, y, panel_w - 20.0, maxf(30.0, ff_rect.position.y - y - 8.0))
 	cam.visible_rows = board_rect.size.y / T
 	if atlas != null:

@@ -8,6 +8,17 @@ extends RefCounted
 const COLS := 7                      ## Board width in tiles.
 const SOURCE_COL := 3                ## Column of the goo source (row 0).
 const MIN_VISIBLE_ROWS := 10.0       ## Rows that always fit on screen (sets tile size).
+const MIN_VISIBLE_ROWS_COMPACT := 7.0 ## Same, on short screens (phones held sideways).
+
+# --- Look -------------------------------------------------------------------
+const PS1_MODE := true               ## Low-res, dithered, 15-bit colour, no anti-aliasing.
+const PS1_SHORT_SIDE := 240          ## Low-res pixels across the screen's short side (the PS1 ran 240 lines).
+const PS1_COLOR_LEVELS := 31.0       ## Colour steps per channel (31 = the PS1's 15-bit colour).
+const PS1_DITHER := 1.0              ## Ordered-dither strength (0 = off).
+
+# --- Screen -----------------------------------------------------------------
+const UI_BASE_MAX := 720             ## Virtual pixels on the short side on big screens.
+const UI_BASE_MIN := 480             ## ...and on phones, so text and buttons stay large.
 
 # --- Flow -------------------------------------------------------------------
 const COUNTDOWN_TIME := 10.0         ## Seconds before the goo starts flowing.

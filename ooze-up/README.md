@@ -4,6 +4,10 @@ An endless, vertical pipe-laying puzzle built with **Godot 4** (GDScript, no
 assets: all art and sound are generated in code). Goo flows up from a pump at
 the bottom; lay pipes ahead of it and climb as high as you can.
 
+The board is drawn in a PlayStation 1 style: rendered at 240 lines, scaled up
+with hard pixel edges, and cut down to 15-bit colour with a 4x4 ordered dither.
+The HUD and menus stay sharp so they read well on phones.
+
 ## Run it
 
 - **Editor:** open this folder in Godot 4.7 (tested with 4.7.2) and press F5.
@@ -16,6 +20,18 @@ the bottom; lay pipes ahead of it and climb as high as you can.
 
   and open http://localhost:8000. A Godot web build can't be opened straight
   from disk with `file://`.
+- **Phones and tablets:** the same web build works with touch. The layout
+  switches to portrait (queue under the board) or a compact sideways layout,
+  and text and buttons scale to the screen.
+
+## Frame rate
+
+The game has no frame cap: it runs at the display's refresh rate (120 Hz or
+more on high-refresh screens; browsers follow the display too). To keep each
+frame cheap, static art is rasterised once into sprite atlases, board rows are
+cached and only redrawn when they change, and the board renders at low
+resolution. The board takes about 130 draw calls, and game scripts take about
+2 ms per frame in the browser even on a slow test machine.
 
 ## Controls
 
@@ -79,6 +95,11 @@ Every difficulty knob is in [`scripts/tuning.gd`](scripts/tuning.gd):
 | `ZONE_ROWS` | 50 | Rows per zone |
 | `CAMERA_LEAD_FRACTION` / `CAMERA_STIFFNESS` | 0.33 / 3.0 | Camera follow |
 | `KEEP_ROWS_BELOW` / `GENERATE_AHEAD` | 20 / 8 | Rows kept below / generated above |
+| `PS1_MODE` | true | PS1 look on or off (off = smooth, anti-aliased, full resolution) |
+| `PS1_SHORT_SIDE` | 240 | Low-res pixels across the screen's short side |
+| `PS1_COLOR_LEVELS` / `PS1_DITHER` | 31 / 1.0 | Colour steps per channel (31 = 15-bit) and dither strength |
+| `UI_BASE_MAX` / `UI_BASE_MIN` | 720 / 480 | Virtual resolution on big screens / phones (smaller = bigger UI) |
+| `MIN_VISIBLE_ROWS` / `MIN_VISIBLE_ROWS_COMPACT` | 10 / 7 | Rows that always fit on screen / on short screens |
 
 Each zone also scales the obstacle mix (`rock_mult`, `bonus_mult`, ...) in
 [`scripts/zones.gd`](scripts/zones.gd).
@@ -98,6 +119,7 @@ Each zone also scales the obstacle mix (`rock_mult`, `bonus_mult`, ...) in
 | `pipe_art.gd` | Vector drawing of pipes, goo, rocks and icons |
 | `sprite_atlas.gd` | Rasterises the vector art once per zone into textures |
 | `board_renderer.gd` | Backdrop, cached board rows, live goo tile, particles, queue |
+| `ps1_screen.gdshader` | 15-bit colour and ordered dither for the low-res board |
 | `input_handler.gd` | Mouse, touch and keyboard |
 | `ui.gd` | HUD, banners, title / pause / game-over screens |
 | `sfx.gd` | Synthesised sound effects |

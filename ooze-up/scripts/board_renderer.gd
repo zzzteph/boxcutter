@@ -435,7 +435,7 @@ func _draw_hover(ci: CanvasItem, T: float) -> void:
 				col = Color(1, 0.3, 0.3, 0.6)
 		ci.draw_rect(rect.grow(-T * 0.03), col, false, maxf(2.0, T * 0.05))
 		var f := PipeArt.font()
-		var fs := int(T * 0.2)
+		var fs := int(T * 0.3)
 		if mode == "replace":
 			var txt := "-%d" % Tuning.REPLACE_PENALTY
 			ci.draw_string_outline(f, rect.position + Vector2(0, T * 0.95), txt, HORIZONTAL_ALIGNMENT_CENTER, T, fs, 4, Color.BLACK)
