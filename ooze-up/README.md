@@ -33,12 +33,26 @@ cached and only redrawn when they change, and the board renders at low
 resolution. The board takes about 130 draw calls, and game scripts take about
 2 ms per frame in the browser even on a slow test machine.
 
+## Modes
+
+Pick the mode on the title screen (the choice is remembered).
+
+- **Unlock** (default, like BioShock's hacking): every tile starts locked,
+  face-down. Click or tap a locked tile to flip it and see what's under it: a
+  pipe, an open spot, a rock, or an alarm trap. Click a pipe to pick it up,
+  then click an open spot or another pipe to swap them (click it again to put
+  it back). Goo that reaches a locked tile spills, so unlock ahead of it. An
+  alarm costs 100 points and makes the goo surge for a few seconds.
+- **Classic**: the board is open and you place pieces from a queue of five.
+
 ## Controls
 
 | Action | Mouse / touch | Keyboard |
 | --- | --- | --- |
-| Place the next piece | Click / tap an empty tile | Arrows or WASD to move the cursor, Space / Enter to place |
-| Replace a dry pipe (-50 points, 1 s lock) | Click / tap it | Same |
+| Unlock a tile (unlock mode) | Click / tap it | Arrows or WASD to move the cursor, Space / Enter to click |
+| Pick up a pipe, then swap it (unlock mode) | Click / tap the pipe, then the spot | Same |
+| Place the next piece (classic mode) | Click / tap an empty tile | Same |
+| Replace a dry pipe (classic, -50 points, 1 s lock) | Click / tap it | Same |
 | Fast-forward (x5 flow, x2 points, until game over) | FAST button | F |
 | Pick a wildcard piece | Picker buttons | 1-7 |
 | Pause | Pause button | P / Esc |
@@ -48,6 +62,8 @@ resolution. The board takes about 130 draw calls, and game scripts take about
 ## Rules
 
 - Goo starts after a 10-second countdown and speeds up as it climbs.
+- In unlock mode every row hides at least the pipes its guaranteed path needs,
+  so unlocking a row and swapping pipes within it is always enough.
 - The run ends when goo reaches an open pipe end, a wall, a rock, an empty tile,
   a pipe that is already full, or a one-way pipe from the wrong side.
 - Pieces: straight horizontal and vertical, four corners and a cross. A cross can
@@ -80,7 +96,13 @@ Every difficulty knob is in [`scripts/tuning.gd`](scripts/tuning.gd):
 | `SLOWMO_MULT` / `SLOWMO_DURATION` | 0.5x / 8 s | Slow-mo power-up |
 | `RESERVOIR_FILL_FACTOR` | 4 | How much slower reservoirs fill |
 | `REPLACE_LOCK_TIME` / `REPLACE_PENALTY` | 1 s / 50 | Cost of replacing a pipe |
-| `PIECE_WEIGHTS` | 16,16,14,14,14,14,5 | Queue odds (crosses rarest) |
+| `PIECE_WEIGHTS` | 16,16,14,14,14,14,5 | Piece odds (crosses rarest) |
+| `DEFAULT_MODE` | "unlock" | Mode on first launch ("unlock" or "classic") |
+| `UNLOCK_PIECE_FILL` | 0.72 | Chance a locked tile hides a pipe (else an open spot) |
+| `UNLOCK_SPINE_PIECE_CHANCE` | 0.5 | Chance a path tile already hides the pipe it needs |
+| `ALARM_START_ROW` / `ALARM_CHANCE` | 15 / 0.07 | Alarm traps |
+| `ALARM_SURGE_TIME` / `ALARM_SURGE_MULT` / `ALARM_PENALTY` | 4 s / 1.8x / 100 | Alarm cost |
+| `FLIP_TIME` | 0.3 s | Unlock flip animation |
 | `SCORE_SEGMENT` / `SCORE_CROSS_DOUBLE` | 10 / 100 | Points |
 | `MULT_ROWS_STEP` / `MULT_STEP` | 25 rows / +0.5x | Height multiplier |
 | `SAFE_ROWS` | 5 | Obstacle-free rows at the start |
@@ -122,6 +144,7 @@ Each zone also scales the obstacle mix (`rock_mult`, `bonus_mult`, ...) in
 | `ps1_screen.gdshader` | 15-bit colour and ordered dither for the low-res board |
 | `input_handler.gd` | Mouse, touch and keyboard |
 | `ui.gd` | HUD, banners, title / pause / game-over screens |
+| `title_backdrop.gd` | The main screen's background: gradient, bubbles, flowing pipes |
 | `sfx.gd` | Synthesised sound effects |
 | `save_data.gd` | High score (localStorage on the web, a config file elsewhere) |
 

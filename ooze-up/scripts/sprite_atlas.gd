@@ -27,7 +27,8 @@ const WALL := 48
 const COIN_SMALL := 49
 const COIN := 50          ## + value tier (3)
 const PU := 53            ## + power-up kind - 1 (3)
-const COUNT := 56
+const LOCKED := 56        ## Unlock mode: a face-down tile.
+const COUNT := 57
 const GRID := 8
 const GUTTER := 2
 
@@ -152,6 +153,8 @@ func icon_region(piece: int) -> Rect2:
 ## The atlas cell that shows tile `t` as it is now, or -1 if it must be drawn live
 ## (goo part-way through it, or the animated source).
 static func sprite_for(t: Tile) -> int:
+	if t.hidden:
+		return LOCKED
 	if t.kind == Tile.ROCK:
 		return ROCK + (t.rnd & 0x7fffffff) % ROCK_VARIANTS
 	if t.kind != Tile.EMPTY or t.piece < 0:
@@ -256,6 +259,8 @@ static func paint_cell(ci: CanvasItem, i: int, rect: Rect2, pal: Dictionary) -> 
 		PipeArt.draw_coin(ci, c + Vector2(0, -T * 0.06), T * 0.22, Tuning.BONUS_VALUES[i - COIN], 0.0, true, false)
 	elif i >= PU and i < PU + 3:
 		PipeArt.draw_powerup(ci, c, T * PU_R, i - PU + 1, 0.0, false)
+	elif i == LOCKED:
+		PipeArt.draw_locked(ci, rect, pal)
 
 
 static func _paint_full(ci: CanvasItem, c: Vector2, T: float, piece: int, pal: Dictionary, full: Array, special: int, entry: int) -> void:

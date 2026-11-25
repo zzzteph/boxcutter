@@ -73,6 +73,10 @@ func lay_spine_ahead(rows_ahead := 6) -> void:
 func _run() -> void:
 	await frames(3)
 	var S = game.State
+	# The classic (piece queue) mode is tested first; unlock mode further down.
+	game.mode = "classic"
+	game.go_to_title()
+	await frames(1)
 	check(game.state == S.TITLE, "starts on the title screen")
 	check(game.ui.title_screen.visible, "title overlay visible")
 
@@ -82,11 +86,22 @@ func _run() -> void:
 		for fx in [0.2, 0.5, 0.8]:
 			game.go_to_title()
 			await frames(1)
-			click(Vector2(game.view_size.x * fx, game.view_size.y * fy))
+			var pt := Vector2(game.view_size.x * fx, game.view_size.y * fy)
+			if game.ui._mode_button.get_global_rect().has_point(pt):
+				continue  # That's the mode switch, tested below.
+			click(pt)
 			await frames(1)
 			if game.state != S.COUNTDOWN:
 				missed.append(Vector2(fx, fy))
 	check(missed.is_empty(), "every point on the title screen starts the game (missed %s)" % [missed])
+	game.go_to_title()
+	await frames(2)
+	click(game.ui._mode_button.get_global_rect().get_center())
+	await frames(1)
+	check(game.state == S.TITLE and game.mode == "unlock", "the mode button switches mode without starting")
+	click(game.ui._mode_button.get_global_rect().get_center())
+	await frames(1)
+	check(game.mode == "classic", "the mode button switches back")
 	game.go_to_title()
 	await frames(1)
 	click(game.view_size * 0.5)
@@ -224,6 +239,84 @@ func _run() -> void:
 	check(game.state == S.GAMEOVER, "game over after the spill")
 	check(game.best >= game.score, "best score kept")
 	check(SaveData.load_best() == game.best, "best score saved")
+
+	# --- unlock mode (BioShock-style) ---
+	game.mode = "unlock"
+	game.start_run()
+	await frames(1)
+	check(game.state == S.COUNTDOWN, "unlock mode starts")
+	var hidden_ok := true
+	for r in range(1, 5):
+		for c in Tuning.COLS:
+			if not game.grid.get_tile(c, r).hidden:
+				hidden_ok = false
+	check(hidden_ok, "unlock mode: tiles start locked")
+	click(tile_center(3, 1))
+	await frames(1)
+	check(not game.grid.get_tile(3, 1).hidden and game.flips == 1, "clicking a locked tile unlocks it")
+	for r in range(1, 4):
+		for c in Tuning.COLS:
+			if game.grid.get_tile(c, r).hidden:
+				click(tile_center(c, r))
+	await frames(1)
+	var src := Vector2i(-1, -1)
+	var dst := Vector2i(-1, -1)
+	for r in range(1, 4):
+		for c in Tuning.COLS:
+			var t: Tile = game.grid.get_tile(c, r)
+			if src.x < 0 and t.is_loose():
+				src = Vector2i(c, r)
+			elif dst.x < 0 and t.is_slot():
+				dst = Vector2i(c, r)
+	check(src.x >= 0 and dst.x >= 0, "unlocked rows hold pipes and open spots")
+	if src.x >= 0 and dst.x >= 0:
+		var piece: int = game.grid.get_tile(src.x, src.y).piece
+		click(tile_center(src.x, src.y))
+		await frames(1)
+		check(game.held_piece == piece and game.held_from == src, "clicking a pipe picks it up")
+		click(tile_center(src.x, src.y))
+		await frames(1)
+		check(game.held_piece == -1, "clicking it again puts it back")
+		click(tile_center(src.x, src.y))
+		click(tile_center(dst.x, dst.y))
+		await frames(1)
+		check(game.grid.get_tile(dst.x, dst.y).piece == piece and game.grid.get_tile(src.x, src.y).piece == -1 and game.held_piece == -1,
+				"clicking an open spot moves the pipe there")
+	# An alarm trap.
+	var trap: Tile = null
+	for c in Tuning.COLS:
+		var t: Tile = game.grid.get_tile(c, 5)
+		if t.hidden and t.kind == Tile.EMPTY:
+			trap = t
+			t.alarm = true
+			t.piece = -1
+			click(tile_center(c, 5))
+			break
+	await frames(1)
+	check(trap != null and game.alarms == 1 and game.surge_timer > 0.0, "unlocking an alarm trap starts a surge")
+	check(game.effective_speed() > game.height_speed(), "the surge speeds the goo up")
+	# Goo meets a locked tile.
+	game.start_run()
+	await frames(1)
+	game.grid.get_tile(3, 1).hidden = true
+	key(KEY_F)
+	guard = 0
+	while game.state == S.RUNNING and guard < 2000:
+		await frames(1)
+		guard += 1
+	check(game.last_reason == "locked", "goo reaching a locked tile spills (got %s)" % game.last_reason)
+	# A long unlock-mode run, played by the autoplay bot through the same clicks.
+	game.start_run()
+	game.debug_autoplay = true
+	guard = 0
+	while game.height < 120 and guard < 40000:
+		await frames(1)
+		guard += 1
+		if game.state == S.GAMEOVER:
+			break
+	game.debug_autoplay = false
+	check(game.height >= 120, "unlock mode: autoplay climbs to row 120 (reached %d, %s)" % [game.height, game.last_reason])
+	print("unlock run: height %d, score %d, flips %d, alarms %d" % [game.height, game.score, game.flips, game.alarms])
 
 	# --- frame cost ---
 	var total := 0.0

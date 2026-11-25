@@ -14,10 +14,12 @@ const REASONS := {
 	"wall": "The goo hit the wall.",
 	"oneway": "The goo hit a one-way pipe from the wrong side.",
 	"clogged": "The goo ran into a pipe that was already full.",
+	"locked": "The goo hit a locked tile. Unlock the tiles ahead of it.",
 }
 
 var state := State.TITLE
 var paused := false
+var mode: String = Tuning.DEFAULT_MODE  ## "unlock" (BioShock-style) or "classic" (piece queue).
 var grid := Grid.new()
 var gen := LevelGenerator.new()
 var flow := Flow.new()
@@ -54,6 +56,12 @@ var crosses := 0
 var bonuses := 0
 var last_reason := ""
 var _beeped := 0
+# Unlock mode
+var held_from := Vector2i(-1, -1)  ## Tile whose pipe is picked up ((-1,-1) = from a wildcard).
+var held_piece := -1               ## Pipe in hand, -1 = empty hand.
+var surge_timer := 0.0             ## Alarm surge time left.
+var flips := 0
+var alarms := 0
 
 # Layout, in virtual pixels (720 on the short side).
 var view_size := Vector2(720, 720)
@@ -90,6 +98,7 @@ func _ready() -> void:
 	renderer.atlas = atlas
 	if Tuning.PS1_MODE:
 		_build_world_viewport()
+		renderer.overlay_parent = self
 		world_vp.add_child(renderer)
 	else:
 		add_child(renderer)
@@ -100,6 +109,9 @@ func _ready() -> void:
 	ui.game = self
 	add_child(ui)
 	best = SaveData.load_best()
+	var saved_mode := str(SaveData.load_setting("mode", Tuning.DEFAULT_MODE))
+	if saved_mode == "unlock" or saved_mode == "classic":
+		mode = saved_mode
 	_read_debug_flags()
 	_compute_layout()
 	new_board(rng.randi())
@@ -139,6 +151,11 @@ func _notification(what: int) -> void:
 func new_board(seed_value: int) -> void:
 	grid.clear()
 	gen.reset(seed_value)
+	gen.unlock_mode = mode == "unlock"
+	_clear_hand()
+	surge_timer = 0.0
+	flips = 0
+	alarms = 0
 	flow.reset()
 	if renderer:
 		renderer.clear_fx()
@@ -176,6 +193,15 @@ func start_run() -> void:
 	state = State.COUNTDOWN
 	ui.show_play()
 	sfx.play("click")
+
+
+func set_mode(m: String) -> void:
+	if m == mode or (m != "unlock" and m != "classic"):
+		return
+	mode = m
+	SaveData.save_setting("mode", m)
+	if state == State.TITLE:
+		new_board(rng.randi())
 
 
 func go_to_title() -> void:
@@ -247,6 +273,7 @@ func _process(dt: float) -> void:
 
 func _update_play(dt: float) -> void:
 	lock_timer = maxf(0.0, lock_timer - dt)
+	_check_hand()
 	if state == State.COUNTDOWN:
 		countdown -= dt
 		var n := int(ceil(countdown))
@@ -257,6 +284,7 @@ func _update_play(dt: float) -> void:
 			_start_flow()
 		return
 	slow_timer = maxf(0.0, slow_timer - dt)
+	surge_timer = maxf(0.0, surge_timer - dt)
 	var amount := dt * effective_speed() / Tuning.BASE_SEGMENT_TIME
 	for e in flow.advance(grid, amount, _goo_color()):
 		grid.touch(e["row"])
@@ -300,6 +328,8 @@ func effective_speed() -> float:
 		s *= Tuning.FAST_FORWARD_MULT
 	if slow_timer > 0.0:
 		s *= Tuning.SLOWMO_MULT
+	if surge_timer > 0.0:
+		s *= Tuning.ALARM_SURGE_MULT
 	return s
 
 
@@ -366,7 +396,7 @@ func _apply_powerup(kind: int, wp: Vector2) -> void:
 			renderer.float_text(wp, "BOMB", col)
 		Tile.PU_WILD:
 			wildcards += 1
-			ui.show_toast("WILDCARD!  Choose your next piece", col)
+			ui.show_toast("WILDCARD!  Choose any piece", col)
 			renderer.float_text(wp, "WILDCARD", col)
 	renderer.burst(wp, col, 32, 4.5, 0.08, 1.0)
 	sfx.play("powerup")
@@ -385,6 +415,8 @@ func _game_over(e: Dictionary) -> void:
 	renderer.burst(p, col, 44, 5.0, 0.09, 1.2, 8.0)
 	fast_forward = false
 	slow_timer = 0.0
+	surge_timer = 0.0
+	_clear_hand()
 	if score > best:
 		best = score
 		new_best = true
@@ -405,14 +437,17 @@ func is_tile_visible(c: int, r: int) -> bool:
 
 
 func _bombable(t: Tile) -> bool:
-	return t.kind == Tile.ROCK or (t.kind == Tile.EMPTY and t.piece >= 0 and not t.has_goo())
+	return not t.hidden and (t.kind == Tile.ROCK or (t.kind == Tile.EMPTY and t.piece >= 0 and not t.has_goo()))
 
 
-## What clicking tile (c, r) would do: place, replace, bomb, locked or no.
+## What clicking tile (c, r) would do. Classic: place, replace, bomb, locked
+## or no. Unlock: flip, pick, drop, deselect, bomb or no.
 func placement_mode(c: int, r: int) -> String:
 	var t := grid.get_tile(c, r)
 	if t == null or not is_tile_visible(c, r):
 		return "no"
+	if mode == "unlock":
+		return _unlock_action(t, c, r)
 	if bombs > 0 and _bombable(t):
 		return "bomb"
 	if t.kind != Tile.EMPTY or t.has_goo() or t.fixed:
@@ -425,29 +460,23 @@ func placement_mode(c: int, r: int) -> String:
 func try_place(c: int, r: int) -> String:
 	if (state != State.COUNTDOWN and state != State.RUNNING) or paused:
 		return "inactive"
-	var mode := placement_mode(c, r)
+	if mode == "unlock":
+		return _unlock_click(c, r)
+	var action := placement_mode(c, r)
 	var t := grid.get_tile(c, r)
 	var wp := Vector2(c + 0.5, r + 0.5)
-	if mode == "bomb" or mode == "place" or mode == "replace":
+	if action == "bomb" or action == "place" or action == "replace":
 		grid.touch(r)
 		renderer.animate_row(r, time + 0.45)
-	match mode:
+	match action:
 		"bomb":
-			bombs -= 1
-			t.kind = Tile.EMPTY
-			t.shape = PackedVector2Array()
-			t.clear_pipe()
-			renderer.burst(wp, Color("ff9a3a"), 34, 5.0, 0.1, 0.8, 4.0)
-			renderer.burst(wp, Color(0.55, 0.55, 0.55), 16, 3.0, 0.08, 0.9, 8.0, false)
-			renderer.float_text(wp, "BOOM!", Color("ff9a3a"))
-			cam.add_shake(0.35)
-			sfx.play("bomb")
+			_bomb(t, wp)
 		"place", "replace":
 			t.piece = queue.pop_front()
 			queue.append(_random_piece())
 			queue_shift = 1.0
 			t.placed_at = time
-			if mode == "replace":
+			if action == "replace":
 				score = maxi(0, score - Tuning.REPLACE_PENALTY)
 				lock_timer = Tuning.REPLACE_LOCK_TIME
 				sfx.play("replace")
@@ -461,7 +490,117 @@ func try_place(c: int, r: int) -> String:
 			ui.show_toast("LOCKED!", Color("ff6a5a"))
 		_:
 			sfx.play("deny")
-	return mode
+	return action
+
+
+func _bomb(t: Tile, wp: Vector2) -> void:
+	bombs -= 1
+	t.kind = Tile.EMPTY
+	t.shape = PackedVector2Array()
+	t.clear_pipe()
+	renderer.burst(wp, Color("ff9a3a"), 34, 5.0, 0.1, 0.8, 4.0)
+	renderer.burst(wp, Color(0.55, 0.55, 0.55), 16, 3.0, 0.08, 0.9, 8.0, false)
+	renderer.float_text(wp, "BOOM!", Color("ff9a3a"))
+	cam.add_shake(0.35)
+	sfx.play("bomb")
+
+
+# --- unlock mode (BioShock-style) -------------------------------------------------------------
+
+func _unlock_action(t: Tile, c: int, r: int) -> String:
+	if t.hidden:
+		return "flip"
+	if held_piece >= 0:
+		if Vector2i(c, r) == held_from:
+			return "deselect"
+		if t.is_slot() or t.is_loose():
+			return "drop"
+		return "no"
+	# In unlock mode loose pipes are picked up, so bombs are for rocks and fixed pipes.
+	if bombs > 0 and not t.hidden and (t.kind == Tile.ROCK or (t.kind == Tile.EMPTY and t.fixed and not t.has_goo())):
+		return "bomb"
+	if t.is_loose():
+		return "pick"
+	return "no"
+
+
+## Unlock a tile, pick a pipe up, or drop the pipe in hand (swapping with
+## whatever is there).
+func _unlock_click(c: int, r: int) -> String:
+	var t := grid.get_tile(c, r)
+	if t == null or not is_tile_visible(c, r):
+		sfx.play("deny")
+		return "no"
+	var action := _unlock_action(t, c, r)
+	var wp := Vector2(c + 0.5, r + 0.5)
+	match action:
+		"flip":
+			t.hidden = false
+			t.flip_at = time
+			flips += 1
+			grid.touch(r)
+			renderer.animate_row(r, time + Tuning.FLIP_TIME + 0.05)
+			sfx.play("flip", 0.9 + randf() * 0.2)
+			renderer.burst(wp, Color(0.8, 0.85, 0.9), 8, 2.0, 0.05, 0.4, 2.0, false)
+			if t.alarm:
+				t.alarm = false
+				_trigger_alarm(wp)
+		"pick":
+			held_from = Vector2i(c, r)
+			held_piece = t.piece
+			sfx.play("pick")
+		"deselect":
+			_clear_hand()
+			sfx.play("click")
+		"drop":
+			var src: Tile = grid.get_tile(held_from.x, held_from.y) if held_from.x >= 0 else null
+			var old := t.piece
+			t.piece = held_piece
+			t.placed_at = time
+			grid.touch(r)
+			renderer.animate_row(r, time + 0.45)
+			if src != null:
+				src.piece = old
+				if old >= 0:
+					src.placed_at = time
+				grid.touch(held_from.y)
+				renderer.animate_row(held_from.y, time + 0.45)
+			_clear_hand()
+			sfx.play("place", 0.95 + randf() * 0.1)
+			renderer.burst(wp, Color(1, 1, 1, 0.7), 6, 1.5, 0.05, 0.35, 0.0, false)
+		"bomb":
+			_bomb(t, wp)
+			grid.touch(r)
+			renderer.animate_row(r, time + 0.45)
+		_:
+			sfx.play("deny")
+	return action
+
+
+func _trigger_alarm(wp: Vector2) -> void:
+	alarms += 1
+	surge_timer = Tuning.ALARM_SURGE_TIME
+	score = maxi(0, score - Tuning.ALARM_PENALTY)
+	cam.add_shake(0.45)
+	sfx.play("alarm")
+	renderer.burst(wp, Color("ff3a2a"), 30, 4.0, 0.08, 0.9)
+	renderer.float_text(wp, "ALARM! -%d" % Tuning.ALARM_PENALTY, Color("ff5a4a"), 0.36, 1.3)
+	ui.show_toast("ALARM!  The goo surges", Color("ff5a4a"))
+	ui.flash(Color(1.0, 0.1, 0.05, 0.35))
+
+
+func _clear_hand() -> void:
+	held_from = Vector2i(-1, -1)
+	held_piece = -1
+
+
+## Drop the hand if the picked-up pipe scrolled away, got goo, or changed.
+func _check_hand() -> void:
+	if held_piece < 0 or held_from.x < 0:
+		return
+	var t := grid.get_tile(held_from.x, held_from.y)
+	if t == null or not t.is_loose() or t.piece != held_piece or not is_tile_visible(held_from.x, held_from.y):
+		_clear_hand()
 
 
 # --- input entry points ---------------------------------------------------------------------
@@ -553,10 +692,15 @@ func choose_wildcard(piece: int) -> void:
 		return
 	if (state != State.COUNTDOWN and state != State.RUNNING) or paused:
 		return
-	queue[0] = piece
 	wildcards -= 1
-	queue_shift = 0.0
 	sfx.play("powerup", 1.4)
+	if mode == "unlock":
+		held_from = Vector2i(-1, -1)
+		held_piece = piece
+		ui.show_toast("%s a spot to place your %s" % ["Tap" if is_touch else "Click", Pieces.NAMES[piece]], Color("e8b0ff"))
+		return
+	queue[0] = piece
+	queue_shift = 0.0
 	ui.show_toast("Next piece: %s" % Pieces.NAMES[piece], Color("e8b0ff"))
 
 
@@ -687,6 +831,9 @@ func _autoplay_step() -> void:
 			start_run()
 			activate_fast_forward()
 		State.COUNTDOWN, State.RUNNING:
+			if mode == "unlock":
+				_autoplay_unlock()
+				return
 			var r0 := flow.row if flow.active else 0
 			for r in range(maxi(1, r0 - 1), r0 + 6):
 				var need: Dictionary = gen.spine_needs.get(r, {})
@@ -703,3 +850,32 @@ func debug_set_piece(c: int, r: int, piece: int) -> void:
 		t.placed_at = time
 		grid.touch(r)
 		renderer.animate_row(r, time + 0.45)
+
+
+## Autoplay in unlock mode: unlock the rows ahead, then swap the needed pipes
+## onto the guaranteed path, through the same clicks a player makes.
+func _autoplay_unlock() -> void:
+	_clear_hand()
+	var r0 := flow.row if flow.active else 0
+	for r in range(maxi(1, r0 - 1), r0 + 5):
+		if not is_tile_visible(0, r):
+			continue
+		for c in Tuning.COLS:
+			var t := grid.get_tile(c, r)
+			if t != null and t.hidden:
+				_unlock_click(c, r)
+		var need: Dictionary = gen.spine_needs.get(r, {})
+		for c in need:
+			var t := grid.get_tile(c, r)
+			var want := Pieces.piece_for(need[c][0], need[c][1])
+			if t == null or t.fixed or t.has_goo() or t.piece == want:
+				continue
+			for c2 in Tuning.COLS:
+				var s2 := grid.get_tile(c2, r)
+				if c2 == c or s2 == null or not s2.is_loose() or s2.piece != want:
+					continue
+				if need.has(c2) and Pieces.piece_for(need[c2][0], need[c2][1]) == want:
+					continue
+				_unlock_click(c2, r)
+				_unlock_click(c, r)
+				break

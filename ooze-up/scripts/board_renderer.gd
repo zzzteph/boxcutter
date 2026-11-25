@@ -26,6 +26,9 @@ class Layer:
 
 var game  ## The Game node (main.gd).
 var atlas: SpriteAtlas
+## Where layers that must stay sharp go (text, queue panel). In PS1 mode the
+## board renders at low resolution, so these live on the full-res screen.
+var overlay_parent: Node
 var rows_root: Node2D
 var live: Layer
 var glow: Layer
@@ -34,6 +37,7 @@ var fx: Layer
 var queue_bg: Layer
 var queue_icons: Layer
 var queue_fg: Layer
+var text_layer: Layer
 var row_views := {}       ## row -> Layer
 var _pool: Array = []
 var _animate_until := {}  ## row -> game time until which it redraws every frame
@@ -57,17 +61,20 @@ func _ready() -> void:
 	fx_sprites = _layer(_draw_fx_sprites, 160)
 	fx_sprites.material = atlas.premult_material
 	fx = _layer(_draw_fx, 170)
-	queue_bg = _layer(_draw_queue_bg, 180)
-	queue_icons = _layer(_draw_queue_icons, 181)
+	var top: Node = overlay_parent if overlay_parent != null else self
+	text_layer = _layer(_draw_text, 175, top)
+	queue_bg = _layer(_draw_queue_bg, 180, top)
+	queue_icons = _layer(_draw_queue_icons, 181, top)
 	queue_icons.material = atlas.premult_material
-	queue_fg = _layer(_draw_queue_fg, 182)
+	queue_icons.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	queue_fg = _layer(_draw_queue_fg, 182, top)
 
 
-func _layer(cb: Callable, z: int) -> Layer:
+func _layer(cb: Callable, z: int, parent: Node = null) -> Layer:
 	var l := Layer.new()
 	l.draw_cb = cb
 	l.z_index = z
-	add_child(l)
+	(parent if parent != null else self).add_child(l)
 	return l
 
 
@@ -78,6 +85,7 @@ func redraw() -> void:
 	glow.queue_redraw()
 	fx_sprites.queue_redraw()
 	fx.queue_redraw()
+	text_layer.queue_redraw()
 	var sig := _queue_signature()
 	if sig != _queue_sig or game.queue_shift > 0.0 or game.lock_timer > 0.0 or game.wildcards > 0:
 		_queue_sig = sig
@@ -204,13 +212,31 @@ func _draw_row(ci: CanvasItem) -> void:
 	if r < grid.floor_row:
 		_draw_bedrock(ci, r, x0, b.size.x, T)
 		return
+	var time: float = game.time
 	for c in Tuning.COLS:
+		var t := grid.get_tile(c, r)
+		if t != null and (t.hidden or time - t.flip_at < Tuning.FLIP_TIME):
+			continue  # Locked and flipping tiles bring their own face.
 		ci.draw_texture_rect_region(tex, Rect2(x0 + c * T, 0, T, T), atlas.region(SpriteAtlas.BASE_B if (c + r) % 2 == 0 else SpriteAtlas.BASE_A))
 	for c in Tuning.COLS:
 		var t := grid.get_tile(c, r)
 		if t == null or _is_live(t, c, r):
 			continue
 		var rect := Rect2(x0 + c * T, 0, T, T)
+		var fk := (time - t.flip_at) / Tuning.FLIP_TIME
+		if not t.hidden and fk >= 0.0 and fk < 1.0:
+			# Unlock flip: the plate turns edge-on, then the tile underneath turns face-up.
+			ci.draw_set_transform(rect.get_center(), 0.0, Vector2(maxf(0.04, absf(cos(fk * PI))), 1.0 + 0.12 * sin(fk * PI)))
+			var local := Rect2(-T * 0.5, -T * 0.5, T, T)
+			if fk < 0.5:
+				ci.draw_texture_rect_region(tex, local, atlas.region(SpriteAtlas.LOCKED))
+			else:
+				ci.draw_texture_rect_region(tex, local, atlas.region(SpriteAtlas.BASE_B if (c + r) % 2 == 0 else SpriteAtlas.BASE_A))
+				var fs := SpriteAtlas.sprite_for(t)
+				if fs >= 0:
+					ci.draw_texture_rect_region(tex, local, atlas.region(fs))
+			ci.draw_set_transform(Vector2.ZERO)
+			continue
 		var s := SpriteAtlas.sprite_for(t)
 		if s < 0:
 			if t.piece >= 0:
@@ -338,7 +364,7 @@ func _draw_fx_sprites(ci: CanvasItem) -> void:
 		var tex := atlas.tile_tex(Zones.index_for_row(r))
 		for c in Tuning.COLS:
 			var t := grid.get_tile(c, r)
-			if t == null or (t.bonus <= 0 and t.powerup == Tile.PU_NONE):
+			if t == null or t.hidden or (t.bonus <= 0 and t.powerup == Tile.PU_NONE):
 				continue
 			var rect := tile_rect(c, r)
 			var bob := Vector2(0, snap(sin(time * 3.0 + c * 1.3 + r) * T * 0.02))
@@ -355,10 +381,15 @@ func _draw_fx_sprites(ci: CanvasItem) -> void:
 					_icon(ci, tex, cell, rect.position + Vector2(T * 0.2, T * 0.21) + bob, T * 0.14 / SpriteAtlas.PU_R)
 	# Ghost of the next piece under the cursor.
 	for cell in _hover_cells():
-		var mode: String = game.placement_mode(cell.x, cell.y)
-		if mode == "place" or mode == "replace":
+		var action: String = game.placement_mode(cell.x, cell.y)
+		var ghost := -1
+		if action == "place" or action == "replace":
+			ghost = game.queue[0]
+		elif action == "drop":
+			ghost = game.held_piece
+		if ghost >= 0:
 			var tex := atlas.tile_tex(Zones.index_for_row(cell.y))
-			ci.draw_texture_rect_region(tex, tile_rect(cell.x, cell.y), atlas.region(SpriteAtlas.EMPTY + game.queue[0]), Color(0.45, 0.45, 0.45, 0.45))
+			ci.draw_texture_rect_region(tex, tile_rect(cell.x, cell.y), atlas.region(SpriteAtlas.EMPTY + ghost), Color(0.5, 0.5, 0.5, 0.5))
 
 
 ## Draw an atlas cell centred on `center`, `size` pixels across.
@@ -402,9 +433,14 @@ func _draw_fx(ci: CanvasItem) -> void:
 						var tt := fposmod(time * 0.55 + float((t.rnd + ch * 37) & 0xffff) / 997.0, 1.0)
 						var bp := center + Pieces.path_point(en, Pieces.exit_dir(t.piece, en), tt) * T
 						ci.draw_texture_rect(atlas.disk, Rect2(bp - Vector2(br, br), Vector2(br, br) * 2.0), false, PipeArt.fade(t.fill_color[ch].lightened(0.75), 0.75))
-			if t.bonus > 0 or t.powerup != Tile.PU_NONE:
+			if not t.hidden and (t.bonus > 0 or t.powerup != Tile.PU_NONE):
 				var col := Color("ffc928") if t.bonus > 0 else PipeArt.powerup_color(t.powerup)
 				ci.draw_rect(tile_rect(c, r).grow(-T * 0.075), PipeArt.fade(col, 0.25 + 0.35 * pulse), false, maxf(2.0, T * 0.045))
+	# Unlock mode: the picked-up pipe gets a bright pulsing frame.
+	if game.held_piece >= 0 and game.held_from.x >= 0:
+		var hr := tile_rect(game.held_from.x, game.held_from.y)
+		var hp := 0.6 + 0.4 * sin(time * 10.0)
+		ci.draw_rect(hr.grow(-T * 0.02), Color(1.0, 0.85, 0.2, hp), false, maxf(3.0, T * 0.07))
 	_draw_hover(ci, T)
 	if game.state == game.State.SPILL or game.state == game.State.GAMEOVER:
 		_draw_spill(ci, T)
@@ -412,6 +448,14 @@ func _draw_fx(ci: CanvasItem) -> void:
 		var a: float = clampf(p["life"] / p["max"], 0.0, 1.0)
 		var r: float = p["size"] * T * (0.5 + 0.5 * a)
 		ci.draw_texture_rect(atlas.disk, Rect2(w2s(p["p"]) - Vector2(r, r), Vector2(r, r) * 2.0), false, PipeArt.fade(p["col"], a))
+
+
+
+## Floating score text (on the sharp layer in PS1 mode).
+func _draw_text(ci: CanvasItem) -> void:
+	if game == null or game.T <= 0.0:
+		return
+	var T: float = game.T
 	var f := PipeArt.font()
 	for t in texts:
 		var a: float = clampf(t["life"] / t["max"] * 1.6, 0.0, 1.0)
@@ -431,6 +475,12 @@ func _draw_hover(ci: CanvasItem, T: float) -> void:
 				col = Color("ffb030")
 			"bomb":
 				col = Color("ff4a3a")
+			"flip":
+				col = Color("6ad8ff")
+			"drop":
+				col = Color("7dff3a")
+			"deselect":
+				col = Color("ffd23a")
 			"locked", "no":
 				col = Color(1, 0.3, 0.3, 0.6)
 		ci.draw_rect(rect.grow(-T * 0.03), col, false, maxf(2.0, T * 0.05))
@@ -561,9 +611,9 @@ func _deco(pal: Dictionary, alpha: float) -> void:
 
 func _queue_signature() -> String:
 	# Includes whether each animation is running, so the frame after it ends is redrawn too.
-	return "%s|%d|%s|%d|%d|%d|%s|%d|%d|%s|%s|%d" % [str(game.queue), game.zone_index, game.portrait, game.bombs,
+	return "%s|%d|%s|%d|%d|%d|%s|%d|%d|%s|%s|%d|%s|%d|%s" % [str(game.queue), game.zone_index, game.portrait, game.bombs,
 			ceili(game.slow_timer), game.state, game.queue_rect, atlas.icon_px, atlas.tile_px,
-			game.queue_shift > 0.0, game.lock_timer > 0.0, game.wildcards]
+			game.queue_shift > 0.0, game.lock_timer > 0.0, game.wildcards, game.mode, game.held_piece, game.is_touch]
 
 
 func _draw_queue_bg(ci: CanvasItem) -> void:
@@ -578,7 +628,10 @@ func _draw_queue_bg(ci: CanvasItem) -> void:
 	_sb.border_color = PipeArt.fade(pal["accent"], 0.55)
 	ci.draw_style_box(_sb, q)
 	var slots: Array = game.queue_slot_rects()
+	var unlock: bool = game.mode == "unlock"
 	for i in slots.size():
+		if unlock and i > 0:
+			break
 		var sr: Rect2 = slots[i]
 		_sb.bg_color = Color(1, 1, 1, 0.07) if i > 0 else PipeArt.fade(pal["tile"], 0.95)
 		_sb.set_corner_radius_all(int(sr.size.x * 0.16))
@@ -591,12 +644,33 @@ func _draw_queue_bg(ci: CanvasItem) -> void:
 	var s0: Rect2 = slots[0]
 	if game.wildcards > 0:
 		ci.draw_rect(s0.grow(4), Color.from_hsv(fposmod(game.time * 0.5, 1.0), 0.8, 1.0), false, 4)
+	var title := "HAND" if unlock else "NEXT"
 	if not game.portrait:
-		_text(ci, f, Vector2(s0.get_center().x, s0.position.y - 10), "NEXT", 20, Color(1, 1, 1, 0.8))
+		_text(ci, f, Vector2(s0.get_center().x, s0.position.y - 10), title, 20, Color(1, 1, 1, 0.8))
 	else:
-		_text(ci, f, Vector2(s0.get_center().x, s0.position.y - 4), "NEXT", 15, Color(1, 1, 1, 0.8))
+		_text(ci, f, Vector2(s0.get_center().x, s0.position.y - 4), title, 15, Color(1, 1, 1, 0.8))
+	if unlock and slots.size() > 1:
+		var hint := _hint_rect(slots)
+		var verb := "Tap" if game.is_touch else "Click"
+		var msg := ""
+		if game.held_piece >= 0:
+			msg = "%s an open spot or another pipe to swap them. %s it again to put it back." % [verb, verb]
+		else:
+			msg = "%s a locked tile to unlock it. %s a pipe, then a spot, to move it." % [verb, verb]
+		var fsz := int(clampf(hint.size.y * 0.2, 13.0, 17.0)) if game.portrait else 16
+		ci.draw_multiline_string_outline(f, hint.position + Vector2(0, fsz), msg, HORIZONTAL_ALIGNMENT_LEFT, hint.size.x, fsz, -1, 4, Color(0, 0, 0, 0.8))
+		ci.draw_multiline_string(f, hint.position + Vector2(0, fsz), msg, HORIZONTAL_ALIGNMENT_LEFT, hint.size.x, fsz, -1, Color(0.85, 0.95, 1.0, 0.9))
 	for chip in _chips():
 		_text(ci, f, chip["text_pos"], chip["text"], chip["size"], Color.WHITE, HORIZONTAL_ALIGNMENT_LEFT)
+
+
+## Unlock mode: where the how-to text goes (the space of the queue's small slots).
+func _hint_rect(slots: Array) -> Rect2:
+	var q: Rect2 = game.queue_rect
+	var box := (slots[1] as Rect2).merge(slots[slots.size() - 1])
+	if game.portrait:
+		return Rect2(box.position.x, q.position.y + 8.0, box.size.x, q.size.y - 16.0)
+	return Rect2(q.position.x + 12.0, box.position.y, q.size.x - 24.0, box.size.y)
 
 
 func _chips() -> Array:
@@ -625,6 +699,12 @@ func _draw_queue_icons(ci: CanvasItem) -> void:
 	var slots: Array = game.queue_slot_rects()
 	var shift: float = game.queue_shift
 	var itex := atlas.icon_tex(game.zone_index)
+	if game.mode == "unlock":
+		if not slots.is_empty() and game.held_piece >= 0:
+			var s0: Rect2 = slots[0]
+			var sz := s0.size.x * 0.86
+			ci.draw_texture_rect_region(itex, Rect2(s0.get_center() - Vector2(sz, sz) * 0.5, Vector2(sz, sz)), atlas.icon_region(game.held_piece))
+		slots = []
 	for i in slots.size():
 		var sr: Rect2 = slots[i]
 		var pr := sr

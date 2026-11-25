@@ -18,6 +18,7 @@ var spine := {}            ## row -> Vector2i(entry_col, exit_col)
 var spine_needs := {}      ## row -> {col: [entry_side, exit_side]}
 var last_powerup_row := 0
 var next_row := 0
+var unlock_mode := false   ## Fill rows with face-down tiles hiding loose pipes.
 
 
 func reset(seed_value: int) -> void:
@@ -157,6 +158,8 @@ func _make_row(r: int) -> Array:
 		(tiles[c] as Tile).spine = true
 
 	if r < Tuning.SAFE_ROWS:
+		if unlock_mode:
+			_fill_unlock(tiles, need, r)
 		return tiles
 
 	var zone := Zones.theme_for_row(r)
@@ -226,4 +229,48 @@ func _make_row(r: int) -> Array:
 			t.powerup = 1 + _weighted(Tuning.POWERUP_WEIGHTS)
 			last_powerup_row = r
 
+	if unlock_mode:
+		_fill_unlock(tiles, need, r)
 	return tiles
+
+
+## Unlock mode: every tile is face-down. Each row hides at least the pipes its
+## own guaranteed path needs, so the player can always build the path by
+## unlocking that row and swapping pipes around. The rest is random pipes,
+## empty slots and the odd alarm trap.
+func _fill_unlock(tiles: Array, need: Dictionary, r: int) -> void:
+	var needed := []
+	var spine_free := []
+	var others := []
+	for c in Tuning.COLS:
+		var t: Tile = tiles[c]
+		t.hidden = true
+		if t.kind != Tile.EMPTY or t.fixed:
+			continue
+		if need.has(c):
+			needed.append(P.piece_for(need[c][0], need[c][1]))
+			spine_free.append(c)
+		else:
+			others.append(c)
+	# Some path tiles already hide the right pipe; the rest of the needed pipes
+	# land somewhere else in the row.
+	var leftover := []
+	for i in spine_free.size():
+		if rng.randf() < Tuning.UNLOCK_SPINE_PIECE_CHANCE:
+			(tiles[spine_free[i]] as Tile).piece = needed[i]
+		else:
+			leftover.append(needed[i])
+	var spots := []
+	for c in spine_free + others:
+		if (tiles[c] as Tile).piece < 0:
+			spots.append(c)
+	_shuffle(spots)
+	for i in leftover.size():
+		(tiles[spots[i]] as Tile).piece = leftover[i]
+	for i in range(leftover.size(), spots.size()):
+		var t: Tile = tiles[spots[i]]
+		if rng.randf() < Tuning.UNLOCK_PIECE_FILL:
+			t.piece = _weighted(Tuning.PIECE_WEIGHTS)
+		elif r >= Tuning.ALARM_START_ROW and not t.spine and t.bonus == 0 and t.powerup == Tile.PU_NONE \
+				and rng.randf() < Tuning.ALARM_CHANCE:
+			t.alarm = true

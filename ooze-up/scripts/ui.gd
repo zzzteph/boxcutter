@@ -98,6 +98,9 @@ var _key_buttons := []     ## [Button, mouse/keyboard text, touch text]
 var _help: Label
 var _picker_label: Label
 var _best_box: Control
+var _mode_button: Button
+var _flash: ColorRect
+var _flash_tween: Tween
 
 
 func _ready() -> void:
@@ -113,6 +116,11 @@ func _ready() -> void:
 	_build_title()
 	_build_pause()
 	_build_over()
+	_flash = ColorRect.new()
+	_flash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_flash.color = Color(1, 0, 0, 0)
+	root.add_child(_flash)
 
 
 # --- theme ------------------------------------------------------------------------------
@@ -313,6 +321,14 @@ func _build_picker() -> void:
 
 func _build_title() -> void:
 	title_screen = _overlay()
+	# The main screen gets its own background instead of the dimmed board.
+	var dim := title_screen.get_child(0)
+	title_screen.remove_child(dim)
+	dim.queue_free()
+	var backdrop := TitleBackdrop.new()
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	title_screen.add_child(backdrop)
+	title_screen.move_child(backdrop, 0)
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 10)
 	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -329,6 +345,12 @@ func _build_title() -> void:
 	vb.add_child(sp)
 	title_prompt = _slabel("CLICK TO START", 40, Color("ffffff"), 12)
 	vb.add_child(title_prompt)
+	_mode_button = _button("", func():
+		game.set_mode("classic" if game.mode == "unlock" else "unlock")
+		_apply_layout(), 420)
+	_mode_button.custom_minimum_size = Vector2(0, 54)
+	_mode_button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	vb.add_child(_mode_button)
 	title_best = _slabel("BEST: 0", 28, Color("ffd23a"), 8)
 	vb.add_child(title_best)
 	var sp2 := Control.new()
@@ -431,6 +453,14 @@ func show_banner(text: String) -> void:
 	_banner_tween.tween_property(banner, "modulate:a", 1.0, 0.25)
 	_banner_tween.tween_interval(1.8)
 	_banner_tween.tween_property(banner, "modulate:a", 0.0, 0.5)
+
+
+func flash(col: Color) -> void:
+	if _flash_tween:
+		_flash_tween.kill()
+	_flash.color = col
+	_flash_tween = create_tween()
+	_flash_tween.tween_property(_flash, "color:a", 0.0, 0.5)
 
 
 func show_toast(text: String, col := Color.WHITE) -> void:
@@ -536,7 +566,7 @@ func _apply_layout() -> void:
 	var vs: Vector2 = game.view_size
 	var touch: bool = game.is_touch
 	# Text scales down on narrow screens so headings never run off the edge.
-	var k := clampf(vs.x / 680.0, 0.6, 1.0)
+	var k := clampf(minf(vs.x / 680.0, vs.y / 760.0), 0.6, 1.0)
 	for e in _scaled:
 		var l: Label = e[0]
 		l.add_theme_font_size_override("font_size", maxi(12, int(e[1] * k)))
@@ -552,15 +582,24 @@ func _apply_layout() -> void:
 	btn_pause.custom_minimum_size = Vector2(bs, bs)
 	btn_mute.custom_minimum_size = Vector2(bs, bs)
 	title_prompt.text = "TAP TO START" if touch else "CLICK TO START"
-	if touch:
-		_help.text = "Tap a tile to place the next piece. Tap a dry pipe to swap it (-50 points, 1 s lock).\nFAST: goo x5, points x2 until you spill."
+	var unlock: bool = game.mode == "unlock"
+	_mode_button.text = "MODE: UNLOCK  (BioShock-style)" if unlock else "MODE: CLASSIC  (piece queue)"
+	var verb := "Tap" if touch else "Click"
+	if unlock:
+		_help.text = "%s a locked tile to unlock it and see what's under it. %s a pipe, then a spot, to swap them. Locked tiles stop the goo, and some hide alarm traps." % [verb, verb]
+	elif touch:
+		_help.text = "Tap a tile to place the next piece. Tap a dry pipe to swap it (-50 points, 1 s lock)."
 	else:
-		_help.text = "Click a tile: place the next piece  -  click a dry pipe to replace it (-50, 1 s lock)\n" + \
-				"F: fast-forward (x5 flow, x2 points)   P / Esc: pause   M: mute   R: restart\n" + \
-				"Arrows / WASD + Space: place with the keyboard   1-7: pick a wildcard piece"
+		_help.text = "Click a tile to place the next piece. Click a dry pipe to replace it (-50 points, 1 s lock)."
+	if touch:
+		_help.text += "\nFAST: goo x5, points x2 until you spill."
+	else:
+		_help.text += "\nF: fast-forward (x5 flow, x2 points)   P / Esc: pause   M: mute   R: restart\n" + \
+				"Arrows / WASD + Space: play with the keyboard   1-7: pick a wildcard piece"
 	_help.custom_minimum_size = Vector2(minf(560.0, vs.x - 48.0), 0)
 	over_reason.custom_minimum_size = Vector2(minf(420.0, vs.x - 96.0), 0)
-	_picker_label.text = "WILDCARD! Pick your next piece" if touch else "WILDCARD! Pick your next piece (1-7)"
+	var what := "Pick any piece to place" if unlock else "Pick your next piece"
+	_picker_label.text = "WILDCARD! " + what + ("" if touch else " (1-7)")
 	var pb := clampf((vs.x - 110.0) / 7.0, 40.0, 62.0)
 	for art in picker_buttons:
 		(art.get_parent() as Control).custom_minimum_size = Vector2(pb, pb)

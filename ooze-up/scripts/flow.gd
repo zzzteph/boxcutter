@@ -51,6 +51,8 @@ func begin(grid: Grid, c: int, r: int, entry_side: int, goo: Color) -> bool:
 static func check_enter(t: Tile, side: int) -> String:
 	if t == null:
 		return "wall"
+	if t.hidden:
+		return "locked"
 	if t.kind == Tile.ROCK:
 		return "rock"
 	if t.kind == Tile.SOURCE:

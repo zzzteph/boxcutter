@@ -15,6 +15,7 @@ func _initialize() -> void:
 	test_block_reasons()
 	test_reservoir_is_slow()
 	test_generator_solvable()
+	test_unlock_generator_solvable()
 	test_memory_discard()
 	print("\n%d checks, %d failures" % [checks, failures])
 	quit(1 if failures > 0 else 0)
@@ -351,6 +352,82 @@ func bfs_reaches_top(g: Grid, top_row: int) -> bool:
 				seen[ns] = true
 				q.append(ns)
 	return false
+
+
+## Unlock mode: every row hides the pipes its guaranteed path needs, so unlocking
+## a row and swapping pipes inside it always lets the goo through.
+func test_unlock_generator_solvable() -> void:
+	var rows := 300
+	var seeds := 120
+	var bad_hidden := 0
+	var bad_stock := 0
+	var bad_alarm := 0
+	var bad_run := 0
+	var alarms := 0
+	for s in seeds:
+		var g := Grid.new()
+		var gen := LevelGenerator.new()
+		gen.reset(500 + s * 104729)
+		gen.unlock_mode = true
+		gen.generate_until(g, rows)
+		for r in range(1, rows + 1):
+			var stock := {}
+			for c in Tuning.COLS:
+				var t := g.get_tile(c, r)
+				if not t.hidden:
+					bad_hidden += 1
+				if t.alarm:
+					alarms += 1
+					if t.spine or t.piece >= 0:
+						bad_alarm += 1
+				if t.kind == Tile.EMPTY and not t.fixed and t.piece >= 0:
+					stock[t.piece] = int(stock.get(t.piece, 0)) + 1
+			var need: Dictionary = gen.spine_needs[r]
+			for c in need:
+				if g.get_tile(c, r).fixed:
+					continue
+				var p := P.piece_for(need[c][0], need[c][1])
+				stock[p] = int(stock.get(p, 0)) - 1
+			for p in stock:
+				if stock[p] < 0:
+					bad_stock += 1
+		# Solve like a player: unlock each row, swap the needed pipes onto the path.
+		for r in range(1, rows + 1):
+			for c in Tuning.COLS:
+				g.get_tile(c, r).hidden = false
+			var need: Dictionary = gen.spine_needs[r]
+			for c in need:
+				var t := g.get_tile(c, r)
+				var want := P.piece_for(need[c][0], need[c][1])
+				if t.fixed or t.piece == want:
+					continue
+				for c2 in Tuning.COLS:
+					var o := g.get_tile(c2, r)
+					if c2 == c or not o.is_loose() or o.piece != want:
+						continue
+					if need.has(c2) and P.piece_for(need[c2][0], need[c2][1]) == want:
+						continue
+					o.piece = t.piece
+					t.piece = want
+					break
+		var f := Flow.new()
+		f.begin(g, Tuning.SOURCE_COL, 0, P.S, Color.GREEN)
+		var top := 0
+		for i in 20000:
+			f.advance(g, 0.9, Color.GREEN)
+			top = maxi(top, f.row)
+			if not f.active:
+				break
+		if top < rows:
+			bad_run += 1
+	check(bad_hidden == 0, "unlock mode: every tile above the pump starts locked (%d not)" % bad_hidden)
+	check(bad_stock == 0, "unlock mode: each row hides the pipes its path needs (%d short)" % bad_stock)
+	check(bad_alarm == 0 and alarms > 0, "unlock mode: alarms sit only in empty off-path slots (%d bad, %d total)" % [bad_alarm, alarms])
+	check(bad_run == 0, "unlock mode: swapping within each row gets the goo to row %d on every seed (%d failed)" % [rows, bad_run])
+	var g2 := empty_grid(4)
+	put(g2, 3, 1, P.V)
+	g2.get_tile(3, 2).hidden = true
+	expect_block(g2, 3, 1, P.S, "locked", "locked tile")
 
 
 func test_memory_discard() -> void:

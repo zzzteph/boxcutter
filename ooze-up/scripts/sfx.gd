@@ -162,3 +162,20 @@ func _build_all() -> void:
 	b = _buffer(0.04)
 	_tone(b, 0.0, 0.035, 1000.0, 900.0, "sine", 0.25, 0.001, 2.0)
 	streams["click"] = _to_stream(b)
+
+	# Unlock: a mechanical clack as the plate flips over.
+	b = _buffer(0.16)
+	_tone(b, 0.0, 0.03, 2400.0, 2400.0, "noise", 0.45, 0.001, 2.0)
+	_tone(b, 0.0, 0.08, 520.0, 260.0, "square", 0.12, 0.001, 2.0)
+	_tone(b, 0.07, 0.05, 1800.0, 1800.0, "noise", 0.3, 0.001, 2.0)
+	streams["flip"] = _to_stream(b)
+
+	b = _buffer(0.1)
+	_tone(b, 0.0, 0.09, 500.0, 950.0, "tri", 0.35, 0.002, 1.5)
+	streams["pick"] = _to_stream(b)
+
+	# Alarm: a two-tone siren.
+	b = _buffer(0.9)
+	for i in 4:
+		_tone(b, i * 0.22, 0.2, 880.0 if i % 2 == 0 else 620.0, 880.0 if i % 2 == 0 else 620.0, "square", 0.16, 0.005, 0.6)
+	streams["alarm"] = _to_stream(b)

@@ -38,6 +38,17 @@ const REPLACE_PENALTY := 50          ## Points lost per replace.
 ## Queue weights, indexed by piece id: H, V, SE(┌), SW(┐), NE(└), NW(┘), CROSS.
 const PIECE_WEIGHTS := [16, 16, 14, 14, 14, 14, 5]
 
+# --- Unlock mode (BioShock-style hacking) -----------------------------------
+const DEFAULT_MODE := "unlock"       ## "unlock" (face-down tiles you flip and move) or "classic" (piece queue).
+const UNLOCK_PIECE_FILL := 0.72      ## Chance a locked tile hides a pipe (otherwise an empty slot).
+const UNLOCK_SPINE_PIECE_CHANCE := 0.5 ## Chance a guaranteed-path tile already hides the pipe it needs.
+const ALARM_START_ROW := 15          ## Alarm traps appear from this row.
+const ALARM_CHANCE := 0.07           ## Chance per hidden empty slot to be an alarm.
+const ALARM_SURGE_TIME := 4.0        ## Seconds the goo surges after an alarm.
+const ALARM_SURGE_MULT := 1.8        ## Flow multiplier during a surge.
+const ALARM_PENALTY := 100           ## Points lost per alarm.
+const FLIP_TIME := 0.3               ## Seconds of the unlock flip animation.
+
 # --- Scoring ----------------------------------------------------------------
 const SCORE_SEGMENT := 10            ## Points per filled segment.
 const SCORE_CROSS_DOUBLE := 100      ## Points when a cross is filled both ways.
