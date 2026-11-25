@@ -1,10 +1,10 @@
 ## ============================================================================
 ##  TITLE BACKDROP - the main screen's own background.
 ## ============================================================================
-## A pump-station wall (steel plates, seams, rivets, dripping water, a hazard
-## strip on the floor) and two pipe runs climbing the screen edges with water
-## surging through them on a loop. The pipes are drawn once per screen size;
-## only the water and drips are redrawn each frame.
+## A pump-station wall (steel plates, seams, rivets, a hazard strip on the
+## floor) and two pipe runs climbing the screen edges with water surging
+## through them on a loop. The pipes are drawn once per screen size; only the
+## water is redrawn each frame.
 class_name TitleBackdrop
 extends Control
 
@@ -138,12 +138,6 @@ func _draw() -> void:
 	var c := Vector2(size.x * 0.5, size.y * 0.36)
 	var gr := minf(size.x, size.y) * 0.6
 	draw_texture_rect(_glow, Rect2(c - Vector2(gr, gr), Vector2(gr, gr) * 2.0), false, Color(0.23, 0.7, 1.0, 0.13))
-	# Water dripping from the ceiling.
-	for i in 14:
-		var dx := BoardRenderer.h01(i * 3.1) * size.x
-		var fall := fposmod(time * (120.0 + BoardRenderer.h01(i * 1.7) * 160.0) + BoardRenderer.h01(i * 7.7) * size.y * 2.0, size.y * 2.0)
-		if fall < size.y:
-			draw_rect(Rect2(dx, fall, 2, 7), Color(0.55, 0.85, 1.0, 0.5))
 	# Hazard strip along the floor.
 	var band := Rect2(0, size.y - maxf(14.0, _cell * 0.3), size.x, maxf(14.0, _cell * 0.3))
 	draw_rect(band, Color("ffc928"))

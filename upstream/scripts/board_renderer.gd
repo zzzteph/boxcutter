@@ -738,7 +738,7 @@ func _hint_rect(slots: Array) -> Rect2:
 	var q: Rect2 = game.queue_rect
 	var box := (slots[1] as Rect2).merge(slots[slots.size() - 1])
 	if game.portrait:
-		return Rect2(box.position.x, q.position.y + 8.0, box.size.x, q.size.y - 16.0)
+		return Rect2(box.position.x, q.position.y + 8.0, q.end.x - 14.0 - box.position.x, q.size.y - 16.0)
 	return Rect2(q.position.x + 12.0, box.position.y, q.size.x - 24.0, box.size.y)
 
 

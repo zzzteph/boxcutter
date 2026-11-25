@@ -76,7 +76,6 @@ var px_scale := 1.0        ## Physical pixels per virtual pixel (window stretch)
 var board_rect := Rect2()
 var queue_rect := Rect2()
 var status_rect := Rect2()
-var ff_rect := Rect2()
 var freeze_rect := Rect2()   ## Milestone power buttons (shown when you have charges).
 var reveal_rect := Rect2()
 var _slots: Array = []
@@ -813,8 +812,11 @@ func _compute_layout() -> void:
 		queue_rect = Rect2(8.0, board_rect.end.y + 6.0, view_size.x - 16.0, bottom_h - 14.0)
 		var s0 := queue_rect.size.y - 34.0
 		var s1 := s0 * 0.72
-		var ffw := clampf(view_size.x * 0.17, 100.0, 140.0)
-		ff_rect = Rect2(queue_rect.end.x - 14.0 - ffw, queue_rect.position.y + 12.0, ffw, queue_rect.size.y - 24.0)
+		# Power buttons: big thumb targets at the right end of the bar.
+		var bar_h := queue_rect.size.y - 24.0
+		var pw := bar_h * 0.95
+		reveal_rect = Rect2(queue_rect.end.x - 14.0 - pw, queue_rect.position.y + 12.0, pw, bar_h)
+		freeze_rect = Rect2(reveal_rect.position.x - 8.0 - pw, reveal_rect.position.y, pw, bar_h)
 		var x := queue_rect.position.x + 14.0
 		var y := queue_rect.position.y + 24.0
 		_slots.append(Rect2(x, y, s0, s0))
@@ -822,11 +824,7 @@ func _compute_layout() -> void:
 		for i in n - 1:
 			_slots.append(Rect2(x, y + s0 - s1, s1, s1))
 			x += s1 + 8.0
-		status_rect = Rect2(x + 4.0, queue_rect.position.y + 8.0, maxf(0.0, ff_rect.position.x - x - 12.0), queue_rect.size.y - 16.0)
-		# Power buttons: big thumb targets just left of FAST.
-		var pw := ff_rect.size.y * 0.95
-		reveal_rect = Rect2(ff_rect.position.x - 10.0 - pw, ff_rect.position.y, pw, ff_rect.size.y)
-		freeze_rect = Rect2(reveal_rect.position.x - 8.0 - pw, ff_rect.position.y, pw, ff_rect.size.y)
+		status_rect = Rect2(x + 4.0, queue_rect.position.y + 8.0, maxf(0.0, queue_rect.end.x - 14.0 - x - 4.0), queue_rect.size.y - 16.0)
 		if powers_shown():
 			var s0r: Rect2 = _slots[0]
 			status_rect = Rect2(s0r.end.x + 10.0, queue_rect.position.y + 8.0, maxf(0.0, freeze_rect.position.x - s0r.end.x - 20.0), queue_rect.size.y - 16.0)
@@ -842,10 +840,16 @@ func _compute_layout() -> void:
 		queue_rect = Rect2(board_rect.end.x + 30.0, hud_h + 12.0, panel_w, view_size.y - hud_h - 24.0)
 		var cx := queue_rect.get_center().x
 		var y := queue_rect.position.y + 40.0
+		# Power buttons: a row along the bottom of the panel.
+		var ph := 64.0 if view_size.y >= 600.0 else 50.0
+		var half := (panel_w - 24.0 - 8.0) * 0.5
+		var bottom := queue_rect.end.y - 12.0
+		freeze_rect = Rect2(queue_rect.position.x + 12.0, bottom - ph, half, ph)
+		reveal_rect = Rect2(freeze_rect.end.x + 8.0, freeze_rect.position.y, half, ph)
+		var slots_bottom := freeze_rect.position.y - 10.0
 		if view_size.y >= 600.0:
 			# Tall screen: the next piece on top, the rest stacked below it.
-			ff_rect = Rect2(queue_rect.position.x + 12.0, queue_rect.end.y - 92.0, panel_w - 24.0, 80.0)
-			var avail := ff_rect.position.y - queue_rect.position.y - 40.0 - 70.0 - (n - 1) * 10.0 - 14.0
+			var avail := slots_bottom - queue_rect.position.y - 40.0 - 70.0 - (n - 1) * 10.0 - 14.0
 			var s0 := minf(panel_w - 40.0, avail / (1.0 + (n - 1) * 0.58))
 			var s1 := s0 * 0.58
 			_slots.append(Rect2(cx - s0 * 0.5, y, s0, s0))
@@ -855,10 +859,9 @@ func _compute_layout() -> void:
 				y += s1 + 10.0
 		else:
 			# Short screen (phone held sideways): the next piece, then one row of the rest.
-			ff_rect = Rect2(queue_rect.position.x + 12.0, queue_rect.end.y - 70.0, panel_w - 24.0, 58.0)
 			var gap := 6.0
 			var s1 := (panel_w - 24.0 - gap * (n - 2)) / (n - 1)
-			var s0 := minf(panel_w - 40.0, ff_rect.position.y - y - s1 - 14.0 - 44.0)
+			var s0 := minf(panel_w - 40.0, slots_bottom - y - s1 - 14.0 - 44.0)
 			_slots.append(Rect2(cx - s0 * 0.5, y, s0, s0))
 			y += s0 + 10.0
 			var x := queue_rect.position.x + 12.0
@@ -866,12 +869,7 @@ func _compute_layout() -> void:
 				_slots.append(Rect2(x, y, s1, s1))
 				x += s1 + gap
 			y += s1 + 4.0
-		# Power buttons: a row just above FAST.
-		var ph := 64.0 if view_size.y >= 600.0 else 50.0
-		var half := (panel_w - 24.0 - 8.0) * 0.5
-		freeze_rect = Rect2(queue_rect.position.x + 12.0, ff_rect.position.y - 10.0 - ph, half, ph)
-		reveal_rect = Rect2(freeze_rect.end.x + 8.0, freeze_rect.position.y, half, ph)
-		var status_end := freeze_rect.position.y if powers_shown() else ff_rect.position.y
+		var status_end := freeze_rect.position.y if powers_shown() else bottom
 		status_rect = Rect2(queue_rect.position.x + 10.0, y, panel_w - 20.0, maxf(30.0, status_end - y - 8.0))
 	cam.visible_rows = board_rect.size.y / T
 	if atlas != null:

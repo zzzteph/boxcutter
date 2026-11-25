@@ -53,7 +53,7 @@ The main menu has one button, NEW GAME. The game plays in unlock mode; set
 **Milestone powers:** every 100 rows you get one **Flow-freeze** and one
 **Reveal**. Flow-freeze stops the water for 8 seconds while every pipe frosts
 over. Reveal opens every block on the current map in one wave and disarms the
-alarms. Their buttons appear next to FAST once you have charges (Q and E on a
+alarms. Their buttons appear in the panel once you have charges (Q and E on a
 keyboard).
 
 **Narrow pipes** (thinner steel tubes with a ring in the middle) connect like
@@ -68,7 +68,7 @@ onto the water's path to buy time.
 | Pick up a pipe, then swap it (unlock mode) | Click / tap the pipe, then the spot | Same |
 | Place the next piece (classic mode) | Click / tap an empty tile | Same |
 | Replace a dry pipe (classic, -50 points, 1 s lock) | Click / tap it | Same |
-| Fast-forward (x5 flow, x2 points, until game over) | FAST button | F |
+| Fast-forward (x5 flow, x2 points, until game over) | (keyboard only) | F |
 | Pick a wildcard piece | Picker buttons | 1-7 |
 | Flow-freeze / Reveal (after row 100) | Snowflake / eye buttons | Q / E |
 | Pause | (pauses by itself when you switch apps) | P / Esc |
@@ -162,7 +162,7 @@ Each zone also scales the obstacle mix (`rock_mult`, `oneway_mult`, ...) in
 | `ps1_screen.gdshader` | 15-bit colour and ordered dither for the low-res board |
 | `input_handler.gd` | Mouse, touch and keyboard |
 | `ui.gd` | HUD, banners, title / pause / game-over screens |
-| `title_backdrop.gd` | The menu's background: pump-station wall, drips, flowing pipes |
+| `title_backdrop.gd` | The menu's background: pump-station wall and flowing pipes |
 | `station_logo.gd` | The UPSTREAM nameplate: steel plate, gauge, stencil letters |
 | `sfx.gd` | Synthesised sound effects |
 | `save_data.gd` | High score (localStorage on the web, a config file elsewhere) |

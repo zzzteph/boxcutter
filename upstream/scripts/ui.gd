@@ -19,16 +19,6 @@ class IconButton:
 		var s := minf(size.x, size.y)
 		var col := Color.WHITE
 		match kind:
-			"ff":
-				var fc := Color("ffd23a") if lit else col
-				var h := s * 0.2
-				var top := c + Vector2(0, -s * 0.1 if caption != "" else 0.0)
-				for k in 2:
-					var x0 := top.x - h * 1.1 + k * h * 1.1
-					draw_colored_polygon(PackedVector2Array([Vector2(x0, top.y - h), Vector2(x0 + h * 1.1, top.y), Vector2(x0, top.y + h)]), fc)
-				if caption != "":
-					var fs := int(clampf(s * 0.2, 12, 22))
-					draw_string(PipeArt.font(), Vector2(0, size.y - fs * 0.6), caption, HORIZONTAL_ALIGNMENT_CENTER, size.x, fs, fc)
 			"freeze":
 				var fc := Color.WHITE if lit else Color("bff0ff")
 				var cc := c + Vector2(0, -s * 0.1 if caption != "" else 0.0)
@@ -87,7 +77,6 @@ var game  ## The Game node (main.gd).
 var root: Control
 var hud: Panel
 var stat_values := {}
-var btn_ff: IconButton
 var btn_freeze: IconButton
 var btn_reveal: IconButton
 var banner: Label
@@ -303,9 +292,6 @@ func _build_hud() -> void:
 		vb.add_child(val)
 		hb.add_child(vb)
 		stat_values[key] = val
-	btn_ff = _icon_button("ff", func(): game.activate_fast_forward())
-	btn_ff.caption = "FAST x5"
-	root.add_child(btn_ff)
 	# Milestone powers, earned every 100 rows.
 	btn_freeze = _icon_button("freeze", func(): game.use_freeze())
 	btn_reveal = _icon_button("reveal", func(): game.use_reveal())
@@ -431,7 +417,6 @@ func show_title(best: int) -> void:
 	pause_screen.visible = false
 	over_screen.visible = false
 	hud.visible = false
-	btn_ff.visible = false
 
 
 func show_play() -> void:
@@ -439,7 +424,6 @@ func show_play() -> void:
 	pause_screen.visible = false
 	over_screen.visible = false
 	hud.visible = true
-	btn_ff.visible = true
 
 
 func show_pause(p: bool) -> void:
@@ -501,18 +485,11 @@ func refresh() -> void:
 		_last_view = vs
 		_last_portrait = game.portrait
 		_apply_layout()
-	var ff_rect: Rect2 = game.ff_rect
-	if btn_ff.position != ff_rect.position or btn_ff.size != ff_rect.size:
-		btn_ff.position = ff_rect.position
-		btn_ff.size = ff_rect.size
 
 	_set_text(stat_values["HEIGHT"], "%d" % game.height)
 	_set_text(stat_values["SCORE"], "%d" % game.score)
 
 	_refresh_powers()
-	if btn_ff.lit != game.fast_forward:
-		btn_ff.lit = game.fast_forward
-		btn_ff.queue_redraw()
 	var mt := "SOUND: OFF" if game.sfx.muted else "SOUND: ON"
 	if not game.is_touch:
 		mt += "  (M)"
