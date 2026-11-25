@@ -1,0 +1,640 @@
+## ============================================================================
+##  OOZE UP! - game controller: state machine, rules, scoring and layout.
+## ============================================================================
+## Owns the Grid, Generator, Flow and Camera, and wires the Renderer, Input,
+## UI and Sfx nodes together. See tuning.gd for every difficulty knob.
+extends Node2D
+
+enum State { TITLE, COUNTDOWN, RUNNING, SPILL, GAMEOVER }
+
+const REASONS := {
+	"rock": "The goo smashed into a rock.",
+	"empty": "The goo poured out onto an empty tile.",
+	"leak": "The goo leaked out of an open pipe end.",
+	"wall": "The goo hit the wall.",
+	"oneway": "The goo hit a one-way pipe from the wrong side.",
+	"clogged": "The goo ran into a pipe that was already full.",
+}
+
+var state := State.TITLE
+var paused := false
+var grid := Grid.new()
+var gen := LevelGenerator.new()
+var flow := Flow.new()
+var cam := GameCamera.new()
+var queue: Array[int] = []
+var rng := RandomNumberGenerator.new()
+
+var renderer: BoardRenderer
+var atlas: SpriteAtlas
+var input_handler: InputHandler
+var ui: GameUI
+var sfx: Sfx
+
+# Run state
+var score := 0
+var best := 0
+var height := 0            ## Highest row the goo has reached.
+var countdown := 0.0
+var fast_forward := false
+var slow_timer := 0.0
+var bombs := 0
+var wildcards := 0
+var lock_timer := 0.0
+var queue_shift := 0.0     ## 1 -> 0 slide animation after a placement.
+var time := 0.0
+var zone_index := 0
+var spill := {}
+var spill_timer := 0.0
+var new_best := false
+var crosses := 0
+var bonuses := 0
+var last_reason := ""
+var _beeped := 0
+
+# Layout, in virtual pixels (720 on the short side).
+var view_size := Vector2(720, 720)
+var portrait := false
+var hud_h := 66.0
+var T := 64.0
+var px_scale := 1.0        ## Physical pixels per virtual pixel (window stretch).
+var board_rect := Rect2()
+var queue_rect := Rect2()
+var status_rect := Rect2()
+var ff_rect := Rect2()
+var _slots: Array = []
+
+# Pointer / keyboard cursor
+var hover := Vector2i(-1, -1)
+var hover_active := false
+var kb_cursor := Vector2i(Tuning.SOURCE_COL, 1)
+var kb_active := false
+
+# Debug flags: add ?fps / ?autoplay to the web URL (or --fps / --autoplay after "--" on the command line).
+var debug_fps := false
+var debug_autoplay := false
+var _fps_timer := 0.0
+
+
+func _ready() -> void:
+	rng.randomize()
+	sfx = Sfx.new()
+	add_child(sfx)
+	atlas = SpriteAtlas.new()
+	add_child(atlas)
+	renderer = BoardRenderer.new()
+	renderer.game = self
+	renderer.atlas = atlas
+	add_child(renderer)
+	input_handler = InputHandler.new()
+	input_handler.game = self
+	add_child(input_handler)
+	ui = GameUI.new()
+	ui.game = self
+	add_child(ui)
+	best = SaveData.load_best()
+	_read_debug_flags()
+	_compute_layout()
+	new_board(rng.randi())
+	state = State.TITLE
+	ui.show_title(best)
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT and (state == State.COUNTDOWN or state == State.RUNNING) and not paused:
+		toggle_pause()
+
+
+# --- run lifecycle ------------------------------------------------------------------
+
+func new_board(seed_value: int) -> void:
+	grid.clear()
+	gen.reset(seed_value)
+	flow.reset()
+	if renderer:
+		renderer.clear_fx()
+		renderer.invalidate_rows()
+	score = 0
+	height = 0
+	fast_forward = false
+	slow_timer = 0.0
+	bombs = 0
+	wildcards = 0
+	lock_timer = 0.0
+	queue_shift = 0.0
+	zone_index = 0
+	spill = {}
+	spill_timer = 0.0
+	new_best = false
+	crosses = 0
+	bonuses = 0
+	last_reason = ""
+	countdown = Tuning.COUNTDOWN_TIME
+	_beeped = 0
+	queue.clear()
+	for i in Tuning.QUEUE_SIZE:
+		queue.append(_random_piece())
+	cam.visible_rows = board_rect.size.y / T if T > 0.0 else Tuning.MIN_VISIBLE_ROWS
+	cam.snap(0.5, 0)
+	_ensure_rows()
+	kb_cursor = Vector2i(Tuning.SOURCE_COL, 1)
+	kb_active = false
+
+
+func start_run() -> void:
+	new_board(rng.randi())
+	paused = false
+	state = State.COUNTDOWN
+	ui.show_play()
+	sfx.play("click")
+
+
+func go_to_title() -> void:
+	paused = false
+	new_board(rng.randi())
+	state = State.TITLE
+	ui.show_title(best)
+
+
+func _start_flow() -> void:
+	countdown = 0.0
+	flow.begin(grid, Tuning.SOURCE_COL, 0, Pieces.S, _goo_color())
+	state = State.RUNNING
+	sfx.play("go")
+	ui.show_toast("GO!", Color("b6ff7a"))
+
+
+func _random_piece() -> int:
+	var total := 0
+	for w in Tuning.PIECE_WEIGHTS:
+		total += w
+	var p := 0
+	for attempt in 2:
+		var x := rng.randi_range(0, total - 1)
+		for i in Tuning.PIECE_WEIGHTS.size():
+			x -= Tuning.PIECE_WEIGHTS[i]
+			if x < 0:
+				p = i
+				break
+		# Avoid three of the same piece in a row.
+		var n := queue.size()
+		if not (n >= 2 and queue[n - 1] == p and queue[n - 2] == p):
+			break
+	return p
+
+
+# --- frame update --------------------------------------------------------------------
+
+func _process(dt: float) -> void:
+	dt = minf(dt, 0.05)
+	time += dt
+	_compute_layout()
+	if not paused:
+		match state:
+			State.COUNTDOWN, State.RUNNING:
+				_update_play(dt)
+			State.SPILL:
+				_update_spill(dt)
+		renderer.update_fx(dt)
+		queue_shift = maxf(0.0, queue_shift - dt * 7.0)
+		var head := flow.head_world() if (flow.active or state == State.SPILL or state == State.GAMEOVER) \
+				else Vector2(Tuning.SOURCE_COL + 0.5, 0.5)
+		cam.update(dt, head.y, grid.floor_row)
+	_ensure_rows()
+	if debug_autoplay:
+		_autoplay_step()
+	if debug_fps:
+		_fps_timer += dt
+		if _fps_timer >= 2.0:
+			_fps_timer = 0.0
+			print("FPS %d | process %.2f ms | draw calls %d | primitives %d | height %d | score %d | state %s | rows in memory %d" % [
+					Engine.get_frames_per_second(), Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
+					Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+					Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME),
+					height, score, State.keys()[state], grid.row_count()])
+	renderer.redraw()
+	ui.refresh()
+
+
+func _update_play(dt: float) -> void:
+	lock_timer = maxf(0.0, lock_timer - dt)
+	if state == State.COUNTDOWN:
+		countdown -= dt
+		var n := int(ceil(countdown))
+		if n <= 3 and n >= 1 and n != _beeped:
+			_beeped = n
+			sfx.play("beep")
+		if countdown <= 0.0:
+			_start_flow()
+		return
+	slow_timer = maxf(0.0, slow_timer - dt)
+	var amount := dt * effective_speed() / Tuning.BASE_SEGMENT_TIME
+	for e in flow.advance(grid, amount, _goo_color()):
+		grid.touch(e["row"])
+		_handle_event(e)
+		if state != State.RUNNING:
+			break
+
+
+func _update_spill(dt: float) -> void:
+	spill_timer -= dt
+	if randf() < 0.5:
+		renderer.burst(spill["p"], spill["col"], 2, 2.2, 0.06, 0.8, 9.0)
+	if spill_timer <= 0.0:
+		state = State.GAMEOVER
+		ui.show_game_over(REASONS.get(last_reason, "The goo spilled."), score, height, best, new_best)
+
+
+func _ensure_rows() -> void:
+	var floor_r := maxi(0, height - Tuning.KEEP_ROWS_BELOW)
+	if floor_r > grid.floor_row:
+		grid.discard_below(floor_r)
+		gen.forget_below(floor_r)
+	var top := int(ceil(cam.y + cam.visible_rows)) + Tuning.GENERATE_AHEAD
+	top = maxi(top, height + Tuning.GENERATE_AHEAD)
+	gen.generate_until(grid, top)
+
+
+# --- rules & scoring ---------------------------------------------------------------------
+
+func multiplier() -> float:
+	return 1.0 + Tuning.MULT_STEP * floorf(height / float(Tuning.MULT_ROWS_STEP))
+
+
+func height_speed() -> float:
+	return minf(Tuning.MAX_SPEED, 1.0 + height * Tuning.SPEEDUP_PER_ROW)
+
+
+func effective_speed() -> float:
+	var s := height_speed()
+	if fast_forward:
+		s *= Tuning.FAST_FORWARD_MULT
+	if slow_timer > 0.0:
+		s *= Tuning.SLOWMO_MULT
+	return s
+
+
+func add_points(base: float) -> int:
+	var pts := int(round(base * multiplier() * (Tuning.FAST_FORWARD_SCORE_MULT if fast_forward else 1.0)))
+	score += pts
+	return pts
+
+
+func _goo_color() -> Color:
+	return Zones.theme_for_row(flow.row if flow.active else 0)["goo"]
+
+
+func _handle_event(e: Dictionary) -> void:
+	match e["type"]:
+		"enter":
+			var r: int = e["row"]
+			if r > height:
+				height = r
+				var zi := Zones.index_for_row(height)
+				if zi > zone_index:
+					zone_index = zi
+					ui.show_banner(Zones.title(zi))
+					sfx.play("zone")
+			var t: Tile = e["tile"]
+			var wp := Vector2(e["col"] + 0.5, e["row"] + 0.5)
+			if t.bonus > 0:
+				var pts := add_points(t.bonus)
+				bonuses += 1
+				renderer.burst(wp, Color("ffd23a"), 28, 4.0, 0.08, 0.9)
+				renderer.float_text(wp, "+%d" % pts, Color("ffe27a"))
+				sfx.play("bonus")
+				t.bonus = 0
+			if t.powerup != Tile.PU_NONE:
+				_apply_powerup(t.powerup, wp)
+				t.powerup = Tile.PU_NONE
+		"filled":
+			var t: Tile = e["tile"]
+			if t.kind == Tile.SOURCE:
+				return
+			add_points(Tuning.SCORE_SEGMENT)
+			sfx.play("tick", 0.92 + randf() * 0.16 + minf(0.5, height * 0.004), -5.0)
+			if t.piece == Pieces.CROSS and t.fill[0] >= 1.0 and t.fill[1] >= 1.0:
+				var pts := add_points(Tuning.SCORE_CROSS_DOUBLE)
+				crosses += 1
+				var wp := Vector2(e["col"] + 0.5, e["row"] + 0.5)
+				renderer.burst(wp, Color("ffffff"), 30, 4.5, 0.08, 1.0)
+				renderer.float_text(wp, "CROSS! +%d" % pts, Color("8af0ff"), 0.4, 1.3)
+				sfx.play("cross")
+		"blocked":
+			_game_over(e)
+
+
+func _apply_powerup(kind: int, wp: Vector2) -> void:
+	var col := PipeArt.powerup_color(kind)
+	match kind:
+		Tile.PU_SLOW:
+			slow_timer += Tuning.SLOWMO_DURATION
+			ui.show_toast("SLOW-MO!  Half speed for %ds" % int(Tuning.SLOWMO_DURATION), col)
+			renderer.float_text(wp, "SLOW-MO", col)
+		Tile.PU_BOMB:
+			bombs += 1
+			ui.show_toast("BOMB!  Click a rock or a dry pipe to blast it", col)
+			renderer.float_text(wp, "BOMB", col)
+		Tile.PU_WILD:
+			wildcards += 1
+			ui.show_toast("WILDCARD!  Choose your next piece", col)
+			renderer.float_text(wp, "WILDCARD", col)
+	renderer.burst(wp, col, 32, 4.5, 0.08, 1.0)
+	sfx.play("powerup")
+
+
+func _game_over(e: Dictionary) -> void:
+	state = State.SPILL
+	spill_timer = 1.5
+	last_reason = e["reason"]
+	var v: Vector2i = Pieces.DIR_VEC[e["exit"]]
+	var p := Vector2(e["col"] + 0.5, e["row"] + 0.5) + Vector2(v.x, v.y) * 0.5
+	var col := _goo_color()
+	spill = {"p": p, "t": time, "col": col, "seed": randf() * TAU}
+	cam.add_shake(0.85)
+	sfx.play("gameover")
+	renderer.burst(p, col, 44, 5.0, 0.09, 1.2, 8.0)
+	fast_forward = false
+	slow_timer = 0.0
+	if score > best:
+		best = score
+		new_best = true
+		SaveData.save_best(best)
+
+
+# --- placement ------------------------------------------------------------------------------
+
+func screen_to_tile(pos: Vector2) -> Vector2i:
+	return Vector2i(floori((pos.x - board_rect.position.x) / T), floori(cam.y + (board_rect.end.y - pos.y) / T))
+
+
+func is_tile_visible(c: int, r: int) -> bool:
+	if c < 0 or c >= Tuning.COLS or r < grid.floor_row or r > grid.top_row:
+		return false
+	var cy := board_rect.end.y - (r + 0.5 - cam.y) * T
+	return cy >= board_rect.position.y and cy <= board_rect.end.y
+
+
+func _bombable(t: Tile) -> bool:
+	return t.kind == Tile.ROCK or (t.kind == Tile.EMPTY and t.piece >= 0 and not t.has_goo())
+
+
+## What clicking tile (c, r) would do: place, replace, bomb, locked or no.
+func placement_mode(c: int, r: int) -> String:
+	var t := grid.get_tile(c, r)
+	if t == null or not is_tile_visible(c, r):
+		return "no"
+	if bombs > 0 and _bombable(t):
+		return "bomb"
+	if t.kind != Tile.EMPTY or t.has_goo() or t.fixed:
+		return "no"
+	if lock_timer > 0.0:
+		return "locked"
+	return "replace" if t.piece >= 0 else "place"
+
+
+func try_place(c: int, r: int) -> String:
+	if (state != State.COUNTDOWN and state != State.RUNNING) or paused:
+		return "inactive"
+	var mode := placement_mode(c, r)
+	var t := grid.get_tile(c, r)
+	var wp := Vector2(c + 0.5, r + 0.5)
+	if mode == "bomb" or mode == "place" or mode == "replace":
+		grid.touch(r)
+		renderer.animate_row(r, time + 0.45)
+	match mode:
+		"bomb":
+			bombs -= 1
+			t.kind = Tile.EMPTY
+			t.shape = PackedVector2Array()
+			t.clear_pipe()
+			renderer.burst(wp, Color("ff9a3a"), 34, 5.0, 0.1, 0.8, 4.0)
+			renderer.burst(wp, Color(0.55, 0.55, 0.55), 16, 3.0, 0.08, 0.9, 8.0, false)
+			renderer.float_text(wp, "BOOM!", Color("ff9a3a"))
+			cam.add_shake(0.35)
+			sfx.play("bomb")
+		"place", "replace":
+			t.piece = queue.pop_front()
+			queue.append(_random_piece())
+			queue_shift = 1.0
+			t.placed_at = time
+			if mode == "replace":
+				score = maxi(0, score - Tuning.REPLACE_PENALTY)
+				lock_timer = Tuning.REPLACE_LOCK_TIME
+				sfx.play("replace")
+				renderer.float_text(wp, "-%d" % Tuning.REPLACE_PENALTY, Color("ff8a5a"), 0.3, 0.9)
+				renderer.burst(wp, Color(0.8, 0.8, 0.8), 10, 2.5, 0.06, 0.5, 3.0, false)
+			else:
+				sfx.play("place", 0.95 + randf() * 0.1)
+				renderer.burst(wp, Color(1, 1, 1, 0.7), 6, 1.5, 0.05, 0.35, 0.0, false)
+		"locked":
+			sfx.play("deny")
+			ui.show_toast("LOCKED!", Color("ff6a5a"))
+		_:
+			sfx.play("deny")
+	return mode
+
+
+# --- input entry points ---------------------------------------------------------------------
+
+func on_pointer_move(pos: Vector2, touch := false) -> void:
+	hover = screen_to_tile(pos)
+	hover_active = not touch and board_rect.has_point(pos) and is_tile_visible(hover.x, hover.y)
+	if not touch:
+		kb_active = false
+
+
+func on_pointer_press(pos: Vector2, touch := false) -> void:
+	if state == State.TITLE:
+		start_run()
+		return
+	if state != State.COUNTDOWN and state != State.RUNNING or paused:
+		return
+	if not board_rect.has_point(pos):
+		return
+	var cell := screen_to_tile(pos)
+	hover = cell
+	hover_active = not touch and is_tile_visible(cell.x, cell.y)
+	try_place(cell.x, cell.y)
+
+
+func move_cursor(dx: int, dy: int) -> void:
+	if (state != State.COUNTDOWN and state != State.RUNNING) or paused:
+		return
+	if not kb_active:
+		kb_active = true
+		if hover_active:
+			kb_cursor = hover
+		elif flow.active:
+			kb_cursor = Vector2i(flow.col, flow.row + 1)
+		else:
+			kb_cursor = Vector2i(Tuning.SOURCE_COL, 1)
+	else:
+		kb_cursor += Vector2i(dx, dy)
+	hover_active = false
+	var lo := maxi(grid.floor_row, ceili(cam.y + 0.01))
+	var hi := floori(cam.y + cam.visible_rows - 0.51)
+	kb_cursor.x = clampi(kb_cursor.x, 0, Tuning.COLS - 1)
+	kb_cursor.y = clampi(kb_cursor.y, lo, maxi(lo, hi))
+
+
+func on_confirm() -> void:
+	match state:
+		State.TITLE, State.GAMEOVER:
+			start_run()
+		State.COUNTDOWN, State.RUNNING:
+			if paused:
+				toggle_pause()
+			elif kb_active:
+				try_place(kb_cursor.x, kb_cursor.y)
+			else:
+				move_cursor(0, 0)
+
+
+func restart_key() -> void:
+	if state == State.TITLE or state == State.GAMEOVER or paused:
+		start_run()
+
+
+func toggle_pause() -> void:
+	if state != State.COUNTDOWN and state != State.RUNNING:
+		return
+	paused = not paused
+	ui.show_pause(paused)
+	sfx.play("click")
+
+
+func toggle_mute() -> void:
+	sfx.set_muted(not sfx.muted)
+	sfx.play("click")
+
+
+func activate_fast_forward() -> void:
+	if (state != State.COUNTDOWN and state != State.RUNNING) or paused or fast_forward:
+		return
+	fast_forward = true
+	if state == State.COUNTDOWN:
+		_start_flow()
+	sfx.play("ff")
+	ui.show_toast("FAST-FORWARD!  x2 POINTS", Color("ffd23a"))
+
+
+func choose_wildcard(piece: int) -> void:
+	if wildcards <= 0 or piece < 0 or piece >= Pieces.COUNT:
+		return
+	if (state != State.COUNTDOWN and state != State.RUNNING) or paused:
+		return
+	queue[0] = piece
+	wildcards -= 1
+	queue_shift = 0.0
+	sfx.play("powerup", 1.4)
+	ui.show_toast("Next piece: %s" % Pieces.NAMES[piece], Color("e8b0ff"))
+
+
+# --- layout -----------------------------------------------------------------------------------
+
+func queue_slot_rects() -> Array:
+	return _slots
+
+
+## Snap to whole physical pixels.
+func _px(v: float) -> float:
+	return roundf(v * px_scale) / px_scale
+
+
+func _compute_layout() -> void:
+	view_size = get_viewport_rect().size
+	var win := get_window()
+	px_scale = float(win.size.x) / view_size.x if win != null and win.size.x > 0 and view_size.x > 0.0 else 1.0
+	portrait = view_size.x < view_size.y * 0.9
+	hud_h = _px(66.0)
+	_slots = []
+	var n := Tuning.QUEUE_SIZE
+	if portrait:
+		var bottom_h := clampf(view_size.y * 0.12, 110.0, 150.0)
+		var avail_w := view_size.x - 40.0
+		var avail_h := view_size.y - hud_h - bottom_h
+		T = _tile_size(minf(avail_w / Tuning.COLS, avail_h / Tuning.MIN_VISIBLE_ROWS))
+		var bw := T * Tuning.COLS
+		board_rect = Rect2(_px((view_size.x - bw) * 0.5), hud_h, bw, _px(view_size.y - bottom_h) - hud_h)
+		queue_rect = Rect2(8.0, board_rect.end.y + 6.0, view_size.x - 16.0, bottom_h - 14.0)
+		var s0 := queue_rect.size.y - 34.0
+		var s1 := s0 * 0.72
+		var ffw := clampf(view_size.x * 0.17, 100.0, 140.0)
+		ff_rect = Rect2(queue_rect.end.x - 14.0 - ffw, queue_rect.position.y + 12.0, ffw, queue_rect.size.y - 24.0)
+		var x := queue_rect.position.x + 14.0
+		var y := queue_rect.position.y + 24.0
+		_slots.append(Rect2(x, y, s0, s0))
+		x += s0 + 12.0
+		for i in n - 1:
+			_slots.append(Rect2(x, y + s0 - s1, s1, s1))
+			x += s1 + 8.0
+		status_rect = Rect2(x + 4.0, queue_rect.position.y + 8.0, maxf(0.0, ff_rect.position.x - x - 12.0), queue_rect.size.y - 16.0)
+	else:
+		var panel_w := clampf(view_size.x * 0.17, 150.0, 220.0)
+		var avail_w := view_size.x - panel_w - 80.0
+		var avail_h := view_size.y - hud_h
+		T = _tile_size(minf(avail_w / Tuning.COLS, avail_h / Tuning.MIN_VISIBLE_ROWS))
+		var bw := T * Tuning.COLS
+		var total := bw + 30.0 + panel_w
+		var x0 := _px((view_size.x - total) * 0.5)
+		board_rect = Rect2(x0, hud_h, bw, _px(view_size.y) - hud_h)
+		queue_rect = Rect2(board_rect.end.x + 30.0, hud_h + 12.0, panel_w, view_size.y - hud_h - 24.0)
+		ff_rect = Rect2(queue_rect.position.x + 12.0, queue_rect.end.y - 92.0, panel_w - 24.0, 80.0)
+		var avail := ff_rect.position.y - queue_rect.position.y - 40.0 - 70.0 - (n - 1) * 10.0 - 14.0
+		var s0 := minf(panel_w - 40.0, avail / (1.0 + (n - 1) * 0.58))
+		var s1 := s0 * 0.58
+		var cx := queue_rect.get_center().x
+		var y := queue_rect.position.y + 40.0
+		_slots.append(Rect2(cx - s0 * 0.5, y, s0, s0))
+		y += s0 + 14.0
+		for i in n - 1:
+			_slots.append(Rect2(cx - s1 * 0.5, y, s1, s1))
+			y += s1 + 10.0
+		status_rect = Rect2(queue_rect.position.x + 10.0, y, panel_w - 20.0, maxf(30.0, ff_rect.position.y - y - 8.0))
+	cam.visible_rows = board_rect.size.y / T
+	if atlas != null:
+		atlas.ensure(roundi(T * px_scale), roundi((_slots[0] as Rect2).size.x * 0.86 * px_scale))
+
+
+## A tile size that is a whole number of physical pixels, so atlas sprites stay crisp.
+func _tile_size(t: float) -> float:
+	return maxf(8.0, floorf(t * px_scale)) / px_scale
+
+
+# --- test hooks -------------------------------------------------------------------------------
+
+func _read_debug_flags() -> void:
+	var qs := ""
+	if OS.has_feature("web"):
+		var q = JavaScriptBridge.eval("window.location.search", true)
+		qs = str(q) if q != null else ""
+	for arg in OS.get_cmdline_user_args():
+		qs += " " + arg
+	debug_fps = qs.contains("fps")
+	debug_autoplay = qs.contains("autoplay")
+
+
+## Autoplay: a perfect player that lays the guaranteed path just ahead of the goo.
+func _autoplay_step() -> void:
+	match state:
+		State.TITLE, State.GAMEOVER:
+			start_run()
+			activate_fast_forward()
+		State.COUNTDOWN, State.RUNNING:
+			var r0 := flow.row if flow.active else 0
+			for r in range(maxi(1, r0 - 1), r0 + 6):
+				var need: Dictionary = gen.spine_needs.get(r, {})
+				for c in need:
+					var t := grid.get_tile(c, r)
+					if t != null and t.is_free():
+						debug_set_piece(c, r, Pieces.piece_for(need[c][0], need[c][1]))
+
+
+func debug_set_piece(c: int, r: int, piece: int) -> void:
+	var t := grid.get_tile(c, r)
+	if t != null and t.kind == Tile.EMPTY and not t.has_goo():
+		t.piece = piece
+		t.placed_at = time
+		grid.touch(r)
+		renderer.animate_row(r, time + 0.45)
