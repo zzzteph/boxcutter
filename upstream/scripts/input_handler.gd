@@ -47,6 +47,10 @@ func _on_key(key: int, echo: bool) -> bool:
 			game.toggle_mute()
 		KEY_R:
 			game.restart_key()
+		KEY_Q:
+			game.use_freeze()
+		KEY_E:
+			game.use_reveal()
 		KEY_SPACE, KEY_ENTER, KEY_KP_ENTER:
 			game.on_confirm()
 		_:

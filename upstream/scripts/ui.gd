@@ -43,8 +43,44 @@ class IconButton:
 				if caption != "":
 					var fs := int(clampf(s * 0.2, 12, 22))
 					draw_string(PipeArt.font(), Vector2(0, size.y - fs * 0.6), caption, HORIZONTAL_ALIGNMENT_CENTER, size.x, fs, fc)
+			"freeze":
+				var fc := Color.WHITE if lit else Color("bff0ff")
+				var cc := c + Vector2(0, -s * 0.1 if caption != "" else 0.0)
+				var r := s * 0.27
+				var w := maxf(2.0, s * 0.055)
+				for k in 6:
+					var dir := Vector2.from_angle(k * PI / 3.0 - PI / 2.0)
+					var mid := cc + dir * r * 0.58
+					var perp := Vector2(-dir.y, dir.x)
+					draw_line(cc, cc + dir * r, fc, w)
+					draw_line(mid, mid + (dir + perp).normalized() * r * 0.32, fc, w * 0.8)
+					draw_line(mid, mid + (dir - perp).normalized() * r * 0.32, fc, w * 0.8)
+				_caption(fc)
+			"reveal":
+				var ec := Color("8fe8ff")
+				var cc := c + Vector2(0, -s * 0.1 if caption != "" else 0.0)
+				var rw := s * 0.3
+				var rh := s * 0.17
+				var top := PackedVector2Array()
+				var bot := PackedVector2Array()
+				for i in 17:
+					var t := i / 16.0
+					top.append(cc + Vector2(lerpf(-rw, rw, t), -rh * sin(t * PI)))
+					bot.append(cc + Vector2(lerpf(-rw, rw, t), rh * sin(t * PI)))
+				draw_polyline(top, ec, maxf(2.0, s * 0.05))
+				draw_polyline(bot, ec, maxf(2.0, s * 0.05))
+				draw_circle(cc, rh * 0.8, ec)
+				draw_circle(cc, rh * 0.38, Color("11181d"))
+				_caption(ec)
 			"piece":
 				pass  # Drawn by the IconArt child from the sprite atlas.
+
+
+	func _caption(col: Color) -> void:
+		if caption == "":
+			return
+		var fs := int(clampf(minf(size.x, size.y) * 0.2, 12, 20))
+		draw_string(PipeArt.font(), Vector2(0, size.y - fs * 0.6), caption, HORIZONTAL_ALIGNMENT_CENTER, size.x, fs, col)
 
 
 ## A pipe icon from the sprite atlas (premultiplied alpha, hence its own material).
@@ -68,12 +104,15 @@ var stat_values := {}
 var btn_pause: IconButton
 var btn_mute: IconButton
 var btn_ff: IconButton
+var btn_freeze: IconButton
+var btn_reveal: IconButton
 var countdown_label: Label
 var countdown_sub: Label
 var banner: Label
 var toast: Label
 var title_screen: Control
 var new_game_button: Button
+var logo: StationLogo
 var pause_screen: Control
 var pause_mute: Button
 var over_screen: Control
@@ -122,6 +161,23 @@ func _ready() -> void:
 
 # --- theme ------------------------------------------------------------------------------
 
+const STEEL := Color("2a3640")
+const STEEL_DARK := Color("161e24")
+const STEEL_EDGE := Color("5a6b75")
+const WATER := Color("3ab4ff")
+const HAZARD := Color("ffc928")
+
+
+## A steel plate with a rivet in each corner.
+class RivetPanel:
+	extends PanelContainer
+
+	func _draw() -> void:
+		for c in [Vector2(11, 11), Vector2(size.x - 11, 11), Vector2(11, size.y - 11), size - Vector2(11, 11)]:
+			draw_circle(c, 4.5, Color("11181d"))
+			draw_circle(c - Vector2(1, 1), 2.5, Color("8fa3ab"))
+
+
 func _box(bg: Color, border: Color, radius := 14, bw := 3, shadow := 6) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = bg
@@ -151,19 +207,27 @@ func _make_theme() -> Theme:
 	th.set_color("font_outline_color", "Label", Color(0, 0, 0, 0.9))
 	th.set_constant("outline_size", "Label", 8)
 	th.set_color("font_color", "Label", Color.WHITE)
-	th.set_stylebox("normal", "Button", _box(Color("2b6b3a"), Color("7dff3a")))
-	th.set_stylebox("hover", "Button", _box(Color("3a8a4a"), Color("b6ff7a")))
-	th.set_stylebox("pressed", "Button", _box(Color("1d4a28"), Color("7dff3a")))
+	# Pump-station look: steel plates with water-blue trim.
+	th.set_stylebox("normal", "Button", _box(STEEL, WATER))
+	th.set_stylebox("hover", "Button", _box(STEEL.lightened(0.1), WATER.lightened(0.35)))
+	th.set_stylebox("pressed", "Button", _box(STEEL_DARK, WATER))
 	th.set_stylebox("focus", "Button", StyleBoxEmpty.new())
 	th.set_stylebox("disabled", "Button", _box(Color("333333"), Color("555555")))
 	th.set_color("font_color", "Button", Color.WHITE)
 	th.set_color("font_hover_color", "Button", Color.WHITE)
-	th.set_color("font_pressed_color", "Button", Color("d0ffd0"))
+	th.set_color("font_pressed_color", "Button", WATER.lightened(0.5))
 	th.set_color("font_outline_color", "Button", Color(0, 0, 0, 0.8))
 	th.set_constant("outline_size", "Button", 6)
 	th.set_font_size("font_size", "Button", 26)
-	th.set_stylebox("panel", "PanelContainer", _box(Color(0.06, 0.08, 0.1, 0.94), Color("7dff3a"), 22, 4, 12))
-	th.set_stylebox("panel", "Panel", _box(Color(0.04, 0.05, 0.07, 0.92), Color(1, 1, 1, 0.12), 0, 0, 8))
+	var plate := _box(Color(STEEL.r, STEEL.g, STEEL.b, 0.97), STEEL_EDGE, 6, 4, 12)
+	plate.content_margin_left = 26
+	plate.content_margin_right = 26
+	plate.content_margin_top = 20
+	plate.content_margin_bottom = 20
+	th.set_stylebox("panel", "PanelContainer", plate)
+	var bar := _box(Color(0.07, 0.09, 0.11, 0.95), HAZARD, 0, 0, 8)
+	bar.border_width_bottom = 3
+	th.set_stylebox("panel", "Panel", bar)
 	return th
 
 
@@ -268,13 +332,19 @@ func _build_hud() -> void:
 	btn_ff = _icon_button("ff", func(): game.activate_fast_forward())
 	btn_ff.caption = "FAST x5"
 	root.add_child(btn_ff)
+	# Milestone powers, earned every 100 rows.
+	btn_freeze = _icon_button("freeze", func(): game.use_freeze())
+	btn_reveal = _icon_button("reveal", func(): game.use_reveal())
+	for b in [btn_freeze, btn_reveal]:
+		b.visible = false
+		root.add_child(b)
 
 
 func _build_center_labels() -> void:
 	countdown_label = _slabel("", 150, Color("ffffff"), 22)
 	countdown_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.add_child(countdown_label)
-	countdown_sub = _slabel("", 30, Color("b6ff7a"), 10)
+	countdown_sub = _slabel("", 30, WATER.lightened(0.3), 10)
 	countdown_sub.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.add_child(countdown_sub)
 	banner = _slabel("", 54, Color("ffd23a"), 16)
@@ -331,24 +401,27 @@ func _build_title() -> void:
 	vb.add_theme_constant_override("separation", 36)
 	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_center_of(title_screen).add_child(vb)
-	var logo := _slabel("OOZE UP!", 120, Color("7dff3a"), 30)
-	logo.add_theme_color_override("font_outline_color", Color("0b3a12"))
+	logo = StationLogo.new()
+	logo.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	vb.add_child(logo)
 	new_game_button = _button("NEW GAME", func(): game.start_run(), 300)
 	new_game_button.custom_minimum_size = Vector2(300, 76)
 	new_game_button.add_theme_font_size_override("font_size", 36)
 	new_game_button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	new_game_button.add_theme_stylebox_override("normal", _box(STEEL, HAZARD, 6, 4))
+	new_game_button.add_theme_stylebox_override("hover", _box(STEEL.lightened(0.12), HAZARD.lightened(0.3), 6, 4))
+	new_game_button.add_theme_stylebox_override("pressed", _box(STEEL_DARK, HAZARD, 6, 4))
 	vb.add_child(new_game_button)
 
 
 func _build_pause() -> void:
 	pause_screen = _overlay()
-	var panel := PanelContainer.new()
+	var panel := RivetPanel.new()
 	_center_of(pause_screen).add_child(panel)
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 14)
 	panel.add_child(vb)
-	vb.add_child(_slabel("PAUSED", 64, Color("7dff3a"), 14))
+	vb.add_child(_slabel("PAUSED", 64, WATER.lightened(0.3), 14))
 	vb.add_child(_kbutton("RESUME  (P)", "RESUME", func(): game.toggle_pause()))
 	vb.add_child(_kbutton("RESTART  (R)", "RESTART", func(): game.start_run()))
 	pause_mute = _button("SOUND: ON  (M)", func(): game.toggle_mute())
@@ -358,18 +431,18 @@ func _build_pause() -> void:
 
 func _build_over() -> void:
 	over_screen = _overlay()
-	var panel := PanelContainer.new()
+	var panel := RivetPanel.new()
 	_center_of(over_screen).add_child(panel)
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 8)
 	panel.add_child(vb)
-	vb.add_child(_slabel("WATER SPILLED!", 64, Color("ff8a3a"), 14))
+	vb.add_child(_slabel("LEAK DETECTED", 64, Color("ff6a3a"), 14))
 	over_reason = _slabel("", 22, Color(1, 1, 1, 0.85), 6)
 	over_reason.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vb.add_child(over_reason)
 	over_score = _slabel("", 54, Color.WHITE, 12)
 	vb.add_child(over_score)
-	over_height = _label("", 26, Color("b6ff7a"), 6)
+	over_height = _label("", 26, WATER.lightened(0.3), 6)
 	vb.add_child(over_height)
 	over_best = _label("", 26, Color("ffd23a"), 6)
 	vb.add_child(over_best)
@@ -477,11 +550,14 @@ func refresh() -> void:
 	elif game.slow_timer > 0.0:
 		tag = " SLOW"
 	_set_text(stat_values["SPEED"], "%.2fx%s" % [spd, tag])
-	var scol := Color("ffd23a") if game.fast_forward else (Color("8ad8ff") if game.slow_timer > 0.0 else Color.WHITE)
+	if game.freeze_timer > 0.0:
+		_set_text(stat_values["SPEED"], "FROZEN")
+	var scol := Color("bff0ff") if game.freeze_timer > 0.0 else (Color("ffd23a") if game.fast_forward else (Color("8ad8ff") if game.slow_timer > 0.0 else Color.WHITE))
 	if scol != _speed_col:
 		_speed_col = scol
 		(stat_values["SPEED"] as Label).add_theme_color_override("font_color", scol)
 
+	_refresh_powers()
 	if btn_ff.lit != game.fast_forward:
 		btn_ff.lit = game.fast_forward
 		btn_ff.queue_redraw()
@@ -498,7 +574,7 @@ func refresh() -> void:
 	# Countdown.
 	if game.state == game.State.COUNTDOWN and not game.paused:
 		var n := int(ceil(game.countdown))
-		_set_text(countdown_sub, "WATER FLOWS IN")
+		_set_text(countdown_sub, "PUMP STARTS IN")
 		_set_text(countdown_label, "%d" % n)
 		var frac: float = game.countdown - floor(game.countdown)
 		var s := 1.0 + 0.25 * pow(frac, 3.0)
@@ -534,6 +610,31 @@ func refresh() -> void:
 			picker.position = pp
 
 
+func _refresh_powers() -> void:
+	var shown: bool = game.powers_shown()
+	for e in [[btn_freeze, game.freeze_rect, game.freezes, "FREEZE"], [btn_reveal, game.reveal_rect, game.reveals, "REVEAL"]]:
+		var b: IconButton = e[0]
+		if b.visible != shown:
+			b.visible = shown
+		if not shown:
+			continue
+		var r: Rect2 = e[1]
+		if b.position != r.position or b.size != r.size:
+			b.position = r.position
+			b.size = r.size
+		var cap: String = ("%s x%d" % [e[3], e[2]]) if r.size.x >= 100.0 else ("x%d" % e[2])
+		if b.caption != cap:
+			b.caption = cap
+			b.queue_redraw()
+		var dim := 1.0 if e[2] > 0 else 0.4
+		if b.modulate.a != dim:
+			b.modulate.a = dim
+	var lit: bool = game.freeze_timer > 0.0
+	if btn_freeze.lit != lit:
+		btn_freeze.lit = lit
+		btn_freeze.queue_redraw()
+
+
 func _apply_layout() -> void:
 	var vs: Vector2 = game.view_size
 	var touch: bool = game.is_touch
@@ -554,6 +655,7 @@ func _apply_layout() -> void:
 	btn_pause.custom_minimum_size = Vector2(bs, bs)
 	btn_mute.custom_minimum_size = Vector2(bs, bs)
 	var unlock: bool = game.mode == "unlock"
+	logo.fit_width(vs.x - 24.0)
 	over_reason.custom_minimum_size = Vector2(minf(420.0, vs.x - 96.0), 0)
 	var what := "Pick any piece to place" if unlock else "Pick your next piece"
 	_picker_label.text = "WILDCARD! " + what + ("" if touch else " (1-7)")

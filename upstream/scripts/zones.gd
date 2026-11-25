@@ -20,7 +20,7 @@ static func _build() -> void:
 			"rock": _c("6b5a4a"), "rock_dark": _c("2e241c"), "rock_hi": _c("9a8670"),
 			"metal": _c("8fa3ab"), "metal_dark": _c("2f3b40"), "metal_light": _c("dce8ec"),
 			"brass": _c("c9973a"), "brass_dark": _c("5a3d12"),
-			"channel": _c("101818"), "goo": _c("3ab4ff"), "accent": _c("b6ff7a"), "wall": _c("44575c"),
+			"channel": _c("101818"), "goo": _c("3ab4ff"), "accent": _c("8fd8ff"), "wall": _c("44575c"),
 			"rock_mult": 1.0, "oneway_mult": 0.6, "reservoir_mult": 0.7, "powerup_mult": 1.0,
 		},
 		{

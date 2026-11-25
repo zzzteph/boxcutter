@@ -164,6 +164,26 @@ func _build_all() -> void:
 	_tone(b, 0.0, 0.09, 500.0, 950.0, "tri", 0.35, 0.002, 1.5)
 	streams["pick"] = _to_stream(b)
 
+	# Flow-freeze: a crackle and a cold, glassy chime.
+	b = _buffer(1.1)
+	_tone(b, 0.0, 0.35, 5000.0, 5000.0, "noise", 0.35, 0.001, 2.5)
+	notes = [2093.0, 2637.0, 3136.0, 4186.0]
+	for i in notes.size():
+		_tone(b, 0.05 + i * 0.07, 0.9, notes[i], notes[i] * 0.995, "sine", 0.16, 0.002, 2.2)
+	streams["freeze"] = _to_stream(b)
+
+	# Thaw: soft drips.
+	b = _buffer(0.6)
+	for i in 4:
+		_tone(b, i * 0.13, 0.09, 1300.0 - i * 120.0, 700.0 - i * 60.0, "sine", 0.25, 0.002, 2.0)
+	streams["thaw"] = _to_stream(b)
+
+	# Reveal: a rising shimmer.
+	b = _buffer(0.7)
+	_tone(b, 0.0, 0.6, 300.0, 1800.0, "tri", 0.22, 0.02, 1.2)
+	_tone(b, 0.1, 0.55, 600.0, 3600.0, "sine", 0.12, 0.02, 1.5)
+	streams["reveal"] = _to_stream(b)
+
 	# Alarm: a two-tone siren.
 	b = _buffer(0.9)
 	for i in 4:

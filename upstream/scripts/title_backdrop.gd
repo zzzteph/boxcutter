@@ -1,9 +1,10 @@
 ## ============================================================================
 ##  TITLE BACKDROP - the main screen's own background.
 ## ============================================================================
-## A deep sewer gradient, rising bubbles, and two pipe runs climbing the screen
-## edges with goo surging through them on a loop. The pipes are drawn once per
-## screen size; only the goo and bubbles are redrawn each frame.
+## A pump-station wall (steel plates, seams, rivets, dripping water, a hazard
+## strip on the floor) and two pipe runs climbing the screen edges with water
+## surging through them on a loop. The pipes are drawn once per screen size;
+## only the water and drips are redrawn each frame.
 class_name TitleBackdrop
 extends Control
 
@@ -108,30 +109,51 @@ func _cell_center(cell: Vector2i) -> Vector2:
 
 
 func _draw() -> void:
-	var pal := Zones.theme(0)
-	var top: Color = (pal["bg_top"] as Color).lightened(0.06)
-	var bottom: Color = pal["bg_bottom"]
+	# Pump-station wall: dark steel plates with seams and rivets.
+	var top := Color("1f2c35")
+	var bottom := Color("0a1015")
 	draw_polygon(PackedVector2Array([Vector2.ZERO, Vector2(size.x, 0), size, Vector2(0, size.y)]),
 			PackedColorArray([top, top, bottom, bottom]))
-	# A soft glow behind the logo area.
-	var c := Vector2(size.x * 0.5, size.y * 0.32)
-	var gr := minf(size.x, size.y) * 0.55
-	draw_texture_rect(_glow, Rect2(c - Vector2(gr, gr), Vector2(gr, gr) * 2.0), false, PipeArt.fade(pal["goo"], 0.12))
-	# Rising bubbles.
-	var acc: Color = pal["accent"]
-	for i in 22:
-		var x := BoardRenderer.h01(i * 3.1) * size.x + sin(time + i) * 6.0
-		var sp := 16.0 + BoardRenderer.h01(i * 1.7) * 36.0
-		var y := size.y - fposmod(BoardRenderer.h01(i * 7.7) * size.y + time * sp, size.y + 60.0) + 30.0
-		var rad := 3.0 + BoardRenderer.h01(i * 5.3) * 9.0
-		draw_arc(Vector2(x, y), rad, 0, TAU, 12, PipeArt.fade(acc, 0.22), 2.0, PipeArt.aa)
-	# Floor grating along the bottom.
-	var gy := size.y - _cell * 0.35
-	draw_rect(Rect2(0, gy, size.x, size.y - gy), Color(0, 0, 0, 0.35))
-	var x0 := 0.0
-	while x0 < size.x:
-		draw_rect(Rect2(x0, gy, 3, size.y - gy), PipeArt.fade(pal["wall"], 0.5))
-		x0 += _cell * 0.25
+	var pw := maxf(160.0, _cell * 3.0)
+	var ph := maxf(120.0, _cell * 2.2)
+	var seam := Color(0, 0, 0, 0.35)
+	var lit := Color(1, 1, 1, 0.05)
+	var x := fposmod(size.x * 0.5, pw) - pw
+	while x < size.x:
+		draw_rect(Rect2(x, 0, 2, size.y), seam)
+		draw_rect(Rect2(x + 2, 0, 1, size.y), lit)
+		x += pw
+	var y := ph * 0.5
+	while y < size.y:
+		draw_rect(Rect2(0, y, size.x, 2), seam)
+		draw_rect(Rect2(0, y + 2, size.x, 1), lit)
+		var rx := fposmod(size.x * 0.5, pw) - pw
+		while rx < size.x + pw:
+			for d in [-10.0, 10.0]:
+				draw_circle(Vector2(rx + d + 2.0, y + d * 0.0 + 9.0), 2.5, Color(0, 0, 0, 0.45))
+				draw_circle(Vector2(rx + d + 1.5, y + 8.5), 1.2, Color(1, 1, 1, 0.12))
+			rx += pw
+		y += ph
+	# Cold blue light behind the nameplate.
+	var c := Vector2(size.x * 0.5, size.y * 0.36)
+	var gr := minf(size.x, size.y) * 0.6
+	draw_texture_rect(_glow, Rect2(c - Vector2(gr, gr), Vector2(gr, gr) * 2.0), false, Color(0.23, 0.7, 1.0, 0.13))
+	# Water dripping from the ceiling.
+	for i in 14:
+		var dx := BoardRenderer.h01(i * 3.1) * size.x
+		var fall := fposmod(time * (120.0 + BoardRenderer.h01(i * 1.7) * 160.0) + BoardRenderer.h01(i * 7.7) * size.y * 2.0, size.y * 2.0)
+		if fall < size.y:
+			draw_rect(Rect2(dx, fall, 2, 7), Color(0.55, 0.85, 1.0, 0.5))
+	# Hazard strip along the floor.
+	var band := Rect2(0, size.y - maxf(14.0, _cell * 0.3), size.x, maxf(14.0, _cell * 0.3))
+	draw_rect(band, Color("ffc928"))
+	var w := band.size.y * 1.6
+	var sx := -band.size.y
+	while sx < size.x:
+		draw_colored_polygon(PackedVector2Array([Vector2(sx, band.end.y), Vector2(sx + w * 0.5, band.end.y),
+				Vector2(sx + w * 0.5 + band.size.y, band.position.y), Vector2(sx + band.size.y, band.position.y)]), Color("1a1a1a"))
+		sx += w
+	draw_rect(Rect2(0, band.position.y - 3, size.x, 3), Color("11181d"))
 
 
 func _draw_pipes(ci: CanvasItem) -> void:

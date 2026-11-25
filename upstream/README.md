@@ -1,12 +1,15 @@
-# Ooze Up!
+# Upstream
 
-An endless, vertical pipe-laying puzzle built with **Godot 4** (GDScript, no
-assets: all art and sound are generated in code). Goo flows up from a pump at
-the bottom; lay pipes ahead of it and climb as high as you can.
+An endless, vertical pipe-hacking puzzle built with **Godot 4** (GDScript, no
+assets: all art and sound are generated in code). Water climbs from a pump at
+the bottom of a pump station; unlock the tiles ahead of it, swap the pipes into
+place and keep the water rising as high as you can.
 
 The board is drawn in a PlayStation 1 style: rendered at 240 lines, scaled up
 with hard pixel edges, and cut down to 15-bit colour with a 4x4 ordered dither.
-The HUD and menus stay sharp so they read well on phones.
+The menu and HUD use an industrial pump-station look (steel plates, rivets,
+hazard stripes, a pressure gauge on the nameplate) and stay sharp so they read
+well on phones.
 
 ## Run it
 
@@ -42,13 +45,19 @@ The main menu has one button, NEW GAME. The game plays in unlock mode; set
   face-down. Click or tap a locked tile to flip it and see what's under it: a
   pipe, an open spot, a rock, or an alarm trap. Click a pipe to pick it up,
   then click an open spot or another pipe to swap them (click it again to put
-  it back). Goo that reaches a locked tile spills, so unlock ahead of it. An
-  alarm costs 100 points and makes the goo surge for a few seconds.
+  it back). Water that reaches a locked tile spills, so unlock ahead of it. An
+  alarm costs 100 points and makes the water surge for a few seconds.
 - **Classic**: the board is open and you place pieces from a queue of five.
 
+**Milestone powers:** every 100 rows you get one **Flow-freeze** and one
+**Reveal**. Flow-freeze stops the water for 8 seconds while every pipe frosts
+over. Reveal unlocks every tile on the current map in one wave and disarms the
+alarms. Their buttons appear next to FAST once you have charges (Q and E on a
+keyboard).
+
 **Narrow pipes** (thinner steel tubes with a ring in the middle) connect like
-normal pipes but the goo takes 2.5x as long to get through them, so swap them
-onto the goo's path to buy time.
+normal pipes but the water takes 2.5x as long to get through them, so swap them
+onto the water's path to buy time.
 
 ## Controls
 
@@ -60,16 +69,17 @@ onto the goo's path to buy time.
 | Replace a dry pipe (classic, -50 points, 1 s lock) | Click / tap it | Same |
 | Fast-forward (x5 flow, x2 points, until game over) | FAST button | F |
 | Pick a wildcard piece | Picker buttons | 1-7 |
+| Flow-freeze / Reveal (after row 100) | Snowflake / eye buttons | Q / E |
 | Pause | Pause button | P / Esc |
 | Mute | Speaker button | M |
 | Restart | Play again | R |
 
 ## Rules
 
-- Goo starts after a 10-second countdown and speeds up as it climbs.
+- Water starts after a 10-second countdown and speeds up as it climbs.
 - In unlock mode every row hides at least the pipes its guaranteed path needs,
   so unlocking a row and swapping pipes within it is always enough.
-- The run ends when goo reaches an open pipe end, a wall, a rock, an empty tile,
+- The run ends when water reaches an open pipe end, a wall, a rock, an empty tile,
   a pipe that is already full, or a one-way pipe from the wrong side.
 - Pieces: straight horizontal and vertical, four corners and a cross. A cross can
   be filled twice, once each way, for +100.
@@ -78,7 +88,7 @@ onto the goo's path to buy time.
 - Obstacles grow with height: rocks, one-way pipes (brass, with arrows) and
   reservoirs (fixed pipes that swell into a wide chamber and take 4x as long to
   fill, which buys you time).
-- Power-ups (picked up when goo passes): **Slow-mo** (half speed for 8 s) and
+- Power-ups (picked up when water passes): **Slow-mo** (half speed for 8 s) and
   **Wildcard** (choose any piece).
 - Every 50 rows the zone changes: Sewer > Factory > Neon > Magma > Space, then
   the cycle repeats.
@@ -92,7 +102,7 @@ Every difficulty knob is in [`scripts/tuning.gd`](scripts/tuning.gd):
 
 | Constant | Default | What it does |
 | --- | --- | --- |
-| `COUNTDOWN_TIME` | 10 s | Delay before the goo starts |
+| `COUNTDOWN_TIME` | 10 s | Delay before the water starts |
 | `BASE_SEGMENT_TIME` | 2.6 s | Time to fill one tile at 1.0x |
 | `SPEEDUP_PER_ROW` | 0.012 | Speed gained per row climbed |
 | `MAX_SPEED` | 3.5x | Cap on height-based speed |
@@ -107,6 +117,7 @@ Every difficulty knob is in [`scripts/tuning.gd`](scripts/tuning.gd):
 | `ALARM_START_ROW` / `ALARM_CHANCE` | 15 / 0.07 | Alarm traps |
 | `ALARM_SURGE_TIME` / `ALARM_SURGE_MULT` / `ALARM_PENALTY` | 4 s / 1.8x / 100 | Alarm cost |
 | `FLIP_TIME` | 0.3 s | Unlock flip animation |
+| `POWER_AWARD_ROWS` / `FREEZE_TIME` | 100 / 8 s | Rows per Flow-freeze + Reveal pair; freeze length |
 | `SCORE_SEGMENT` / `SCORE_CROSS_DOUBLE` | 10 / 100 | Points |
 | `MULT_ROWS_STEP` / `MULT_STEP` | 25 rows / +0.5x | Height multiplier |
 | `SAFE_ROWS` | 5 | Obstacle-free rows at the start |
@@ -136,19 +147,20 @@ Each zone also scales the obstacle mix (`rock_mult`, `oneway_mult`, ...) in
 | --- | --- |
 | `main.gd` | Game controller: states, rules, scoring, layout |
 | `tuning.gd` | Tunable constants |
-| `pieces.gd` | Piece types, openings, goo path geometry |
+| `pieces.gd` | Piece types, openings, water path geometry |
 | `grid.gd`, `tile.gd` | Sparse endless board; rows below the floor are discarded |
-| `flow.gd` | Moves the goo and reports fills, entries and spills |
-| `game_camera.gd` | Smooth follow (goo in the lower third) and screen shake |
+| `flow.gd` | Moves the water and reports fills, entries and spills |
+| `game_camera.gd` | Smooth follow (water in the lower third) and screen shake |
 | `generator.gd` | Procedural rows with a guaranteed path upward |
 | `zones.gd` | Zone palettes and obstacle mixes |
-| `pipe_art.gd` | Vector drawing of pipes, goo, rocks and icons |
+| `pipe_art.gd` | Vector drawing of pipes, water, rocks and icons |
 | `sprite_atlas.gd` | Rasterises the vector art once per zone into textures |
-| `board_renderer.gd` | Backdrop, cached board rows, live goo tile, particles, queue |
+| `board_renderer.gd` | Backdrop, cached board rows, live water tile, particles, queue |
 | `ps1_screen.gdshader` | 15-bit colour and ordered dither for the low-res board |
 | `input_handler.gd` | Mouse, touch and keyboard |
 | `ui.gd` | HUD, banners, title / pause / game-over screens |
-| `title_backdrop.gd` | The menu's background: gradient, bubbles, flowing pipes |
+| `title_backdrop.gd` | The menu's background: pump-station wall, drips, flowing pipes |
+| `station_logo.gd` | The UPSTREAM nameplate: steel plate, gauge, stencil letters |
 | `sfx.gd` | Synthesised sound effects |
 | `save_data.gd` | High score (localStorage on the web, a config file elsewhere) |
 
@@ -163,10 +175,11 @@ godot --headless --fixed-fps 60 --script res://tests/game_test.gd
 ```
 
 `run_tests.gd` checks every piece from every entry side, the cross both ways,
-every way the goo can be stopped, and generates 250 seeds x 420 rows to prove
+every way the water can be stopped, and generates 250 seeds x 420 rows to prove
 each one solvable. `game_test.gd` drives the real scene with input events:
 the NEW GAME menu, placing, replacing, unlocking and swapping, narrow pipes, alarms, wildcards, pause, the countdown, a cross scored in
 game, and a 165-row run through four zones.
 
-For profiling in a browser, add `?fps` to the URL to log frame rate and draw
-calls to the console, and `?autoplay` to let a bot lay the guaranteed path.
+For testing in a browser, add `?fps` to the URL to log frame rate and draw
+calls to the console, `?autoplay` to let a bot play, and `?powers` to start
+with three Flow-freezes and three Reveals.

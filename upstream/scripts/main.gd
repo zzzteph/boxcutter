@@ -1,5 +1,5 @@
 ## ============================================================================
-##  OOZE UP! - game controller: state machine, rules, scoring and layout.
+##  UPSTREAM - game controller: state machine, rules, scoring and layout.
 ## ============================================================================
 ## Owns the Grid, Generator, Flow and Camera, and wires the Renderer, Input,
 ## UI and Sfx nodes together. See tuning.gd for every difficulty knob.
@@ -58,6 +58,12 @@ var _beeped := 0
 var held_from := Vector2i(-1, -1)  ## Tile whose pipe is picked up ((-1,-1) = from a wildcard).
 var held_piece := -1               ## Pipe item in hand (see Pieces.item), -1 = empty hand.
 var surge_timer := 0.0             ## Alarm surge time left.
+# Milestone powers (earned every POWER_AWARD_ROWS rows)
+var freezes := 0                   ## Flow-freeze charges.
+var reveals := 0                   ## Reveal charges.
+var freeze_timer := 0.0            ## Time left on a running freeze.
+var freeze_started := -100.0       ## Game time the current freeze began.
+var _next_award_row := Tuning.POWER_AWARD_ROWS
 var flips := 0
 var alarms := 0
 
@@ -71,6 +77,8 @@ var board_rect := Rect2()
 var queue_rect := Rect2()
 var status_rect := Rect2()
 var ff_rect := Rect2()
+var freeze_rect := Rect2()   ## Milestone power buttons (shown when you have charges).
+var reveal_rect := Rect2()
 var _slots: Array = []
 
 # Pointer / keyboard cursor
@@ -82,6 +90,7 @@ var kb_active := false
 # Debug flags: add ?fps / ?autoplay to the web URL (or --fps / --autoplay after "--" on the command line).
 var debug_fps := false
 var debug_autoplay := false
+var debug_powers := false   ## ?powers: start each run with 3 Flow-freezes and 3 Reveals.
 var _fps_timer := 0.0
 
 
@@ -149,6 +158,11 @@ func new_board(seed_value: int) -> void:
 	gen.unlock_mode = mode == "unlock"
 	_clear_hand()
 	surge_timer = 0.0
+	freezes = 0
+	reveals = 0
+	freeze_timer = 0.0
+	freeze_started = -100.0
+	_next_award_row = Tuning.POWER_AWARD_ROWS
 	flips = 0
 	alarms = 0
 	flow.reset()
@@ -182,6 +196,9 @@ func new_board(seed_value: int) -> void:
 
 func start_run() -> void:
 	new_board(rng.randi())
+	if debug_powers:
+		freezes = 3
+		reveals = 3
 	paused = false
 	state = State.COUNTDOWN
 	ui.show_play()
@@ -200,7 +217,7 @@ func _start_flow() -> void:
 	flow.begin(grid, Tuning.SOURCE_COL, 0, Pieces.S, _goo_color())
 	state = State.RUNNING
 	sfx.play("go")
-	ui.show_toast("GO!", Color("b6ff7a"))
+	ui.show_toast("PUMP ON!", Color("8fd8ff"))
 
 
 func _random_piece() -> int:
@@ -269,6 +286,14 @@ func _update_play(dt: float) -> void:
 		return
 	slow_timer = maxf(0.0, slow_timer - dt)
 	surge_timer = maxf(0.0, surge_timer - dt)
+	if freeze_timer > 0.0:
+		freeze_timer -= dt
+		if randf() < 0.6:
+			renderer.snow(1)
+		if freeze_timer <= 0.0:
+			freeze_timer = 0.0
+			sfx.play("thaw")
+			renderer.thaw_drips()
 	var amount := dt * effective_speed() / Tuning.BASE_SEGMENT_TIME
 	for e in flow.advance(grid, amount, _goo_color()):
 		grid.touch(e["row"])
@@ -314,6 +339,8 @@ func effective_speed() -> float:
 		s *= Tuning.SLOWMO_MULT
 	if surge_timer > 0.0:
 		s *= Tuning.ALARM_SURGE_MULT
+	if freeze_timer > 0.0:
+		return 0.0
 	return s
 
 
@@ -332,7 +359,7 @@ func _handle_event(e: Dictionary) -> void:
 		"enter":
 			var r: int = e["row"]
 			if r > height:
-				height = r
+				_set_height(r)
 				var zi := Zones.index_for_row(height)
 				if zi > zone_index:
 					zone_index = zi
@@ -362,6 +389,67 @@ func _handle_event(e: Dictionary) -> void:
 			_game_over(e)
 
 
+## New best height: zone banners, and the milestone powers every 100 rows.
+func _set_height(r: int) -> void:
+	height = r
+	while height >= _next_award_row:
+		freezes += 1
+		reveals += 1
+		ui.show_toast("ROW %d!  +1 FLOW-FREEZE  +1 REVEAL" % _next_award_row, Color("8fe8ff"))
+		sfx.play("powerup", 0.8)
+		renderer.float_text(flow.head_world(), "+FREEZE  +REVEAL", Color("bff0ff"), 0.36, 1.6)
+		_next_award_row += Tuning.POWER_AWARD_ROWS
+
+
+## Flow-freeze: every pipe frosts over and the water stops for FREEZE_TIME.
+func use_freeze() -> bool:
+	if freezes <= 0 or state != State.RUNNING or paused or freeze_timer > 0.0:
+		sfx.play("deny")
+		return false
+	freezes -= 1
+	freeze_timer = Tuning.FREEZE_TIME
+	freeze_started = time
+	sfx.play("freeze")
+	cam.add_shake(0.2)
+	renderer.snow(40)
+	ui.show_toast("FLOW FROZEN", Color("bff0ff"))
+	ui.flash(Color(0.85, 0.97, 1.0, 0.45))
+	buzz(60)
+	return true
+
+
+## Reveal: unlock every tile on the current map, in a wave from the bottom.
+## Alarms are disarmed rather than set off.
+func use_reveal() -> bool:
+	if reveals <= 0 or (state != State.COUNTDOWN and state != State.RUNNING) or paused:
+		sfx.play("deny")
+		return false
+	var base := floori(cam.y)
+	var count := 0
+	for r in range(grid.floor_row, grid.top_row + 1):
+		var any := false
+		for c in Tuning.COLS:
+			var t := grid.get_tile(c, r)
+			if t == null or not t.hidden:
+				continue
+			t.hidden = false
+			t.alarm = false
+			t.flip_at = time + maxf(0.0, r - base) * 0.045 + c * 0.012
+			any = true
+			count += 1
+		if any:
+			grid.touch(r)
+			renderer.animate_row(r, time + maxf(0.0, r - base) * 0.045 + 0.1 + Tuning.FLIP_TIME + 0.05)
+	if count == 0:
+		ui.show_toast("Nothing left to reveal", Color("8fa3ab"))
+		sfx.play("deny")
+		return false
+	reveals -= 1
+	sfx.play("reveal")
+	ui.show_toast("MAP REVEALED", Color("8fe8ff"))
+	return true
+
+
 func _apply_powerup(kind: int, wp: Vector2) -> void:
 	var col := PipeArt.powerup_color(kind)
 	match kind:
@@ -387,10 +475,12 @@ func _game_over(e: Dictionary) -> void:
 	spill = {"p": p, "t": time, "col": col, "seed": randf() * TAU}
 	cam.add_shake(0.85)
 	sfx.play("gameover")
+	buzz(250)
 	renderer.burst(p, col, 44, 5.0, 0.09, 1.2, 8.0)
 	fast_forward = false
 	slow_timer = 0.0
 	surge_timer = 0.0
+	freeze_timer = 0.0
 	_clear_hand()
 	if score > best:
 		best = score
@@ -534,6 +624,7 @@ func _trigger_alarm(wp: Vector2) -> void:
 	renderer.burst(wp, Color("ff3a2a"), 30, 4.0, 0.08, 0.9)
 	renderer.float_text(wp, "ALARM! -%d" % Tuning.ALARM_PENALTY, Color("ff5a4a"), 0.36, 1.3)
 	ui.show_toast("ALARM!  The water surges", Color("ff5a4a"))
+	buzz(120)
 	ui.flash(Color(1.0, 0.1, 0.05, 0.35))
 
 
@@ -651,6 +742,22 @@ func choose_wildcard(piece: int) -> void:
 
 # --- layout -----------------------------------------------------------------------------------
 
+func powers_shown() -> bool:
+	return (state == State.COUNTDOWN or state == State.RUNNING) and (freezes > 0 or reveals > 0 or freeze_timer > 0.0)
+
+
+## 0..1 strength of the freeze effect: frosts in fast, thaws over the last second.
+func freeze_amount() -> float:
+	if freeze_timer <= 0.0:
+		return 0.0
+	return clampf((time - freeze_started) / 0.35, 0.0, 1.0) * clampf(freeze_timer / 1.0, 0.0, 1.0)
+
+
+func buzz(ms: int) -> void:
+	if is_touch:
+		Input.vibrate_handheld(ms)
+
+
 func queue_slot_rects() -> Array:
 	return _slots
 
@@ -709,6 +816,13 @@ func _compute_layout() -> void:
 			_slots.append(Rect2(x, y + s0 - s1, s1, s1))
 			x += s1 + 8.0
 		status_rect = Rect2(x + 4.0, queue_rect.position.y + 8.0, maxf(0.0, ff_rect.position.x - x - 12.0), queue_rect.size.y - 16.0)
+		# Power buttons: big thumb targets just left of FAST.
+		var pw := ff_rect.size.y * 0.95
+		reveal_rect = Rect2(ff_rect.position.x - 10.0 - pw, ff_rect.position.y, pw, ff_rect.size.y)
+		freeze_rect = Rect2(reveal_rect.position.x - 8.0 - pw, ff_rect.position.y, pw, ff_rect.size.y)
+		if powers_shown():
+			var s0r: Rect2 = _slots[0]
+			status_rect = Rect2(s0r.end.x + 10.0, queue_rect.position.y + 8.0, maxf(0.0, freeze_rect.position.x - s0r.end.x - 20.0), queue_rect.size.y - 16.0)
 	else:
 		var panel_w := clampf(view_size.x * 0.17, 150.0, 220.0)
 		var avail_w := view_size.x - panel_w - 80.0
@@ -745,7 +859,13 @@ func _compute_layout() -> void:
 				_slots.append(Rect2(x, y, s1, s1))
 				x += s1 + gap
 			y += s1 + 4.0
-		status_rect = Rect2(queue_rect.position.x + 10.0, y, panel_w - 20.0, maxf(30.0, ff_rect.position.y - y - 8.0))
+		# Power buttons: a row just above FAST.
+		var ph := 64.0 if view_size.y >= 600.0 else 50.0
+		var half := (panel_w - 24.0 - 8.0) * 0.5
+		freeze_rect = Rect2(queue_rect.position.x + 12.0, ff_rect.position.y - 10.0 - ph, half, ph)
+		reveal_rect = Rect2(freeze_rect.end.x + 8.0, freeze_rect.position.y, half, ph)
+		var status_end := freeze_rect.position.y if powers_shown() else ff_rect.position.y
+		status_rect = Rect2(queue_rect.position.x + 10.0, y, panel_w - 20.0, maxf(30.0, status_end - y - 8.0))
 	cam.visible_rows = board_rect.size.y / T
 	if atlas != null:
 		atlas.ensure(roundi(T * px_scale), roundi((_slots[0] as Rect2).size.x * 0.86 * px_scale))
@@ -767,6 +887,7 @@ func _read_debug_flags() -> void:
 		qs += " " + arg
 	debug_fps = qs.contains("fps")
 	debug_autoplay = qs.contains("autoplay")
+	debug_powers = qs.contains("powers")
 
 
 ## Autoplay: a perfect player that lays the guaranteed path just ahead of the goo.

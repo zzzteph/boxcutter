@@ -61,6 +61,7 @@ var disk: Texture2D       ## White anti-aliased disk.
 var soft: Texture2D       ## White soft radial glow.
 var ring: Texture2D       ## White ring.
 var gear: Texture2D       ## White gear silhouette.
+var flake: Texture2D      ## White six-armed snowflake (Flow-freeze frost).
 var _tile_vps: Array = []
 var _icon_vps: Array = []
 
@@ -75,6 +76,13 @@ func _ready() -> void:
 		var teeth := 0.5 + 0.5 * signf(sin(a * 10.0))
 		var outer := lerpf(50.0, 62.0, teeth)
 		return clampf(outer - d, 0.0, 1.0) * clampf(d - 18.0, 0.0, 1.0))
+	flake = _make_tex(32, func(d: float, a: float) -> float:
+		var arm := fposmod(a, PI / 3.0)
+		var off := d * sin(minf(arm, PI / 3.0 - arm))
+		var spoke := clampf(1.4 - off, 0.0, 1.0) * clampf(15.0 - d, 0.0, 1.0)
+		# Little side branches two thirds of the way out.
+		var branch := clampf(1.2 - absf(d - 10.0), 0.0, 1.0) * clampf(3.2 - off, 0.0, 1.0)
+		return clampf(maxf(spoke, branch * 0.9) + clampf(2.5 - d, 0.0, 1.0), 0.0, 1.0))
 	for z in Zones.count():
 		_tile_vps.append(_make_vp(false, z))
 		_icon_vps.append(_make_vp(true, z))

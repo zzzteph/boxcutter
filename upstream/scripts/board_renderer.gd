@@ -33,6 +33,7 @@ var rows_root: Node2D
 var live: Layer
 var glow: Layer
 var fx_sprites: Layer
+var frost: Layer
 var fx: Layer
 var queue_bg: Layer
 var queue_icons: Layer
@@ -60,6 +61,7 @@ func _ready() -> void:
 	glow.material = add_mat
 	fx_sprites = _layer(_draw_fx_sprites, 160)
 	fx_sprites.material = atlas.premult_material
+	frost = _layer(_draw_frost, 165)
 	fx = _layer(_draw_fx, 170)
 	var top: Node = overlay_parent if overlay_parent != null else self
 	text_layer = _layer(_draw_text, 175, top)
@@ -84,6 +86,7 @@ func redraw() -> void:
 	live.queue_redraw()
 	glow.queue_redraw()
 	fx_sprites.queue_redraw()
+	frost.queue_redraw()
 	fx.queue_redraw()
 	text_layer.queue_redraw()
 	var sig := _queue_signature()
@@ -224,6 +227,9 @@ func _draw_row(ci: CanvasItem) -> void:
 			continue
 		var rect := Rect2(x0 + c * T, 0, T, T)
 		var fk := (time - t.flip_at) / Tuning.FLIP_TIME
+		if not t.hidden and fk < 0.0:
+			ci.draw_texture_rect_region(tex, rect, atlas.region(SpriteAtlas.LOCKED))
+			continue
 		if not t.hidden and fk >= 0.0 and fk < 1.0:
 			# Unlock flip: the plate turns edge-on, then the tile underneath turns face-up.
 			ci.draw_set_transform(rect.get_center(), 0.0, Vector2(maxf(0.04, absf(cos(fk * PI))), 1.0 + 0.12 * sin(fk * PI)))
@@ -339,6 +345,27 @@ func float_text(world_pos: Vector2, text: String, col: Color, size := 0.34, life
 	texts.append({"p": world_pos, "text": text, "col": col, "life": life, "max": life, "size": size})
 
 
+## Snowflakes drifting down over the board (Flow-freeze).
+func snow(count: int) -> void:
+	var cam: GameCamera = game.cam
+	for i in count:
+		var life := 1.6 + randf() * 1.2
+		parts.append({"p": Vector2(randf() * Tuning.COLS, cam.y + cam.visible_rows * randf()),
+				"v": Vector2(randf_range(-0.25, 0.25), -0.5 - randf() * 0.4), "life": life, "max": life,
+				"col": Color(0.92, 0.98, 1.0, 0.95), "size": 0.03 + randf() * 0.03, "grav": 0.0, "glow": false})
+
+
+## Water dripping off the pipes as the freeze ends.
+func thaw_drips() -> void:
+	var grid: Grid = game.grid
+	var rr: Vector2i = game.cam.row_range()
+	for r in range(maxi(rr.x, grid.floor_row), rr.y + 1):
+		for c in Tuning.COLS:
+			var t := grid.get_tile(c, r)
+			if t != null and t.has_goo() and randf() < 0.5:
+				burst(Vector2(c + 0.5, r + 0.5), Zones.theme_for_row(r)["goo"], 3, 1.2, 0.05, 0.9, 7.0, false)
+
+
 func update_fx(dt: float) -> void:
 	for p in parts:
 		p["v"].y -= p["grav"] * dt
@@ -401,6 +428,60 @@ func _hover_cells() -> Array:
 	if game.kb_active and game.kb_cursor != game.hover and game.is_tile_visible(game.kb_cursor.x, game.kb_cursor.y):
 		cells.append(game.kb_cursor)
 	return cells
+
+
+# --- Flow-freeze frost -----------------------------------------------------------------------
+
+func _draw_frost(ci: CanvasItem) -> void:
+	if game == null or game.T <= 0.0:
+		return
+	var a: float = game.freeze_amount()
+	if a <= 0.0:
+		return
+	var T: float = game.T
+	var b: Rect2 = game.board_rect
+	var grid: Grid = game.grid
+	var rr: Vector2i = game.cam.row_range()
+	var off := shake_offset()
+	# A cold tint over the whole board, and frost creeping in from the walls.
+	ci.draw_rect(Rect2(b.position.x - T * 0.2 + off.x, b.position.y, b.size.x + T * 0.4, b.size.y), Color(0.72, 0.9, 1.0, 0.24 * a))
+	for r in range(rr.x, rr.y + 1):
+		var y := row_y(r) + off.y
+		for x in [b.position.x + off.x, b.end.x + off.x]:
+			var fr := T * (0.7 + 0.25 * h01(r * 3.7 + x))
+			ci.draw_texture_rect(atlas.soft, Rect2(x - fr, y + T * 0.5 - fr, fr * 2.0, fr * 2.0), false, Color(0.88, 0.97, 1.0, 0.4 * a))
+	var ice := Color(0.9, 0.98, 1.0, 0.95 * a)
+	var sheen := Color(1, 1, 1, 0.8 * a)
+	for r in range(maxi(rr.x, grid.floor_row), rr.y + 1):
+		for c in Tuning.COLS:
+			var t := grid.get_tile(c, r)
+			if t == null or t.hidden or t.kind != Tile.EMPTY or t.piece < 0:
+				continue
+			var center := tile_rect(c, r).get_center()
+			# The water in the pipe turns to ice.
+			var w := PipeArt.W_GOO * T * (PipeArt.NARROW_SCALE if t.narrow else 1.0)
+			for ch in 2:
+				if t.fill_entry[ch] < 0:
+					continue
+				var en: int = t.fill_entry[ch]
+				var ex := Pieces.exit_dir(t.piece, en)
+				var p: float = t.fill[ch]
+				PipeArt.stroke(ci, center, T, en, ex, w * 1.05, ice, 0.0, p)
+				if t.special == Tile.SP_RESERVOIR and p > PipeArt.BULGE_T0:
+					PipeArt.stroke(ci, center, T, en, ex, PipeArt.W_BULGE_GOO * T, ice, PipeArt.BULGE_T0, minf(p, 1.0 - PipeArt.BULGE_T0))
+				PipeArt.stroke(ci, center, T, en, ex, w * 0.3, sheen, 0.0, p, w * 0.25)
+			# Frost crystals on every pipe.
+			for k in 2:
+				var hx := float((t.rnd >> (k * 7)) & 63) / 63.0 - 0.5
+				var hy := float((t.rnd >> (k * 7 + 13)) & 63) / 63.0 - 0.5
+				var fsz := T * (0.3 + 0.12 * k)
+				var fp := center + Vector2(hx, hy) * T * 0.62
+				ci.draw_texture_rect(atlas.flake, Rect2(fp - Vector2(fsz, fsz) * 0.5, Vector2(fsz, fsz)), false, Color(1, 1, 1, 0.85 * a))
+	# The freeze rings out from the water's leading edge.
+	var since: float = game.time - game.freeze_started
+	if since < 0.8:
+		var hp := w2s(game.flow.head_world())
+		ci.draw_arc(hp, since / 0.8 * T * 7.0, 0.0, TAU, 48, Color(0.92, 0.99, 1.0, (1.0 - since / 0.8) * 0.9), maxf(3.0, T * 0.09), PipeArt.aa)
 
 
 # --- fx (bubbles, outlines, particles, text) -------------------------------------------
@@ -613,7 +694,7 @@ func _draw_queue_bg(ci: CanvasItem) -> void:
 	_sb.bg_color = Color(0.05, 0.06, 0.08, 0.88)
 	_sb.set_corner_radius_all(18)
 	_sb.set_border_width_all(3)
-	_sb.border_color = PipeArt.fade(pal["accent"], 0.55)
+	_sb.border_color = Color(0.23, 0.7, 1.0, 0.55)
 	ci.draw_style_box(_sb, q)
 	var slots: Array = game.queue_slot_rects()
 	var unlock: bool = game.mode == "unlock"
@@ -624,7 +705,7 @@ func _draw_queue_bg(ci: CanvasItem) -> void:
 		_sb.bg_color = Color(1, 1, 1, 0.07) if i > 0 else PipeArt.fade(pal["tile"], 0.95)
 		_sb.set_corner_radius_all(int(sr.size.x * 0.16))
 		_sb.set_border_width_all(3 if i == 0 else 0)
-		_sb.border_color = pal["accent"]
+		_sb.border_color = Color("3ab4ff")
 		ci.draw_style_box(_sb, sr)
 	_sb.set_border_width_all(0)
 	if slots.is_empty():
@@ -637,7 +718,7 @@ func _draw_queue_bg(ci: CanvasItem) -> void:
 		_text(ci, f, Vector2(s0.get_center().x, s0.position.y - 10), title, 20, Color(1, 1, 1, 0.8))
 	else:
 		_text(ci, f, Vector2(s0.get_center().x, s0.position.y - 4), title, 15, Color(1, 1, 1, 0.8))
-	if unlock and slots.size() > 1:
+	if unlock and slots.size() > 1 and not (game.portrait and game.powers_shown()):
 		var hint := _hint_rect(slots)
 		var verb := "Tap" if game.is_touch else "Click"
 		var msg := ""

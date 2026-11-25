@@ -314,6 +314,48 @@ func _run() -> void:
 	check(game.height >= 120, "unlock mode: autoplay climbs to row 120 (reached %d, %s)" % [game.height, game.last_reason])
 	print("unlock run: height %d, score %d, flips %d, alarms %d" % [game.height, game.score, game.flips, game.alarms])
 
+	# --- milestone powers: Flow-freeze and Reveal every 100 rows ---
+	game.mode = "unlock"
+	game.start_run()
+	await frames(2)
+	check(not game.ui.btn_freeze.visible and not game.ui.btn_reveal.visible, "no power buttons before row 100")
+	game._set_height(100)
+	check(game.freezes == 1 and game.reveals == 1, "row 100 gives one Flow-freeze and one Reveal")
+	game._set_height(250)
+	check(game.freezes == 2 and game.reveals == 2, "row 200 gives another pair")
+	# Use them on a fresh board (jumping the height to 250 above dropped the pump's rows).
+	game.start_run()
+	game.freezes = 2
+	game.reveals = 2
+	await frames(2)
+	check(game.ui.btn_freeze.visible and game.ui.btn_reveal.visible, "power buttons appear once you have charges")
+	click(game.ui.btn_reveal.get_global_rect().get_center())
+	await frames(1)
+	var still_hidden := 0
+	for r in range(game.grid.floor_row, game.grid.top_row + 1):
+		for c in Tuning.COLS:
+			if game.grid.get_tile(c, r).hidden:
+				still_hidden += 1
+	check(still_hidden == 0 and game.reveals == 1, "Reveal unlocks the whole current map (%d still locked)" % still_hidden)
+	game._start_flow()
+	await frames(20)
+	click(game.ui.btn_freeze.get_global_rect().get_center())
+	await frames(1)
+	check(game.freeze_timer > 0.0 and game.freezes == 1, "the freeze button starts a Flow-freeze")
+	var frozen_at := [game.flow.row, game.flow.col, game.flow.progress]
+	await frames(60)
+	check([game.flow.row, game.flow.col, game.flow.progress] == frozen_at and game.effective_speed() == 0.0, "the water stands still while frozen")
+	key(KEY_Q)
+	await frames(1)
+	check(game.freezes == 1, "a second freeze can't stack on a running one")
+	game.freeze_timer = 0.05
+	await frames(10)
+	check(game.freeze_timer == 0.0 and [game.flow.row, game.flow.col, game.flow.progress] != frozen_at,
+			"the water flows again after the freeze (timer %.2f, flow %s -> %s, state %s, paused %s)" % [game.freeze_timer, frozen_at, [game.flow.row, game.flow.col, game.flow.progress], game.state, game.paused])
+	key(KEY_Q)
+	await frames(1)
+	check(game.freezes == 0 and game.freeze_timer > 0.0, "Q uses the next freeze charge")
+
 	# --- frame cost ---
 	var total := 0.0
 	var worst := 0.0

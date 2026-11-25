@@ -52,6 +52,10 @@ const ALARM_SURGE_MULT := 1.8        ## Flow multiplier during a surge.
 const ALARM_PENALTY := 100           ## Points lost per alarm.
 const FLIP_TIME := 0.3               ## Seconds of the unlock flip animation.
 
+# --- Milestone powers -------------------------------------------------------
+const POWER_AWARD_ROWS := 100        ## Every this many rows: +1 Flow-freeze and +1 Reveal.
+const FREEZE_TIME := 8.0             ## Seconds the flow stays frozen.
+
 # --- Scoring ----------------------------------------------------------------
 const SCORE_SEGMENT := 10            ## Points per filled segment.
 const SCORE_CROSS_DOUBLE := 100      ## Points when a cross is filled both ways.

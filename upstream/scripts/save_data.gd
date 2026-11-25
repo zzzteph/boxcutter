@@ -3,8 +3,8 @@
 class_name SaveData
 extends RefCounted
 
-const KEY := "ooze_up_best"
-const PATH := "user://ooze_up.cfg"
+const KEY := "upstream_best"
+const PATH := "user://upstream.cfg"
 
 
 static func load_best() -> int:
