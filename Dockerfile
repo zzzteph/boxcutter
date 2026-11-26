@@ -3,15 +3,20 @@
 # rebuilds everything together and an agent can never disagree with the engine it runs.
 
 # ---- stage: build the Vue SPA for `boxcutter serve` (served same-origin, under /api) ----
-FROM node:26-alpine AS web
+FROM node:26.13.1-alpine3.24 AS web
 WORKDIR /web
 COPY web/package*.json ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 
-FROM alpine:3.24 AS base
-RUN apk add --no-cache \
+# ---- stage: dnsx v1.3.1 has no published image (the newest on Docker Hub is v1.2.2), so build that release ----
+FROM golang:1.27.4-alpine3.24 AS dnsx
+RUN CGO_ENABLED=0 go install -trimpath -ldflags "-s -w" github.com/projectdiscovery/dnsx/cmd/dnsx@v1.3.1
+
+FROM alpine:3.24.4 AS base
+RUN apk upgrade --no-cache \
+    && apk add --no-cache \
         bash ca-certificates bind-tools nmap wget curl git \
         python3 py3-pip py3-requests py3-yaml \
         libstdc++ libgcc \
@@ -20,7 +25,7 @@ RUN apk add --no-cache \
 
 # ProjectDiscovery scanners used by the bundled workflows
 COPY --from=projectdiscovery/subfinder:v2.17.0 /usr/local/bin/subfinder /usr/local/bin/subfinder
-COPY --from=projectdiscovery/dnsx:v1.2.2       /usr/local/bin/dnsx      /usr/local/bin/dnsx
+COPY --from=dnsx                               /go/bin/dnsx             /usr/local/bin/dnsx
 COPY --from=projectdiscovery/katana:v1.8.0     /usr/local/bin/katana    /usr/local/bin/katana
 COPY --from=projectdiscovery/nuclei:v3.11.1    /usr/local/bin/nuclei    /usr/local/bin/nuclei
 COPY --from=projectdiscovery/httpx:v1.12.0     /usr/local/bin/httpx     /usr/local/bin/httpx
@@ -58,7 +63,8 @@ COPY boxcutter.py /opt/boxcutter/boxcutter.py
 COPY requirements.txt /opt/boxcutter/requirements.txt
 COPY server /opt/boxcutter/server
 RUN python3 -m venv /opt/srv \
- && /opt/srv/bin/pip install --no-cache-dir -r /opt/boxcutter/requirements.txt
+ && /opt/srv/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/srv/bin/pip install --no-cache-dir --upgrade -r /opt/boxcutter/requirements.txt
 COPY --from=web /web/dist /opt/boxcutter/server/web_dist
 # DB + the built-in agent's config persist here; mount a named volume to keep them across restarts.
 ENV DATA_DIR=/data \

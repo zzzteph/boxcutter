@@ -20,5 +20,5 @@ pydantic-settings>=2.16.3
 python-multipart>=0.0.34
 pymysql>=1.2.4              # MySQL/MariaDB driver - DATABASE_URL=mysql+pymysql://user:pass@host/db
 psycopg[binary]>=3.3.9      # Postgres driver   - DATABASE_URL=postgresql+psycopg://user:pass@host/db
-cronsim==2.8                # cron schedules (parse, next runs, plain-English description)
+cronsim>=2.9                 # cron schedules (parse, next runs, plain-English description)
 tzdata>=2026.6              # IANA time zones for zoneinfo (the image has no system tz database)
