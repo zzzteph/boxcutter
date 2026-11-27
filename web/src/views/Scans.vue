@@ -47,6 +47,7 @@ onUnmounted(() => clearInterval(timer))
     <router-link v-for="s in scans" :key="s.id" :to="'/scans/' + s.id" class="card scancard">
       <div class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:8px">
         <b class="nm">{{ s.name }}</b><span class="state" :class="'st-' + s.status">{{ s.status }}</span>
+        <span v-if="s.status === 'running' && s.window && !s.window_open" class="winwait" :title="'Scan window: ' + s.window_text">⏸ outside its window</span>
       </div>
       <div class="muted" style="font-size:12px">
         {{ s.template }}<span v-if="s.distributed"> · workflow, {{ s.steps }} steps</span><span v-if="s.scheduler_id"> · ⟳ scheduled</span>
@@ -94,4 +95,5 @@ onUnmounted(() => clearInterval(timer))
 .scancard { position: relative; overflow: hidden; padding-bottom: 22px; }
 .edgebar { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: var(--sc-high); }
 .edgebar > div { height: 100%; background: var(--accent); transition: width .4s; }
+.winwait { font-size: 11.5px; color: var(--warn); margin-left: 6px; white-space: nowrap; }
 </style>

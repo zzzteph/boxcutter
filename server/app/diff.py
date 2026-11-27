@@ -144,6 +144,24 @@ def reconcile_run(session: Session, scan_id: int, run_no: int, cutoff: datetime 
         # every (step, target) this run positively re-checked: its job finished successfully
         checked = set(session.exec(select(Job.stage, Target.value).join(Target, Target.id == Job.target_id).where(
             Job.scan_id == scan_id, Job.run_no == run_no, Job.status == "done")).all())
+        # a sql-leads step (sqlmap) only runs when fuzz flags SQL injection: a fuzz job that finished clean
+        # re-checked that target for the sqlmap step too, so an old sqlmap finding there is gone
+        from .models import Scan
+        from .pipeline import SEED, lead_value
+        scan = session.get(Scan, scan_id)
+        try:
+            plan = json.loads(scan.plan_json or "[]") if scan else []
+        except Exception:  # noqa: BLE001
+            plan = []
+        lead_kids: dict[int, list[int]] = {}
+        for i, st in enumerate(plan if isinstance(plan, list) else []):
+            if st.get("input") == "sql-leads":
+                for p in st.get("from", []):
+                    if p != SEED:
+                        lead_kids.setdefault(p, []).append(i)
+        for stage, value in list(checked):
+            for kid in lead_kids.get(stage, []):
+                checked.add((kid, lead_value(value)))
         stale = session.exec(select(Finding.id, Finding.stage, Finding.target, Finding.severity, Finding.title).where(
             Finding.scan_id == scan_id, Finding.last_seen < cut)).all()
         gone = [r for r in stale if (r[1], r[2]) in checked]

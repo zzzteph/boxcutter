@@ -23,10 +23,36 @@ def init_db() -> None:
     from . import models  # noqa: F401 - populate the metadata before create_all
     assert models
     SQLModel.metadata.create_all(engine)
+    _add_missing_columns()
     if _is_sqlite:
         with engine.connect() as conn:
             conn.exec_driver_sql("PRAGMA journal_mode=WAL")
             conn.exec_driver_sql("PRAGMA busy_timeout=5000")
+
+
+def _add_missing_columns() -> None:
+    """Tiny forward-only migration: add columns a newer version introduced to tables an older one created
+    (create_all never alters an existing table). New columns are nullable or carry a default."""
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in SQLModel.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have:
+                    continue
+                ddl = col.type.compile(dialect=engine.dialect)
+                default = col.default.arg if col.default is not None and not callable(col.default.arg) else None
+                if isinstance(default, bool):
+                    default = int(default)
+                clause = ""
+                if isinstance(default, (int, float)):
+                    clause = f" DEFAULT {default}"
+                elif isinstance(default, str) and ddl.upper().startswith(("VARCHAR", "CHAR")):
+                    clause = " DEFAULT '" + default.replace("'", "''") + "'"
+                conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {ddl}{clause}'))
 
 
 def get_session():

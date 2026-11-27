@@ -18,6 +18,7 @@ from ..db import engine, get_session
 from ..models import Activity, Finding, Job, JobEvent, Scan, ScanItem, Scheduler, Target, Template
 from ..pipeline import INPUTS, SEED, PlanError
 from ..cron import CronError, describe as describe_cron, validate as validate_cron
+from ..window import WindowError, info as window_info, normalize as normalize_window
 from ..queue import (enqueue_entry_stages, fire_scheduler, load_plan, maybe_finish_scan, next_run, on_scan_done,
                      start_run)
 
@@ -76,6 +77,7 @@ class ScanIn(BaseModel):
     cron: str | None = None              # set -> create a scheduler that re-runs this on that cron schedule
     timezone: str = "UTC"                # IANA zone the cron is evaluated in
     start_now: bool = True               # with cron: also run it right now (else wait for the first tick)
+    window: dict | None = None           # scan window (business hours): {tz, grid: 7 x 24 '0'/'1'}; None = any time
 
 
 def _default_name(tmpl: Template, first_target: str) -> str:
@@ -83,8 +85,15 @@ def _default_name(tmpl: Template, first_target: str) -> str:
     return f"{tmpl.title or tmpl.name} — {t}" if t else (tmpl.title or tmpl.name)
 
 
+def _window(raw) -> str:
+    try:
+        return normalize_window(raw)
+    except WindowError as e:
+        raise HTTPException(400, str(e))
+
+
 def _create(session: Session, name: str, tmpl: Template, lines, vars_: dict,
-            cron: str | None, tz: str, start_now: bool) -> dict:
+            cron: str | None, tz: str, start_now: bool, window: str = "") -> dict:
     lines = list(lines)
     first = next((ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")), "")
     name = (name or "").strip() or _default_name(tmpl, first)
@@ -96,7 +105,7 @@ def _create(session: Session, name: str, tmpl: Template, lines, vars_: dict,
         except CronError as e:
             raise HTTPException(400, str(e))
         sch = Scheduler(name=name, template_id=tmpl.id, targets_text="\n".join(lines), cron=expr, timezone=tz,
-                        vars_json=json.dumps(vars_), enabled=True)
+                        vars_json=json.dumps(vars_), enabled=True, window_json=window)
         sch.next_run_at = next_run(sch)
         session.add(sch)
         session.commit()
@@ -105,7 +114,7 @@ def _create(session: Session, name: str, tmpl: Template, lines, vars_: dict,
         jobs = fire_scheduler(session, sch) if start_now else 0
         return {"id": sch.scan_id, "scheduler_id": sch.id, "jobs": jobs}
     scan = Scan(name=name[:255], template_id=tmpl.id, template_name=tmpl.title or tmpl.name, status="queued",
-                vars_json=json.dumps(vars_))
+                vars_json=json.dumps(vars_), window_json=window)
     session.add(scan)
     session.commit()
     session.refresh(scan)
@@ -129,18 +138,23 @@ def _template_or_404(session: Session, tid: int) -> Template:
 @router.post("")
 def create_scan(body: ScanIn, session: Session = Depends(get_session)):
     tmpl = _template_or_404(session, body.template_id)
-    return _create(session, body.name, tmpl, body.targets, body.vars or {}, body.cron, body.timezone, body.start_now)
+    return _create(session, body.name, tmpl, body.targets, body.vars or {}, body.cron, body.timezone, body.start_now,
+                   _window(body.window))
 
 
 @router.post("/upload")
 def create_scan_upload(template_id: int = Form(...), name: str = Form(""), vars: str | None = Form(None),
                        cron: str | None = Form(None), timezone_: str = Form("UTC", alias="timezone"),
-                       start_now: bool = Form(True),
+                       start_now: bool = Form(True), window: str | None = Form(None),
                        file: UploadFile = File(...), session: Session = Depends(get_session)):
     """Create a scan whose targets come from an uploaded file (one per line) - for very large lists."""
     tmpl = _template_or_404(session, template_id)
     text = io.TextIOWrapper(file.file, encoding="utf-8", errors="replace")
-    return _create(session, name, tmpl, text, _vars(vars), cron, timezone_, start_now)
+    try:
+        win = json.loads(window) if window else None
+    except ValueError:
+        raise HTTPException(400, "window must be valid JSON")
+    return _create(session, name, tmpl, text, _vars(vars), cron, timezone_, start_now, _window(win))
 
 
 # ---- list / detail ------------------------------------------------------------------------------------------
@@ -170,7 +184,8 @@ def _summary(session: Session, s: Scan) -> dict:
             "jobs_done": jstat.get("done", 0) + jstat.get("failed", 0) + jstat.get("cancelled", 0),
             "jobs_failed": jstat.get("failed", 0),
             "running": jstat.get("running", 0) + jstat.get("claimed", 0),
-            "created_at": s.created_at, "last_run_at": s.last_run_at, "finished_at": s.finished_at}
+            "created_at": s.created_at, "last_run_at": s.last_run_at, "finished_at": s.finished_at,
+            **window_info(s.window_json)}
 
 
 @router.get("")
@@ -201,6 +216,9 @@ def _stages(session: Session, scan: Scan) -> list[dict]:
         ScanItem.scan_id == scan.id, ScanItem.run_no == scan.run_no).group_by(ScanItem.stage)).all())
     found = dict(session.exec(select(Finding.stage, func.count()).where(
         Finding.scan_id == scan.id).group_by(Finding.stage)).all())
+    merges = [i for i, st in enumerate(plan) if st.get("kind") == "merge"]
+    merged = dict(session.exec(select(Target.stage, func.count()).where(
+        Target.scan_id == scan.id, Target.stage.in_(merges)).group_by(Target.stage)).all()) if merges else {}
     done_state: dict[int, bool] = {}
     live = scan.status in ("running", "paused")
 
@@ -214,10 +232,21 @@ def _stages(session: Session, scan: Scan) -> list[dict]:
         return done_state[i]
 
     out = []
+    states: dict[int, str] = {}
     for i, st in enumerate(plan):
         d = jobs.get(i, {})
         total = sum(d.values())
-        if not live and scan.status != "done":
+        if st.get("kind") == "merge":            # no jobs of its own: it follows its inputs
+            ps = [states.get(p, "waiting") for p in st.get("from", []) if p != SEED]
+            if not live and scan.status != "done":
+                state = "stopped" if any(x in ("running", "stopped") for x in ps) else "done"
+            elif is_done(i):
+                state = "done"
+            elif any(x in ("running", "done") for x in ps) or merged.get(i):
+                state = "running"
+            else:
+                state = "waiting"
+        elif not live and scan.status != "done":
             state = "stopped" if total and unfinished(i) else ("done" if total else "skipped")
         elif is_done(i):
             state = "done" if total else ("skipped" if (live or scan.status == "done") else "waiting")
@@ -232,8 +261,11 @@ def _stages(session: Session, scan: Scan) -> list[dict]:
                     "jobs": {"total": total, "done": d.get("done", 0), "failed": d.get("failed", 0),
                              "cancelled": d.get("cancelled", 0), "pending": d.get("pending", 0),
                              "running": d.get("running", 0) + d.get("claimed", 0)},
-                    "items": items.get(i, 0), "findings": found.get(i, 0),
+                    "items": merged.get(i, 0) if st.get("kind") == "merge" else items.get(i, 0),
+                    "findings": found.get(i, 0), "gives": st.get("gives", ""),
+                    "category": st.get("category", ""), "accepts": st.get("accepts", ""),
                     "description": st.get("description", "")})
+        states[i] = state
     return out
 
 
@@ -267,6 +299,8 @@ def _scan_or_404(session: Session, scan_id: int) -> Scan:
 
 class ScanPatch(BaseModel):
     name: str | None = None
+    window: dict | None = None           # with set_window: the new scan window (None = any time)
+    set_window: bool = False
 
 
 @router.patch("/{scan_id}")
@@ -274,6 +308,14 @@ def update_scan(scan_id: int, body: ScanPatch, session: Session = Depends(get_se
     scan = _scan_or_404(session, scan_id)
     if body.name is not None and body.name.strip():
         scan.name = body.name.strip()[:255]
+    if body.set_window:
+        scan.window_json = _window(body.window)
+        sch = session.get(Scheduler, scan.scheduler_id) if scan.scheduler_id else None
+        if sch is not None:                      # a scheduler's scan: the scheduler owns the window
+            sch.window_json = scan.window_json
+            session.add(sch)
+        log_activity(session, "scan_window", f"Scan '{scan.name}': runs {window_info(scan.window_json)['window_text']}",
+                     scan_id=scan.id)
     session.add(scan)
     session.commit()
     return get_scan(scan_id, session)

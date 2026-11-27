@@ -59,9 +59,9 @@ boxcutter secrets-scan example.com
 boxcutter raw nuclei -u https://example.com -t cves
 ```
 
-**Tools:** `subfinder` `dnsx` `dns-brute` `ping-scan` `httpx` `wayback` `wayback-domains` · `katana-crawl`
-`harvest` `js-endpoints` · `nuclei` `sqlmap` `fuzz` · `scan-secrets` · `swagger-specs` `swagger-endpoints` ·
-`graphql-detect` `graphql-audit`. Only the tools the bundled workflows use ship.
+**Tools:** `subfinder` `dnsx` `dns-brute` `ping-scan` `httpx` `liveless` `wayback` `wayback-domains` ·
+`katana-crawl` `harvest` `js-endpoints` · `nuclei` `sqlmap` `fuzz` · `scan-secrets` · `swagger-specs`
+`swagger-endpoints` · `graphql-detect` `graphql-audit`. Only the tools the bundled workflows use ship.
 
 **Templates** (YAML workflows of the engine): `web-full` `web-scan` `web-nuclei` `web-fuzz` `web-sqlmap` `spa-scan` `endpoint-scan` `web-crawl`
 `swagger-scan` `swagger-fuzz` `graphql-scan` `secrets-scan` `wayback-scan` `wayback-fuzz` `recon` `recon-http`
@@ -91,18 +91,39 @@ add more scanners (below).
    scanners) and **Templates** (one job per target: a bundled scan template or a single tool). A short
    *Recommended* row comes first, then groups (Websites, Environment, Discovery, APIs, Secrets, Web archive,
    Network) and a search box. Pick a workflow and its graph is drawn right there, so you see how it will run.
+   Workflows that probe live services have a **🌐 internet-reachable only** switch: the same workflow with a
+   `liveless` check right after httpx (or on the targets first, for the ones that start from a URL), so only what
+   answers from the public internet is scanned.
 3. **When** — run once now, or **on a schedule**: a cron expression with a time zone (presets for the usual ones),
-   checked live — "At 03:00 on Monday · next: Mon 30 Nov 03:00, …". That creates a scheduler.
+   checked live — "At 03:00 on Monday · next: Mon 30 Nov 03:00, …". That creates a scheduler. Plus a **scan
+   window** (business hours): Any time, Business hours, Outside business hours, Nights, or paint any hours of the
+   week on a 7 × 24 grid, in a time zone of your choice.
 
 A summary bar says exactly what will run before you start it.
 
-**Workflows** are graphs of steps. Every step runs one template once per item it receives — each run a separate
-job that any scanner picks up — and hands what it finds (hostnames, URLs, URLs with parameters, JavaScript
-files, POST/PUT requests) to the steps wired after it, as soon as each job finishes. Build your own in the
-**workflow builder**: add steps from the palette, drag from a step's dot onto another step to wire them, pick
-what kind of results each step takes, name steps, nest other workflows. Every bundled template that loops over
-hosts or URLs also ships as a built-in workflow (21 of them, e.g. *Whole environment scan* as 23 steps) — open one
-to see its graph, duplicate it to change it.
+**Workflows** are graphs of steps. Every step runs one tool once per item it receives — each run a separate job
+that any scanner picks up — and hands what it finds (hostnames, URLs, URLs with parameters, JavaScript files,
+POST/PUT requests) to the steps wired after it, as soon as each job finishes.
+
+- **Every box is visible.** Built-in workflows are made of single tools only — nothing hides inside a nested box —
+  so parallel branches are side by side on the graph (e.g. *Whole environment scan*: 29 steps).
+- **Merge** steps bring parallel steps together: one stream, duplicates dropped, no job of its own (e.g. subfinder,
+  web-archive hostnames and DNS brute-force → *All discovered hostnames*). A step with several inputs merges them
+  the same way.
+- **Typed wires.** A step gives hostnames or URLs and takes only what it can use: hostnames never go straight into a
+  URL step (httpx turns them into URLs), and hostnames from passive discovery (subfinder, dns-brute, web-archive
+  hostnames) always go through **dnsx** to be verified first. The builder won't draw a wire that breaks this — while
+  you drag, the steps that can take the data light up and the others say why not — and the server checks the same.
+- **SQL injection is double-checked:** a fuzz step's SQL-injection hits are only leads — wired into sqlmap
+  ("SQL-injection leads"), sqlmap re-tests exactly those requests and its verdict is what gets reported.
+- **Follow the data:** click a wire to light up where its data goes, or a step to light up everything feeding it
+  and everything it feeds (on every graph: the builder, built-in workflows, a live scan).
+
+Build your own in the **workflow builder**: add tools (or a whole workflow — it is added as all its steps) from the
+palette, drag from a step's dot onto another step to wire them, name steps, use the *Add next* suggestions. A
+workflow saved with nested workflow boxes can be expanded into its steps with one click. Every bundled template
+that loops over hosts or URLs ships as a built-in workflow (21 of them, 16 also as an internet-reachable-only
+twin) — open one to see its graph, duplicate it to change it.
 
 **A scan's page** shows its workflow **live**: every step with its state, jobs, what it found and its findings,
 wires animated while data flows. Click a step for its own log and to filter findings / discovered assets / jobs
@@ -116,6 +137,11 @@ finding is only removed when its step actually re-checked that target and came b
 target wasn't reached this time, the finding stays, marked **not re-checked**. Every removal is listed in Activity
 and in the scan-done Slack/Telegram message, so you can see what got fixed. Runs never stack: if one is still going
 at the next tick, that tick is skipped (and logged).
+
+**Scan windows** (business hours) limit *when a scan's jobs run*, per scan or scheduler: outside the window no new
+job starts (ones already running finish) and the scan page says when it opens again. A scheduled run whose cron
+tick falls outside the window starts and waits for it. Change it any time from the scan page or the scheduler —
+it applies at once, also to a run in progress.
 
 **Notifications** (Settings): Telegram and Slack (incoming webhook) — new findings of the severities you pick,
 and a summary when a scan finishes. `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `SLACK_WEBHOOK_URL` pre-fill
@@ -180,5 +206,7 @@ Scanning is done by these projects. Credit to their authors:
 - [sqlmap](https://sqlmap.org/): SQL injection
 - [trufflehog](https://github.com/trufflesecurity/trufflehog): secret detection
 - [nmap](https://nmap.org/): host discovery
+- [liveless](https://liveless.shrewdeye.app/): external reachability probe (the internet-reachable-only workflows
+  send the URLs they check to it)
 
 boxcutter adds the CLI, the JSON envelope, the YAML templates, the distributed workflow engine and the UI.

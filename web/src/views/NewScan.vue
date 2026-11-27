@@ -11,6 +11,7 @@ import { api } from '../api'
 import ScanTypePicker from '../components/ScanTypePicker.vue'
 import WorkflowGraph from '../components/WorkflowGraph.vue'
 import CronInput from '../components/CronInput.vue'
+import WindowInput from '../components/WindowInput.vue'
 import { KIND_LABEL, KIND_ONE, detectTargets, targetLines } from '../util'
 import { graphFromPlan } from '../workflow'
 
@@ -35,11 +36,17 @@ const params = ref([])
 const err = ref('')
 const busy = ref(false)
 const preview = ref(null)               // the chosen workflow's expanded plan, drawn as a graph
+const external = ref(false)             // run the "internet-reachable only" twin (liveless after httpx)
+const win = ref(null)                   // scan window (business hours); null = any time
 
 const lines = computed(() => targetLines(targetsText.value))
 const detected = computed(() => detectTargets(lines.value))
 const kind = computed(() => (file.value && !lines.value.length) ? '' : detected.value.kind)
-const chosen = computed(() => templates.value.find(t => t.id === templateId.value) || null)
+const base = computed(() => templates.value.find(t => t.id === templateId.value) || null)
+const twin = computed(() => base.value ? templates.value.find(t => t.variant_of === base.value.name) || null : null)
+const twinAfterHttpx = computed(() => !!(twin.value && (twin.value.spec.stages || []).some(s =>
+  (templates.value.find(t => t.id === s.template_id) || {}).name === 'httpx')))
+const chosen = computed(() => (external.value && twin.value) ? twin.value : base.value)
 const inputLabels = computed(() => Object.fromEntries(inputs.value.map(i => [i.value, i.label])))
 const slots = computed(() => stats.value ? stats.value.slots_total : null)
 const detectLabel = computed(() => {
@@ -48,20 +55,22 @@ const detectLabel = computed(() => {
   return Object.entries(d.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${(n === 1 ? KIND_ONE[k] : KIND_LABEL[k]) || k}`).join(' · ')
 })
 const unknownCount = computed(() => detected.value.counts.unknown || 0)
-const ready = computed(() => !!chosen.value && (lines.value.length > 0 || !!file.value) && (when.value === 'now' || cronOk.value))
+const ready = computed(() => !!chosen.value && (lines.value.length > 0 || !!file.value) && (when.value === 'now' || cronOk.value) && winOk.value)
 const summary = computed(() => {
   if (!chosen.value) return 'Pick what to run'
   const on = file.value ? `targets from ${file.value.name}` : `${lines.value.length} target${lines.value.length === 1 ? '' : 's'}`
   const what = chosen.value.title + (chosen.value.kind === 'pipeline' ? ` (workflow, ${chosen.value.steps} steps)` : '')
   const sched = (cronDesc.value || 'cron ' + cron.value).replace(/^At /, 'at ')
   return `${what} on ${on} · ` + (when.value === 'schedule' ? `${sched} (${tz.value})${firstNow.value ? ', first run now' : ''}` : 'now')
+    + (win.value ? ' · only in its scan window' : '')
 })
+const winOk = computed(() => !win.value || win.value.grid.some(r => r.includes('1')))
 
-watch(templateId, async (id) => {
+watch(() => chosen.value && chosen.value.id, async (id) => {
   preview.value = null
   const t = templates.value.find(x => x.id === id)
   if (!t || t.kind !== 'pipeline') return
-  try { const full = await api.get('/templates/' + id); if (templateId.value === id) preview.value = graphFromPlan(full.plan) }
+  try { const full = await api.get('/templates/' + id); if (chosen.value && chosen.value.id === id) preview.value = graphFromPlan(full.plan) }
   catch (e) { /* preview is optional */ }
 })
 
@@ -82,11 +91,12 @@ async function start() {
       fd.append('name', name.value)
       fd.append('vars', JSON.stringify(vars))
       if (sched) { fd.append('cron', cron.value); fd.append('timezone', tz.value); fd.append('start_now', firstNow.value) }
+      if (win.value) fd.append('window', JSON.stringify(win.value))
       fd.append('file', file.value)
       r = await api.postForm('/scans/upload', fd)
     } else {
       r = await api.post('/scans', { template_id: chosen.value.id, name: name.value, targets: lines.value, vars,
-        cron: sched ? cron.value : null, timezone: tz.value || 'UTC', start_now: firstNow.value })
+        cron: sched ? cron.value : null, timezone: tz.value || 'UTC', start_now: firstNow.value, window: win.value })
     }
     router.push(r.id ? '/scans/' + r.id : '/schedulers')
   } catch (e) { err.value = e.message } finally { busy.value = false }
@@ -98,7 +108,12 @@ onMounted(async () => {
   const q = route.query
   if (q.targets) targetsText.value = String(q.targets).split(',').join('\n')
   if (q.repeat) when.value = 'schedule'
-  if (q.template && t.some(x => String(x.id) === String(q.template))) templateId.value = Number(q.template)
+  const pre = t.find(x => String(x.id) === String(q.template))
+  if (pre) {                                      // a twin opens as its base workflow with the switch on
+    const b = String(pre.variant_of || '').endsWith('-distributed') ? t.find(x => x.name === pre.variant_of) : null
+    templateId.value = b ? b.id : pre.id
+    external.value = !!b
+  }
 })
 </script>
 
@@ -126,6 +141,12 @@ onMounted(async () => {
     <div class="step-h"><span class="num">2</span><h2>What should it do?</h2></div>
     <div v-if="!templates.length" class="muted">Loading…</div>
     <ScanTypePicker v-else :templates="templates" :kind="kind" v-model="templateId" />
+    <label v-if="twin" class="ext" :class="{ on: external }">
+      <input type="checkbox" v-model="external" />
+      <span><b>🌐 Only what is reachable from the internet</b>
+        <span class="muted">adds a <i>liveless</i> check {{ twinAfterHttpx ? 'right after httpx' : 'on the targets first' }}, so only
+          services that answer from the public internet are scanned (the URLs are sent to the external liveless.shrewdeye.app probe)</span></span>
+    </label>
     <div v-if="chosen && chosen.kind === 'pipeline'" class="wfprev">
       <div class="row" style="justify-content:space-between">
         <b>How “{{ chosen.title }}” runs</b>
@@ -152,6 +173,9 @@ onMounted(async () => {
         what is new, still open and fixed. If a run is still going at the next tick, that tick is skipped.
       </div>
     </template>
+
+    <div class="sub-h">Scan window <span class="muted">— when it may run</span></div>
+    <WindowInput v-model="win" />
 
     <div class="formgrid" style="margin-top:6px">
       <div>
@@ -194,6 +218,13 @@ onMounted(async () => {
   background: var(--accent); color: var(--on-primary); flex: none; }
 .detect { color: var(--accent-ink); background: var(--wash); }
 .warnchip { color: var(--warn); }
+.ext { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; padding: 10px 14px; border-radius: var(--radius-s);
+  border: 1px solid var(--outline-variant); background: var(--sc-low); cursor: pointer; font-weight: 400; }
+.ext.on { border-color: var(--accent); background: var(--primary-container); }
+.ext input { width: auto; margin-top: 3px; }
+.ext b { font-weight: 600; display: block; color: var(--on-surface); }
+.ext .muted { font-size: 12.5px; }
+.sub-h { margin: 18px 0 8px; font-weight: 600; }
 .wfprev { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--outline-variant); }
 .seg { display: inline-flex; border: 1px solid var(--outline-variant); border-radius: var(--radius-xl); overflow: hidden; }
 .seg button { border: 0; border-radius: 0; height: 38px; text-transform: none; letter-spacing: 0; font-weight: 500;

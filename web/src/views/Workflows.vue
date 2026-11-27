@@ -12,13 +12,16 @@ const byId = computed(() => Object.fromEntries(templates.value.map(t => [t.id, t
 const match = (t) => { const s = q.value.trim().toLowerCase(); return !s || [t.title, t.description, t.category].join(' ').toLowerCase().includes(s) }
 const mine = computed(() => templates.value.filter(t => !t.builtin && t.kind === 'pipeline' && match(t)))
 const CATS = ['Websites', 'Environment', 'Discovery', 'APIs', 'Secrets', 'Web archive']
-const builtin = computed(() => CATS.map(c => ({ name: c, items: templates.value.filter(t => t.builtin && t.kind === 'pipeline' && t.category === c && match(t)) }))
-  .filter(g => g.items.length))
+// the "-external" twins (liveless after httpx) are listed on their base workflow's card, not as cards of their own
+const isTwin = (t) => String(t.variant_of || '').endsWith('-distributed')
+const twinOf = computed(() => Object.fromEntries(templates.value.filter(isTwin).map(t => [t.variant_of, t])))
+const builtin = computed(() => CATS.map(c => ({ name: c, items: templates.value.filter(t => t.builtin && t.kind === 'pipeline'
+  && !isTwin(t) && t.category === c && match(t)) })).filter(g => g.items.length))
 
 // "subfinder → dnsx → httpx → nuclei ×5 …" - the step titles in order, repeats folded
 function chain(t) {
-  const names = (t.spec.stages || []).map(s => (byId.value[s.template_id] || {}).title || '?')
-    .map(n => n.split(' — ')[0])
+  const names = (t.spec.stages || []).map(s => byId.value[s.template_id] || {})
+    .map(x => (x.kind === 'merge' ? '⇉' : (x.title || '?').split(' — ')[0]))
   const out = []
   for (const n of names) {
     const last = out[out.length - 1]
@@ -71,7 +74,7 @@ onMounted(async () => { try { templates.value = await api.get('/templates') } fi
 
   <h2 style="margin-top:26px">Built-in workflows</h2>
   <div class="muted" style="font-size:12.5px">Every bundled scan template that loops over hosts or URLs, rebuilt as a
-    workflow so its work spreads over all scanners. Read-only — duplicate one to change it.</div>
+    workflow of single tools so its work spreads over all scanners — every box it runs is on its graph. Read-only — duplicate one to change it.</div>
   <div v-for="g in builtin" :key="g.name">
     <div class="cat">{{ g.name }}</div>
     <div class="grid">
@@ -79,6 +82,8 @@ onMounted(async () => { try { templates.value = await api.get('/templates') } fi
         <div class="row" style="justify-content:space-between;flex-wrap:nowrap"><b>{{ t.title }}</b><span class="muted nw">{{ t.steps }} steps</span></div>
         <div class="chain">{{ chain(t) }}</div>
         <div class="muted io">needs {{ ACCEPTS_LABEL[t.accepts] || t.accepts }} · gives {{ PRODUCES_LABEL[t.produces] || t.produces }}</div>
+        <div v-if="twinOf[t.name]" class="twin">🌐 Also as <router-link :to="'/workflows/' + twinOf[t.name].id">internet-reachable only</router-link>
+          <span class="muted">— a liveless check {{ (twinOf[t.name].spec.stages || []).some(s => (byId[s.template_id] || {}).name === 'httpx') ? 'after httpx' : 'on the targets first' }}</span></div>
         <div class="row acts">
           <router-link :to="'/workflows/' + t.id" class="btn sm">Open</router-link>
           <router-link :to="'/scans/new?template=' + t.id" class="btn sm primary">Scan</router-link>
@@ -96,5 +101,6 @@ onMounted(async () => { try { templates.value = await api.get('/templates') } fi
 .nw { white-space: nowrap; font-size: 12.5px; }
 .acts { margin-top: auto; gap: 6px; }
 .spacer { flex: 1; }
+.twin { font-size: 12px; }
 .cat { margin: 16px 0 8px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--on-surface-variant); }
 </style>

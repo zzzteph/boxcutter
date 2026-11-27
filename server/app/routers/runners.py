@@ -19,7 +19,7 @@ from ..db import get_session
 from ..diff import is_issue, item_value, upsert_finding, upsert_item
 from ..models import EnrollToken, Job, JobEvent, Runner, Scan, Target
 from ..notify import notify_findings
-from ..pipeline import expand, stage_argv
+from ..pipeline import children, expand, is_sql_finding, lead_item, stage_argv
 from ..queue import claim_job, load_plan, maybe_finish_scan, on_scan_done, promote_items
 from ..security import current_runner, hash_token
 
@@ -151,10 +151,23 @@ def job_result(job_id: int, body: ResultIn, runner: Runner = Depends(current_run
     env_kind = str(env.get("kind") or "")
     new_findings: list[dict] = []
     produced: list = []
+    # a step wired into a sql-leads step: its SQL-injection hits are only leads - not reported here, but
+    # handed on to be re-tested (that step's verdict is what lands in findings)
+    leads_wanted = any(plan[c].get("input") == "sql-leads" for c in children(plan, job.stage))
+    lead_sent = False
     for f in env.get("data") or []:
         # a tool that reports findings -> issues; anything else (urls / hosts / request objects) -> items that
         # are listed in the scan's Assets AND flow into the next pipeline stage(s)
         as_finding = (env_kind == "findings") if env_kind else (isinstance(f, dict) and is_issue(f))
+        if as_finding and leads_wanted and is_sql_finding(f):
+            if not lead_sent:
+                try:
+                    targs = json.loads(target.args_json or "[]") or []
+                except Exception:  # noqa: BLE001
+                    targs = []
+                produced.append(lead_item(target.value, targs))
+                lead_sent = True
+            continue
         if as_finding and isinstance(f, dict) and is_issue(f):
             _, created = upsert_finding(session, job.scan_id, kind, target.value, f, run_no=job.run_no,
                                         stage=job.stage)

@@ -16,6 +16,7 @@ from ..db import get_session
 from ..models import Scan, Scheduler, Target, Template
 from ..pipeline import SEED
 from ..queue import fire_scheduler, next_run
+from ..window import WindowError, info as window_info, normalize as normalize_window
 from .scans import ingest_targets
 
 router = APIRouter(prefix="/schedulers", tags=["schedulers"])
@@ -31,7 +32,8 @@ def _out(session: Session, s: Scheduler) -> dict:
             "schedule": describe(s.cron), "enabled": s.enabled, "targets": targets, "targets_count": len(targets),
             "vars": json.loads(s.vars_json or "{}"), "scan_id": s.scan_id,
             "scan_status": scan.status if scan else None, "run_no": scan.run_no if scan else 0,
-            "last_run_at": s.last_run_at, "next_run_at": s.next_run_at, "created_at": s.created_at}
+            "last_run_at": s.last_run_at, "next_run_at": s.next_run_at, "created_at": s.created_at,
+            **window_info(s.window_json)}
 
 
 @router.get("")
@@ -59,6 +61,15 @@ class SchedulerIn(BaseModel):
     enabled: bool | None = None
     vars: dict | None = None
     start_now: bool = False
+    window: dict | None = None           # with set_window (always on create): scan window, None = any time
+    set_window: bool = False
+
+
+def _window(raw) -> str:
+    try:
+        return normalize_window(raw)
+    except WindowError as e:
+        raise HTTPException(400, str(e))
 
 
 def _cron(expr: str, tz: str) -> str:
@@ -79,7 +90,8 @@ def create_scheduler(body: SchedulerIn, session: Session = Depends(get_session))
     tz = body.timezone or "UTC"
     sch = Scheduler(name=(body.name or tmpl.title or tmpl.name).strip()[:200], template_id=tmpl.id,
                     targets_text="\n".join(targets), cron=_cron(body.cron or "0 3 * * *", tz), timezone=tz,
-                    enabled=True if body.enabled is None else body.enabled, vars_json=json.dumps(body.vars or {}))
+                    enabled=True if body.enabled is None else body.enabled, vars_json=json.dumps(body.vars or {}),
+                    window_json=_window(body.window))
     sch.next_run_at = next_run(sch) if sch.enabled else None
     session.add(sch)
     session.commit()
@@ -120,6 +132,10 @@ def update_scheduler(sid: int, body: SchedulerIn, session: Session = Depends(get
         s.cron, s.timezone = _cron(body.cron or s.cron, tz), tz
     if body.enabled is not None:
         s.enabled = body.enabled
+    if body.set_window:
+        s.window_json = _window(body.window)
+        if scan:                               # applies right away, also to a run in progress
+            scan.window_json = s.window_json
     s.next_run_at = next_run(s) if s.enabled else None
     if body.vars is not None:
         s.vars_json = json.dumps(body.vars)

@@ -17,6 +17,7 @@ from . import (
     httpx_probe,
     js_endpoints,
     katana_crawl,
+    liveless,
     nuclei,
     ping_scan,
     scan_secrets,
@@ -36,6 +37,7 @@ TOOLS = [
     dns_brute,
     ping_scan,
     httpx_probe,
+    liveless,
     wayback,
     wayback_domains,
     # Crawl

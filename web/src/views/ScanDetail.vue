@@ -8,6 +8,7 @@ import { api, apiUrl } from '../api'
 import { durationLabel, fmtDuration, timeAgo, timeUntil } from '../util'
 import Select from '../components/Select.vue'
 import WorkflowGraph from '../components/WorkflowGraph.vue'
+import WindowInput from '../components/WindowInput.vue'
 import { graphFromPlan } from '../workflow'
 
 const route = useRoute()
@@ -225,6 +226,24 @@ async function delScan() {
   if (!confirm(`Delete scan "${scan.value.name}" and all its results? This can't be undone.`)) return
   try { await api.del('/scans/' + id); router.push('/scans') } catch (e) { alert(e.message) }
 }
+// ---- scan window ----
+const winEdit = ref(null)               // {window} while the dialog is open
+const winErr = ref('')
+const waiting = computed(() => scan.value && scan.value.status === 'running' && scan.value.window && !scan.value.window_open)
+function editWindow() { menu.value = false; winErr.value = ''; winEdit.value = { window: scan.value.window } }
+async function saveWindow() {
+  try {
+    await api.patch('/scans/' + id, { window: winEdit.value.window, set_window: true })
+    winEdit.value = null
+    await loadScan()
+  } catch (e) { winErr.value = e.message }
+}
+// shown in the window's own time zone, like its "Mon–Fri 09:00–18:00 (zone)" text
+function whenLocal(iso) {
+  const tz = scan.value && scan.value.window ? scan.value.window.tz : undefined
+  try { return new Intl.DateTimeFormat(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', timeZone: tz }).format(new Date(iso)) }
+  catch { return iso }
+}
 async function rename() {
   menu.value = false
   const n = prompt('Scan name', scan.value.name)
@@ -267,6 +286,10 @@ onUnmounted(stopLive)
         <div v-if="scan.scheduler" class="muted sub">⟳ <router-link to="/schedulers">{{ scan.scheduler.schedule }}</router-link>
           <code class="cron">{{ scan.scheduler.cron }}</code>
           <span v-if="scan.scheduler.enabled"> · next run {{ timeUntil(scan.scheduler.next_run_at) }}</span><span v-else> · paused</span></div>
+        <div class="muted sub">🕘 <template v-if="scan.window">runs only {{ scan.window_text }}
+            <span v-if="scan.window_next"> · {{ scan.window_open ? 'closes' : 'opens' }} {{ whenLocal(scan.window_next) }}</span></template>
+          <template v-else>runs any time</template>
+          · <a href="#" @click.prevent="editWindow">change</a></div>
       </div>
       <div class="row acts">
         <button v-if="scan.status === 'running'" @click="act('pause')">Pause</button>
@@ -278,8 +301,27 @@ onUnmounted(stopLive)
           <button class="ghost" @click="menu = !menu" aria-label="More">⋯</button>
           <div v-if="menu" class="menu-panel right">
             <button class="menu-item" @click="rename">Rename</button>
+            <button class="menu-item" @click="editWindow">Scan window…</button>
             <button class="menu-item danger" @click="delScan">Delete scan</button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="waiting" class="waitbar">⏸ Outside its scan window — no new jobs start until it opens
+      <b v-if="scan.window_next">{{ whenLocal(scan.window_next) }}</b>. Jobs that were already running finish.</div>
+
+    <div v-if="winEdit" class="modal" @click.self="winEdit = null">
+      <div class="modal-inner card">
+        <div class="row" style="justify-content:space-between"><h2 style="margin:0">Scan window</h2>
+          <button class="ghost sm" @click="winEdit = null">✕</button></div>
+        <p class="muted" style="margin:6px 0 12px">When this scan's jobs may run<span v-if="scan.scheduler"> — changes the scheduler too</span>.
+          Applies right away, also to the run in progress.</p>
+        <WindowInput v-model="winEdit.window" />
+        <div v-if="winErr" class="err">{{ winErr }}</div>
+        <div class="row" style="justify-content:flex-end;margin-top:14px">
+          <button class="ghost" @click="winEdit = null">Cancel</button>
+          <button class="primary" @click="saveWindow">Save</button>
         </div>
       </div>
     </div>
@@ -330,6 +372,10 @@ onUnmounted(stopLive)
           <div class="kv"><span>Takes</span>{{ step.input_label }} from {{ srcLabel(step) }}</div>
           <div class="kv" v-if="step.args"><span>Arguments</span><code>{{ step.args }}</code></div>
           <div class="kv"><span>State</span><b :class="'st-' + step.state">{{ step.state }}</b></div>
+          <template v-if="step.kind === 'merge'">
+            <div class="kv"><span>Merged</span><b>{{ step.items }}</b> unique item(s) passed on — duplicates dropped, no job of its own</div>
+          </template>
+          <template v-else>
           <div class="kv"><span>Jobs</span>{{ step.jobs.done }} done · {{ step.jobs.running }} running · {{ step.jobs.pending }} waiting<span
             v-if="step.jobs.failed" class="st-failed"> · {{ step.jobs.failed }} failed</span></div>
           <div class="sidebtns">
@@ -339,6 +385,7 @@ onUnmounted(stopLive)
             <button class="sm" @click="showTab('log')">Full log</button>
           </div>
           <div class="log steplog">{{ stepLog.map(e => (e.agent ? '[' + e.agent + '] ' : '') + e.line).join('\n') || 'no output yet' }}</div>
+          </template>
         </aside>
       </div>
     </div>
@@ -562,4 +609,9 @@ onUnmounted(stopLive)
 .atab.on { background: var(--primary-container); color: var(--accent-ink); border-color: var(--accent); }
 .atype { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--sc-high); color: var(--on-surface-variant); }
 @media (max-width: 1000px) { .tiles4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .wfgrid.withside { grid-template-columns: 1fr; } .head { flex-direction: column; } }
+.waitbar { margin-top: 12px; padding: 10px 14px; border-radius: var(--radius-s); font-size: 13px;
+  background: color-mix(in srgb, var(--warn) 16%, var(--sc)); border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--outline-variant)); }
+.modal { position: fixed; inset: 0; background: var(--scrim); display: flex; align-items: flex-start; justify-content: center;
+  z-index: 50; padding: 40px 16px; overflow: auto; }
+.modal-inner { width: min(860px, 100%); }
 </style>

@@ -15,7 +15,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, update
+from sqlalchemy import delete, func, update
 from sqlmodel import Session, select
 
 from .activity import log_activity
@@ -23,6 +23,7 @@ from .cron import CronError, next_runs
 from .config import settings
 from .models import Job, Runner, Scan, Scheduler, Target, Template
 from .pipeline import SEED, PlanError, build_plan, children, select_targets
+from .window import is_open, parse as parse_window
 
 _INFLIGHT = ("claimed", "running")
 _UNFINISHED = ("pending", "claimed", "running")
@@ -66,23 +67,49 @@ def _enqueue_ids(session: Session, scan: Scan, stage: int, target_ids: list[int]
     return n
 
 
-def _ensure_targets(session: Session, scan_id: int, stage: int, triples: list) -> list[int]:
-    """Make sure each (value, key, args) exists as a Target of `stage`; return their ids (existing + new)."""
+def _ensure_targets(session: Session, scan_id: int, stage: int, triples: list,
+                    new_keys: set | None = None) -> list[int]:
+    """Make sure each (value, key, args, ...) exists as a Target of `stage`; return their ids (existing + new).
+    Keys inserted by this call are added to `new_keys` when given."""
     ids: list[int] = []
     for i in range(0, len(triples), _CHUNK):
         chunk = triples[i:i + _CHUNK]
-        keys = [k for _, k, _ in chunk]
+        keys = [t[1] for t in chunk]
         have = dict(session.exec(select(Target.key, Target.id).where(
             Target.scan_id == scan_id, Target.stage == stage, Target.key.in_(keys))).all())
-        new = [{"scan_id": scan_id, "stage": stage, "value": v, "key": k,
-                "args_json": json.dumps(a) if a else ""} for v, k, a in chunk if k not in have]
+        new = [{"scan_id": scan_id, "stage": stage, "value": t[0], "key": t[1],
+                "args_json": json.dumps(t[2]) if t[2] else ""} for t in chunk if t[1] not in have]
         if new:
             session.bulk_insert_mappings(Target, new)
             session.commit()
+            if new_keys is not None:
+                new_keys.update(r["key"] for r in new)
             have = dict(session.exec(select(Target.key, Target.id).where(
                 Target.scan_id == scan_id, Target.stage == stage, Target.key.in_(keys))).all())
         ids.extend(have[k] for k in keys if k in have)
     return ids
+
+
+def _feed(session: Session, scan: Scan, plan: list[dict], stage: int, items: list) -> int:
+    """Hand `items` to one stage. A normal stage gets one pending job per new target; a MERGE stage runs no
+    job - every item it has not seen yet this run is passed straight on to the stages after it."""
+    st = plan[stage]
+    if st.get("kind") == "merge":
+        quads = select_targets(st.get("input", "all"), items, with_items=True)
+        if not quads:
+            return 0
+        fresh: set = set()
+        _ensure_targets(session, scan.id, stage, quads, fresh)
+        out = [q[3] for q in quads if q[1] in fresh]
+        n = 0
+        if out:
+            for child in children(plan, stage):
+                n += _feed(session, scan, plan, child, out)
+        return n
+    triples = select_targets(st.get("input", "all"), items)
+    if not triples:
+        return 0
+    return _enqueue_ids(session, scan, stage, _ensure_targets(session, scan.id, stage, triples))
 
 
 _SEED_WINDOW = 5000
@@ -117,11 +144,10 @@ def enqueue_entry_stages(session: Session, scan: Scan, only_seed_ids: list[int] 
     with _PROMOTE_LOCK:
         for seeds in _seed_windows(session, scan.id, only_seed_ids):
             for i, st in entry:
-                if st.get("input", "all") == "all":
+                if st.get("input", "all") == "all" and st.get("kind") != "merge":
                     n += _enqueue_ids(session, scan, i, [tid for tid, _ in seeds])
                 else:
-                    triples = select_targets(st["input"], [v for _, v in seeds])
-                    n += _enqueue_ids(session, scan, i, _ensure_targets(session, scan.id, i, triples))
+                    n += _feed(session, scan, plan, i, [v for _, v in seeds])
     return n
 
 
@@ -133,9 +159,7 @@ def promote_items(session: Session, scan: Scan, stage: int, items: list) -> int:
     n = 0
     with _PROMOTE_LOCK:
         for child in children(plan, stage):
-            triples = select_targets(plan[child].get("input", "all"), items)
-            if triples:
-                n += _enqueue_ids(session, scan, child, _ensure_targets(session, scan.id, child, triples))
+            n += _feed(session, scan, plan, child, items)
     return n
 
 
@@ -154,6 +178,10 @@ def start_run(session: Session, scan: Scan) -> int:
         raise PlanError("this scan has nothing to run (its template was deleted)")
     session.execute(update(Job).where(Job.scan_id == scan.id, Job.status.in_(_UNFINISHED))
                     .values(status="cancelled"))
+    # a merge de-duplicates per run: forget what it passed on last time
+    merges = [i for i, st in enumerate(load_plan(scan)) if st.get("kind") == "merge"]
+    if merges:
+        session.execute(delete(Target).where(Target.scan_id == scan.id, Target.stage.in_(merges)))
     scan.run_no += 1
     scan.status = "running"
     scan.last_run_at = datetime.now(timezone.utc)
@@ -211,7 +239,9 @@ def on_scan_done(session: Session, scan: Scan) -> None:
 def _next_pending_job_id(session: Session):
     """Fair round-robin: among running scans that still have pending jobs, pick the one with the fewest jobs in
     flight, tie-broken by scan id; then its oldest pending job."""
-    running_ids = list(session.exec(select(Scan.id).where(Scan.status == "running")).all())
+    now = datetime.now(timezone.utc)
+    running_ids = [sid for sid, w in session.exec(select(Scan.id, Scan.window_json).where(
+        Scan.status == "running")).all() if is_open(parse_window(w), now)]      # outside its window: wait
     if not running_ids:
         return None
     pending = dict(session.exec(select(Job.scan_id, func.count()).where(
@@ -288,6 +318,7 @@ def fire_scheduler(session: Session, sch: Scheduler, now: datetime | None = None
         session.refresh(scan)
         ingest_targets(session, scan.id, (sch.targets_text or "").splitlines())
         sch.scan_id = scan.id
+    scan.window_json = sch.window_json or ""
     jobs = start_run(session, scan)
     sch.last_run_at = now
     sch.next_run_at = next_run(sch, now)

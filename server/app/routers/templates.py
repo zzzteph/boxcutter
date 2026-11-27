@@ -11,7 +11,8 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Scheduler, Template
-from ..pipeline import DEFAULT_INPUT, INPUT_HELP, INPUTS, SEED, PlanError, build_plan, flatten
+from ..pipeline import (DEFAULT_INPUT, INPUT_HELP, INPUTS, LEADS, SEED, UNVERIFIED, VERIFIER, PlanError, build_plan,
+                        flatten, gives, takes)
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
@@ -27,9 +28,13 @@ def _spec(t: Template) -> dict:
 
 def _out(t: Template, session: Session | None = None, with_plan: bool = False) -> dict:
     spec = _spec(t)
+    engine = spec.get("name") or t.name
     out = {"id": t.id, "name": t.name, "title": t.title or t.name, "kind": t.kind, "builtin": t.builtin,
            "variant_of": t.variant_of, "category": t.category, "accepts": t.accepts, "produces": t.produces,
-           "depth": t.depth, "description": t.description, "spec": spec}
+           "depth": t.depth, "description": t.description, "spec": spec,
+           # wiring rules for the builder (the server checks the same in pipeline.check_plan)
+           "engine": engine, "takes": sorted(takes(t.accepts, t.kind)), "gives": gives(t.produces),
+           "unverified": engine in UNVERIFIED, "verifier": engine == VERIFIER, "leads": engine in LEADS}
     if t.kind == "pipeline":
         out["steps"] = len(spec.get("stages") or [])
     if with_plan and session is not None:
@@ -101,7 +106,8 @@ def _apply(session: Session, t: Template, body: TemplateIn) -> None:
             raise HTTPException(400, str(e))
         first = session.get(Template, int(stages[0]["template_id"]))
         parents = {f for s in plan for f in s["from"] if f != SEED}
-        leaf_kinds = {s["produces"] for i, s in enumerate(plan) if i not in parents} - {"findings"}
+        leaf_kinds = {({"host": "hosts"}.get(s.get("gives"), "urls") if s["kind"] == "merge" else s["produces"])
+                      for i, s in enumerate(plan) if i not in parents} - {"findings"}
         t.kind = "pipeline"
         t.accepts = first.accepts if first else "any"
         t.produces = (leaf_kinds.pop() if len(leaf_kinds) == 1 else "items") if leaf_kinds else "findings"

@@ -14,6 +14,13 @@ own job, so the whole scanner fleet shares the work:
 A pipeline stage may itself point at another pipeline: it is inlined (its first stages read what this stage
 would have read, and anything reading this stage reads that pipeline's final stages). That is how a custom
 pipeline can chain two built-in distributed workflows.
+
+A MERGE stage runs no job: it combines what its inputs produce, drops duplicates and passes each unique item on
+at once - the place where parallel steps (subfinder, dns-brute, ...) come together.
+
+Wires are typed (check_plan): a step gives hostnames or URLs, and a step only takes what it can use - hostnames
+never go straight into a URL step (httpx turns them into URLs), and hostnames found by passive discovery go
+through dnsx before anything else uses them.
 """
 from __future__ import annotations
 
@@ -38,15 +45,19 @@ INPUTS = {
     "param-urls": "URLs with parameters",
     "js-urls": "JavaScript files",
     "writes": "POST / PUT / PATCH requests",
+    "sql-leads": "SQL-injection leads",
 }
 INPUT_HELP = {
     "all": "every result as-is",
     "hosts": "hostnames only (URLs are reduced to their host)",
-    "urls": "http(s) URLs (bare hostnames become https://host)",
+    "urls": "http(s) URLs (scan targets given as bare hostnames become https://host; hostnames found by a step "
+            "go through httpx first)",
     "param-urls": "URLs that carry query parameters, one per path + parameter set",
     "js-urls": "JavaScript file URLs",
     "writes": "captured state-changing requests - the method and body are passed to the tool "
               "(only fuzz and sqlmap understand them)",
+    "sql-leads": "the requests a fuzz step flagged as SQL injection, re-tested here - the fuzz hit itself is not "
+                 "reported, this step's verdict is",
 }
 # a template's `accepts` -> the input a stage feeding it should use by default
 DEFAULT_INPUT = {"domain": "hosts", "host": "all", "network": "hosts", "url": "urls", "spec": "urls",
@@ -101,46 +112,67 @@ def _k(*parts) -> str:
     return hashlib.sha256("|".join(str(p) for p in parts).encode()).hexdigest()[:40]
 
 
-def select_targets(input_name: str, items: list) -> list[tuple[str, str, list]]:
+def _write_args(it) -> tuple[str, str, list]:
+    """(method, body, argv) of a captured request object; ('', '', []) for a plain GET / a string."""
+    if not isinstance(it, dict):
+        return "", "", []
+    method = str(it.get("method", "")).upper()
+    if method not in _WRITE_METHODS:
+        return "", "", []
+    body = it.get("body")
+    body = body if isinstance(body, str) else (json.dumps(body) if body else "")
+    return method, body, ["--method", method] + (["--data", body] if body else [])
+
+
+def select_targets(input_name: str, items: list, with_items: bool = False) -> list[tuple]:
     """Turn a stage's incoming items into ``(value, dedupe_key, extra_argv)`` target triples (de-duplicated
-    within the batch; the queue also de-duplicates against what the stage already has)."""
-    out: list[tuple[str, str, list]] = []
+    within the batch; the queue also de-duplicates against what the stage already has). ``with_items`` adds the
+    source item as a 4th element (a merge step passes the original objects on).
+
+    Items a liveless check found unreachable (``alive: false``) are never passed on."""
+    out: list[tuple] = []
     seen: set = set()
 
-    def add(value: str, key: str, args: list | None = None):
+    def add(value: str, key: str, args: list | None, it):
         if value and len(value) <= 1024 and key not in seen:
             seen.add(key)
-            out.append((value, key, args or []))
+            out.append((value, key, args or [], it) if with_items else (value, key, args or []))
 
     for it in items:
-        if input_name == "writes":
-            if not isinstance(it, dict):
-                continue
-            method = str(it.get("method", "")).upper()
-            url = item_url(it)
-            if method not in _WRITE_METHODS or not _is_url(url):
-                continue
-            body = it.get("body")
-            body = body if isinstance(body, str) else (json.dumps(body) if body else "")
-            args = ["--method", method] + (["--data", body] if body else [])
-            add(url, _k("w", method, url.split("?", 1)[0], body[:500]), args)
+        if isinstance(it, dict) and it.get("alive") is False:
             continue
+        if input_name in ("writes", "sql-leads", "all"):
+            method, body, wargs = _write_args(it)
+            if input_name == "writes" and not method:
+                continue
+            if input_name == "sql-leads" and not (isinstance(it, dict) and it.get("lead") == "sql"):
+                continue
+            url = item_url(it)
+            if method and _is_url(url):
+                add(url, _k("w", method, url.split("?", 1)[0], body[:500]), wargs, it)
+                continue
+            if input_name == "writes":
+                continue
+            if input_name == "sql-leads":
+                if _is_url(url):
+                    add(url, _k(url.rstrip("/")), [], it)
+                continue
         v = item_url(it)
         if not v:
             continue
         if input_name == "all":
-            add(v, _k(v.lower().rstrip("/")))
+            add(v, _k(v.lower().rstrip("/")), [], it)
         elif input_name == "hosts":
             h = _hostname(v)
             if h:
-                add(h, _k(h))
+                add(h, _k(h), [], it)
         elif input_name == "urls":
             if _is_url(v):
-                add(v, _k(v.rstrip("/")))
+                add(v, _k(v.rstrip("/")), [], it)
             else:
                 h = _hostname(v)
                 if h and h == v.strip().lower().rstrip("."):
-                    add("https://" + h, _k("https://" + h))
+                    add("https://" + h, _k("https://" + h), [], it)
         elif input_name == "param-urls":
             if not _is_url(v):
                 continue
@@ -150,7 +182,7 @@ def select_targets(input_name: str, items: list) -> list[tuple[str, str, list]]:
                 continue
             names = sorted({k for k, _ in parse_qsl(p.query, keep_blank_values=True)})
             if names:
-                add(v, _k(p.scheme.lower(), p.netloc.lower(), p.path, ",".join(names)))
+                add(v, _k(p.scheme.lower(), p.netloc.lower(), p.path, ",".join(names)), [], it)
         elif input_name == "js-urls":
             if not _is_url(v):
                 continue
@@ -159,8 +191,120 @@ def select_targets(input_name: str, items: list) -> list[tuple[str, str, list]]:
             except ValueError:
                 continue
             if _JS_RE.search(path):
-                add(v, _k(v.lower()))
+                add(v, _k(v.lower()), [], it)
     return out
+
+
+# ---- SQL-injection leads (fuzz -> sqlmap) -----------------------------------------------------------------
+_SQL_TOKENS = {"sql", "sqli", "sqlinjection", "sql-injection"}
+_TAG_RE = re.compile(r"\[([A-Za-z0-9_.-]+)\]")
+_INFO_CLASS_RE = re.compile(r"class:\s*([A-Za-z0-9_.-]+)", re.I)
+
+
+def is_sql_finding(f: dict) -> bool:
+    """Does a finding report SQL injection? (the same class tokens the engine's ``class:sql`` filter reads)"""
+    if not isinstance(f, dict):
+        return False
+    toks = {str(f.get(k) or "").lower() for k in ("class", "cls")}
+    toks |= {t.lower() for t in _TAG_RE.findall(str(f.get("title", "")))}
+    m = _INFO_CLASS_RE.search(str(f.get("info", "")))
+    if m:
+        toks.add(m.group(1).lower())
+    return bool(toks & _SQL_TOKENS)
+
+
+def lead_value(value: str) -> str:
+    """The URL a lead is re-tested on: {FUZZ} markers (fuzzable OpenAPI variants) become a plain value."""
+    return (value or "").replace("{FUZZ}", "1")
+
+
+def lead_item(value: str, args: list) -> dict:
+    """A fuzz job's target, as the item a sql-leads step receives (keeps a captured request's method/body)."""
+    it = {"url": lead_value(value), "lead": "sql"}
+    a = list(args or [])
+    for flag, key in (("--method", "method"), ("--data", "body")):
+        if flag in a and a.index(flag) + 1 < len(a):
+            it[key] = a[a.index(flag) + 1]
+    return it
+
+
+# ---- data kinds: what a step gives and takes --------------------------------------------------------------
+# Passive discovery returns names that may not exist; they are resolved by dnsx before anything else uses them.
+UNVERIFIED = {"subfinder", "dns-brute", "wayback-domains"}
+VERIFIER = "dnsx"
+LEADS = {"fuzz"}                       # steps whose SQL-injection hits can feed a sql-leads step
+_URL_INPUTS = {"urls", "param-urls", "js-urls", "writes", "sql-leads"}
+
+
+def takes(accepts: str, kind: str = "tool") -> set:
+    """What a template can work on: 'host' (hostnames / IPs), 'url', or both."""
+    if accepts in ("domain", "network"):
+        return {"host"}
+    if accepts in ("host", "any", ""):
+        return {"host", "url"}
+    if accepts == "spec":
+        return {"url"} if kind == "tool" else {"url", "host"}
+    return {"url"}                      # url, endpoint, js, graphql
+
+
+def gives(produces: str) -> str:
+    """'host' | 'url' | '' (findings: nothing to pass on)."""
+    return {"hosts": "host", "urls": "url", "items": "url"}.get(produces, "")
+
+
+def _name(st: dict) -> str:
+    return st.get("title") or st.get("template") or "a step"
+
+
+def check_plan(plan: list[dict]) -> None:
+    """Validate the wiring of a flattened plan (raises PlanError with a user-facing message) and annotate every
+    stage with ``gives`` (the kind of data it passes on) and ``unverified`` (hostnames not resolved yet)."""
+    for i, st in enumerate(plan):
+        parents = [p for p in st.get("from", []) if p != SEED]
+        if st.get("kind") == "merge":
+            if len(st.get("from", [])) < 2:
+                raise PlanError(f"“{_name(st)}” merges the results of several steps — wire at least two into it")
+            kinds = {plan[p].get("gives") or "" for p in parents} - {""}
+            if st.get("input") == "hosts":
+                kinds = {"host"}
+            elif st.get("input") in _URL_INPUTS:
+                kinds = {"url"}
+            if len(kinds) > 1:
+                raise PlanError(f"“{_name(st)}” would mix hostnames and URLs — merge one kind of result")
+            st["gives"] = kinds.pop() if kinds else "url"
+        else:
+            st["gives"] = gives(st.get("produces", ""))
+        st["unverified"] = (st.get("engine") in UNVERIFIED) or (
+            st.get("kind") == "merge" and any(plan[p].get("unverified") for p in parents))
+        inp = st.get("input", "all")
+        want = takes(st.get("accepts", ""), st.get("kind", "tool")) if st.get("kind") != "merge" else {"host", "url"}
+        for p in parents:
+            src = plan[p]
+            if inp == "sql-leads":
+                if src.get("engine") not in LEADS and not (src.get("kind") == "merge" and src.get("leads")):
+                    raise PlanError(f"“{_name(st)}” takes SQL-injection leads — those come from a fuzz step, "
+                                    f"not from “{_name(src)}”")
+                continue
+            have = src.get("gives") or ""
+            if not have:
+                raise PlanError(f"“{_name(st)}” reads from “{_name(src)}”, which only produces findings — "
+                                "nothing to pass on")
+            if src.get("unverified") and st.get("engine") != VERIFIER and st.get("kind") != "merge":
+                what = "carries" if src.get("kind") == "merge" else "finds"
+                raise PlanError(f"“{_name(src)}” {what} hostnames that may not exist — wire it into dnsx (or a "
+                                "merge that goes into dnsx) so they are verified first")
+            if have == "host":
+                if inp in _URL_INPUTS or "host" not in want:
+                    raise PlanError(f"“{_name(src)}” gives hostnames and “{_name(st)}” needs URLs — put httpx "
+                                    "in between to find the web services")
+            elif inp == "hosts":
+                if "host" not in want:
+                    raise PlanError(f"“{_name(st)}” needs URLs — it can't take hostnames from “{_name(src)}”")
+            elif "url" not in want:
+                raise PlanError(f"“{_name(st)}” takes hostnames — choose “Hostnames” as what it takes from "
+                                f"“{_name(src)}”")
+        if st.get("kind") == "merge":
+            st["leads"] = inp == "sql-leads"
 
 
 # ---- plans --------------------------------------------------------------------------------------------------
@@ -184,6 +328,8 @@ def build_plan(session: Session, template: Template) -> list[dict]:
     """The flattened, validated stage plan for a template. Raises PlanError."""
     if template.kind in ("tool", "workflow"):
         return [atomic_stage(template)]
+    if template.kind == "merge":
+        raise PlanError("a merge step only makes sense inside a workflow")
     if template.kind != "pipeline":
         raise PlanError(f"unknown template kind '{template.kind}'")
     return flatten(session, _spec(template).get("stages") or [], _seen={template.id})
@@ -221,12 +367,6 @@ def flatten(session: Session, stages: list, _seen: set | None = None) -> list[di
             if f == SEED:
                 frm.append(SEED)
             else:
-                parent = stages[f]
-                ptid = parent.get("template_id") if isinstance(parent, dict) else None
-                pt = session.get(Template, int(ptid)) if ptid else None
-                if pt is not None and pt.produces == "findings":
-                    raise PlanError(f"step {i + 1} reads from step {f + 1} ({pt.title or pt.name}), "
-                                    "which only produces findings - nothing to pass on")
                 frm.extend(out_of.get(f, []))
         frm = sorted(set(frm))
         input_name = str(raw.get("input") or DEFAULT_INPUT.get(t.accepts, "all"))
@@ -262,6 +402,7 @@ def flatten(session: Session, stages: list, _seen: set | None = None) -> list[di
             out_of[i] = [len(plan) - 1]
         if len(plan) > MAX_STAGES:
             raise PlanError(f"too many steps once expanded (max {MAX_STAGES})")
+    check_plan(plan)
     return plan
 
 

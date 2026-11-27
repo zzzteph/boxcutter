@@ -31,7 +31,10 @@ const RECOMMENDED = {
 const GROUP_ORDER = ['Websites', 'Environment', 'Discovery', 'APIs', 'Secrets', 'Web archive', 'Network', 'Custom']
 
 const isWf = (t) => t.kind === 'pipeline'
-const pool = computed(() => props.templates.filter(t => (tab.value === 'workflows' ? isWf(t) : !isWf(t))))
+// "-external" twins are picked with the "internet-reachable only" switch on New scan, not as cards of their own
+const isTwin = (t) => String(t.variant_of || '').endsWith('-distributed')
+const listed = computed(() => props.templates.filter(t => t.kind !== 'merge' && !isTwin(t)))
+const pool = computed(() => listed.value.filter(t => (tab.value === 'workflows' ? isWf(t) : !isWf(t))))
 const matches = computed(() => {
   const s = q.value.trim().toLowerCase()
   return pool.value.filter(t => (showAll.value || fits(t, props.kind)) &&
@@ -57,8 +60,8 @@ const groups = computed(() => {
 const tools = computed(() => matches.value.filter(t => t.category === 'Tools' && !recommended.value.some(r => r.id === t.id)))
 const hidden = computed(() => showAll.value ? 0 : pool.value.filter(t => !fits(t, props.kind)).length)
 const counts = computed(() => ({
-  workflows: props.templates.filter(t => isWf(t) && fits(t, props.kind)).length,
-  templates: props.templates.filter(t => !isWf(t) && fits(t, props.kind)).length,
+  workflows: listed.value.filter(t => isWf(t) && fits(t, props.kind)).length,
+  templates: listed.value.filter(t => !isWf(t) && fits(t, props.kind)).length,
 }))
 const selected = computed(() => props.templates.find(t => t.id === props.modelValue) || null)
 

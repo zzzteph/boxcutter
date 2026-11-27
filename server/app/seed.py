@@ -125,126 +125,230 @@ CATALOG: dict[str, tuple] = {
                        "Probes common paths for a GraphQL endpoint."),
     "graphql-audit": ("tool", "GraphQL audit", "Tools", "graphql", "findings", "standard",
                       "Audits one GraphQL endpoint (introspection, CSRF, batching, injection, mutations)."),
+    "liveless": ("tool", "liveless — reachable from the internet?", "Tools", "host", "urls", "quick",
+                 "Asks an external probe (liveless.shrewdeye.app) whether each URL / host answers from the public "
+                 "internet; only the reachable ones are passed on. The targets are sent to that service."),
+    # ---- flow --------------------------------------------------------------------------------------------
+    "merge": ("merge", "Merge", "Flow", "any", "items", "quick",
+              "Combines the results of several steps, drops duplicates and passes each unique item on at once. "
+              "Runs no job of its own."),
 }
 
 
 # ---- distributed versions of the composite workflows --------------------------------------------------------
-# Each is a stage DAG: every outer per-host / per-URL loop of the YAML recipe becomes a fan-out, so the items
-# one stage produces are spread as separate jobs over every scanner. Stages are written as
-# st(template, from, input, args); `from` defaults to the scan's own targets.
+# Each is a graph of single tools: every per-host / per-URL loop of the YAML recipe becomes a fan-out, so the
+# items one step produces are spread as separate jobs over every scanner. Nothing is nested: a workflow shows
+# every box it runs. Parallel steps come together in a MERGE (no job; duplicates dropped), hostnames found by
+# passive discovery are verified by dnsx first, and SQL injection flagged by fuzz is confirmed by sqlmap.
+#
+# Every workflow that probes live services also ships an "-external" twin: a liveless check right after httpx
+# (or on the targets, for the ones that start from a URL), so only what answers from the public internet is
+# scanned.
 HARVEST_DEEP = "--max-pages 0 --max-time 300 --max-actions 0"
 NUCLEI_PASSES = [("exposures", "critical,high,medium,low"), ("misconfig", "critical,high,medium,low"),
                  ("cve2026", "critical,high,medium"), ("kev", "critical,high,medium"),
                  ("panel", "critical,high,medium")]
+DAST = "--opt-args=-dast"
 
 
 def st(t: str, frm=(SEED,), inp: str | None = None, args: str = "", label: str = "") -> dict:
     return {"t": t, "from": list(frm), "input": inp, "args": args, "label": label}
 
 
-def graft(sub: list[dict], parents: list[int], offset: int) -> list[dict]:
-    """Re-root a sub-DAG: its entry stages read `parents` instead of the scan targets; indexes shift."""
-    out = []
-    for s in sub:
-        frm: list[int] = []
-        for f in s["from"]:
-            frm += parents if f == SEED else [offset + f]
-        out.append({**s, "from": frm})
-    return out
+class WF:
+    """Builds a stage list; add() returns the new step's index so steps can be wired by name."""
+
+    def __init__(self):
+        self.stages: list[dict] = []
+
+    def add(self, t: str, frm=(SEED,), inp: str | None = None, args: str = "", label: str = "") -> int:
+        self.stages.append(st(t, frm, inp, args, label))
+        return len(self.stages) - 1
 
 
-def chain(base: list[dict], sub: list[dict], parents: list[int]) -> list[dict]:
-    return base + graft(sub, parents, len(base))
+S = (SEED,)
 
 
-def _web_nuclei():
-    return [st("nuclei", inp="urls", args=f'--opt-args="-tags {tag} -severity {sev}"', label=f"nuclei · {tag}")
-            for tag, sev in NUCLEI_PASSES]
+def _entry(w: WF, ext: bool) -> tuple:
+    """Where the live-probing steps of a URL-entry workflow read from: the targets, or only the reachable ones."""
+    return (w.add("liveless", S, "all", label="liveless · reachable from the internet"),) if ext else S
 
 
-def _web(mode: str):
-    s = [st("katana-crawl", inp="urls"),                          # 0
-         st("harvest", inp="urls", args=HARVEST_DEEP),            # 1
-         st("js-endpoints", [0, 1], "js-urls")]                   # 2
+def _discover(w: WF) -> int:
+    """Domains -> verified hostnames: three discovery sources in parallel, merged, resolved by dnsx."""
+    a = w.add("subfinder", S, "hosts")
+    b = w.add("wayback-domains", S, "hosts")
+    c = w.add("dns-brute", S, "hosts")
+    m = w.add("merge", [SEED, a, b, c], "hosts", label="All discovered hostnames")
+    return w.add("dnsx", [m], "hosts", label="dnsx · verify hostnames")
+
+
+def _live(w: WF, hosts: int, ext: bool) -> int:
+    """Hostnames -> live web services (URLs), optionally only the ones reachable from the internet."""
+    h = w.add("httpx", [hosts], "all")
+    return w.add("liveless", [h], "urls", label="liveless · reachable from the internet") if ext else h
+
+
+def _nuclei(w: WF, src) -> None:
+    for tag, sev in NUCLEI_PASSES:
+        w.add("nuclei", src, "urls", f'--opt-args="-tags {tag} -severity {sev}"', f"nuclei · {tag}")
+
+
+def _probe(w: WF, src, inp: str, what: str) -> int:
+    """fuzz + nuclei DAST on parameterised URLs; returns the fuzz step (its SQLi hits are leads for sqlmap)."""
+    f = w.add("fuzz", src, inp, "--timeout 120", f"Fuzz {what}")
+    w.add("nuclei", src, inp, DAST, f"nuclei DAST · {what}")
+    return f
+
+
+def _web(w: WF, src, mode: str, extra_urls=()) -> None:
+    """The deep scan of live URLs: crawl, then every parameter, request body, API and GraphQL endpoint and JS
+    file. mode: scan (fuzz + nuclei DAST, sqlmap confirms SQLi) | fuzz (fuzzer only) | sqlmap (sqlmap only)."""
+    k = w.add("katana-crawl", src, "urls")
+    hv = w.add("harvest", src, "urls", HARVEST_DEEP, "Browser crawl (SPA)")
+    crawl = w.add("merge", [k, hv], "all", label="Crawled URLs & requests")
+    js = w.add("js-endpoints", [crawl], "js-urls")
+    urls = w.add("merge", [crawl, js, *extra_urls], "all", label="All URLs")
+    specs = w.add("swagger-specs", src, "urls")
     if mode == "scan":
-        s += [st("endpoint-scan", [0, 1, 2], "param-urls"),       # 3
-              st("fuzz", [1], "writes", "--timeout 120", "Fuzz POST/PUT bodies"),  # 4
-              st("swagger-specs", inp="urls"),                    # 5
-              st("swagger-scan", [5], "urls")]                    # 6
+        fp = _probe(w, [urls], "param-urls", "parameters")
+        fw = w.add("fuzz", [crawl], "writes", "--timeout 120", "Fuzz POST/PUT bodies")
+        ep = w.add("swagger-endpoints", [specs], "urls", label="API endpoints")
+        epf = w.add("swagger-endpoints", [specs], "urls", "--fuzzable", "API endpoints (fuzzable)")
+        fa = w.add("fuzz", [epf], "urls", "--timeout 120", "Fuzz API endpoints")
+        w.add("nuclei", [ep], "urls", DAST, "nuclei DAST · API endpoints")
+        w.add("sqlmap", [fp, fw, fa], "sql-leads", label="sqlmap · confirm SQL injection")
     elif mode == "fuzz":
-        s += [st("fuzz", [0, 1, 2], "param-urls", "--timeout 120", "Fuzz parameters"),
-              st("fuzz", [1], "writes", "--timeout 120", "Fuzz POST/PUT bodies"),
-              st("swagger-specs", inp="urls"),
-              st("swagger-endpoints", [5], "urls", "--fuzzable", "OpenAPI endpoints (fuzzable)"),
-              st("fuzz", [6], "urls", "--timeout 120", "Fuzz API endpoints")]
-    else:  # sqlmap
-        s += [st("sqlmap", [0, 1, 2], "param-urls", label="sqlmap on parameters"),
-              st("sqlmap", [1], "writes", label="sqlmap on POST/PUT bodies"),
-              st("swagger-specs", inp="urls"),
-              st("swagger-endpoints", [5], "urls"),
-              st("sqlmap", [6], "urls", label="sqlmap on API endpoints")]
-    gd = len(s)
-    s += [st("graphql-detect", inp="urls"),
-          st("graphql-audit", [gd], "urls"),
-          st("scan-secrets", [0, 1], "js-urls", label="Secrets in crawled JS")]
-    return s
+        w.add("fuzz", [urls], "param-urls", "--timeout 120", "Fuzz parameters")
+        w.add("fuzz", [crawl], "writes", "--timeout 120", "Fuzz POST/PUT bodies")
+        epf = w.add("swagger-endpoints", [specs], "urls", "--fuzzable", "API endpoints (fuzzable)")
+        w.add("fuzz", [epf], "urls", "--timeout 120", "Fuzz API endpoints")
+    else:
+        w.add("sqlmap", [urls], "param-urls", label="sqlmap · parameters")
+        w.add("sqlmap", [crawl], "writes", label="sqlmap · POST/PUT bodies")
+        ep = w.add("swagger-endpoints", [specs], "urls", label="API endpoints")
+        w.add("sqlmap", [ep], "urls", label="sqlmap · API endpoints")
+    gd = w.add("graphql-detect", src, "urls")
+    w.add("graphql-audit", [gd], "urls")
+    w.add("scan-secrets", [urls], "js-urls", label="Secrets in JS files")
 
 
-def _recon():
-    return [st("subfinder", inp="hosts"), st("wayback-domains", inp="hosts"), st("dns-brute", inp="hosts"),
-            st("dnsx", [SEED, 0, 1, 2], "hosts")]
+def _wayback_lanes(w: WF, src, fuzz_only: bool = False) -> None:
+    """Archived URLs: secrets in old JS files, every parameterised URL probed."""
+    wb = w.add("wayback", src, "hosts")
+    w.add("scan-secrets", [wb], "js-urls", label="Secrets in archived JS")
+    if fuzz_only:
+        w.add("fuzz", [wb], "param-urls", "--timeout 120", "Fuzz archived parameters")
+        return
+    f = _probe(w, [wb], "param-urls", "archived parameters")
+    w.add("sqlmap", [f], "sql-leads", label="sqlmap · confirm SQL injection")
 
 
-def _secrets():
-    return [st("katana-crawl", inp="urls"), st("harvest", inp="urls", args=HARVEST_DEEP),
-            st("wayback", inp="hosts"), st("scan-secrets", [0, 1, 2], "js-urls", label="Secrets in JS files")]
+def _secrets(w: WF, src, archive_from=None) -> None:
+    """JS files from a crawl (and the web archives) -> secrets."""
+    k = w.add("katana-crawl", src, "urls")
+    hv = w.add("harvest", src, "urls", HARVEST_DEEP, "Browser crawl (SPA)")
+    ins = [k, hv]
+    if archive_from is not None:
+        ins.append(w.add("wayback", archive_from, "hosts"))
+    m = w.add("merge", ins, "all", label="Crawled + archived URLs" if archive_from is not None else "Crawled URLs")
+    w.add("scan-secrets", [m], "js-urls", label="Secrets in JS files")
 
 
-def _wayback(consumer: str):
-    return [st("wayback", inp="hosts"), st("scan-secrets", [0], "js-urls", label="Secrets in archived JS"),
-            st(consumer, [0], "param-urls", label="Scan archived parameters" if consumer == "endpoint-scan" else "Fuzz archived parameters")]
+def build(name: str, ext: bool = False) -> list[dict]:
+    w = WF()
+    if name == "web-full":
+        h = _live(w, SEED, ext)
+        _nuclei(w, [h])
+        _web(w, [h], "scan")
+    elif name in ("web-scan", "web-fuzz", "web-sqlmap"):
+        _web(w, _entry(w, ext), name.split("-")[1])
+    elif name == "web-nuclei":
+        _nuclei(w, _entry(w, ext))
+    elif name == "web-crawl":
+        src = _entry(w, ext)
+        k = w.add("katana-crawl", src, "urls")
+        hv = w.add("harvest", src, "urls", HARVEST_DEEP, "Browser crawl (SPA)")
+        w.add("merge", [k, hv], "all", label="All crawled URLs & requests")
+    elif name == "spa-scan":
+        src = _entry(w, ext)
+        hv = w.add("harvest", src, "urls", HARVEST_DEEP, "Browser crawl (SPA)")
+        fp = _probe(w, [hv], "param-urls", "parameters")
+        fw = w.add("fuzz", [hv], "writes", "--timeout 120", "Fuzz POST/PUT bodies")
+        w.add("sqlmap", [fp, fw], "sql-leads", label="sqlmap · confirm SQL injection")
+        gd = w.add("graphql-detect", src, "urls")
+        w.add("graphql-audit", [gd], "urls")
+        w.add("scan-secrets", [hv], "js-urls", label="Secrets in JS files")
+    elif name == "recon":
+        _discover(w)
+    elif name == "recon-http":
+        _live(w, _discover(w), ext)
+    elif name == "swagger-scan":
+        specs = w.add("swagger-specs", _entry(w, ext), "all")
+        ep = w.add("swagger-endpoints", [specs], "urls", label="API endpoints")
+        epf = w.add("swagger-endpoints", [specs], "urls", "--fuzzable", "API endpoints (fuzzable)")
+        fa = w.add("fuzz", [epf], "urls", "--timeout 120", "Fuzz API endpoints")
+        w.add("nuclei", [ep], "urls", DAST, "nuclei DAST · API endpoints")
+        w.add("sqlmap", [fa], "sql-leads", label="sqlmap · confirm SQL injection")
+    elif name == "swagger-fuzz":
+        specs = w.add("swagger-specs", _entry(w, ext), "all")
+        epf = w.add("swagger-endpoints", [specs], "urls", "--fuzzable", "API endpoints (fuzzable)")
+        w.add("fuzz", [epf], "urls", "--timeout 60", "Fuzz API endpoints")
+    elif name == "graphql-scan":
+        gd = w.add("graphql-detect", _entry(w, ext), "all")
+        w.add("graphql-audit", [gd], "urls")
+    elif name == "secrets-scan":
+        src = _entry(w, ext)
+        _secrets(w, src, archive_from=src)
+    elif name == "wayback-scan":
+        _wayback_lanes(w, S)
+    elif name == "wayback-fuzz":
+        _wayback_lanes(w, S, fuzz_only=True)
+    elif name == "env-nuclei":
+        _nuclei(w, [_live(w, _discover(w), ext)])
+    elif name == "env-takeover":
+        d = _discover(w)
+        w.add("nuclei", [d], "hosts", '--opt-args="-tags takeover"', "nuclei · takeover")
+    elif name == "env-secrets":
+        _secrets(w, [_live(w, _discover(w), ext)])
+    elif name == "env-wayback":
+        _wayback_lanes(w, [_discover(w)])
+    elif name == "env-wayback-secrets":
+        d = _discover(w)
+        h = _live(w, d, ext)
+        _secrets(w, [h], archive_from=[h] if ext else [d])
+    elif name == "env-scan":
+        d = _discover(w)
+        h = _live(w, d, ext)
+        # archived URLs of every subdomain - or, internet-reachable only, of the hosts that answered
+        wb = w.add("wayback", [h] if ext else [d], "hosts")
+        _nuclei(w, [h])
+        _web(w, [h], "scan", extra_urls=[wb])
+    else:
+        raise KeyError(name)
+    return w.stages
 
 
-def _subs():
-    return [st("subfinder", inp="hosts"), st("dns-brute", inp="hosts")]
-
-
-def _web_full():
-    return chain(chain([st("httpx", inp="all")], _web_nuclei(), [0]), _web("scan"), [0])
-
-
-DISTRIBUTED: dict[str, list[dict]] = {
-    "web-full": _web_full(),
-    "web-scan": _web("scan"),
-    "web-fuzz": _web("fuzz"),
-    "web-sqlmap": _web("sqlmap"),
-    "web-nuclei": _web_nuclei(),
-    "web-crawl": [st("katana-crawl", inp="urls"), st("harvest", inp="urls", args=HARVEST_DEEP)],
-    "spa-scan": [st("harvest", inp="urls", args=HARVEST_DEEP), st("endpoint-scan", [0], "param-urls"),
-                 st("fuzz", [0], "writes", "--timeout 120", "Fuzz POST/PUT bodies"), st("graphql-detect", inp="urls"),
-                 st("graphql-audit", [3], "urls"), st("scan-secrets", [0], "js-urls")],
-    "recon": _recon(),
-    "recon-http": _recon() + [st("httpx", [3], "hosts")],
-    "swagger-scan": [st("swagger-specs", inp="all"), st("swagger-scan", [0], "urls")],
-    "swagger-fuzz": [st("swagger-specs", inp="all"), st("swagger-endpoints", [0], "urls", "--fuzzable"),
-                     st("fuzz", [1], "urls", "--timeout 60")],
-    "graphql-scan": [st("graphql-detect", inp="all"), st("graphql-audit", [0], "urls")],
-    "secrets-scan": _secrets(),
-    "wayback-scan": _wayback("endpoint-scan"),
-    "wayback-fuzz": _wayback("fuzz"),
-    "env-nuclei": chain(_subs() + [st("httpx", [0, 1], "hosts")], _web_nuclei(), [2]),
-    "env-takeover": _subs() + [st("nuclei", [0, 1], "hosts", '--opt-args="-tags takeover"', "nuclei · takeover")],
-    "env-secrets": chain(_recon() + [st("httpx", [3], "hosts")], _secrets(), [4]),
-    "env-wayback": _subs() + [st("wayback", [0, 1], "hosts"), st("endpoint-scan", [2], "param-urls")],
-    "env-wayback-secrets": chain(_subs(), _secrets(), [0, 1]),
-    "env-scan": chain(chain(_recon(), _web_full(), [3]), _wayback("endpoint-scan"), [3]),
-}
 # endpoint-scan (one conditional chain on one URL) and ip-discover (a single tool) have no fan-out to spread,
 # so they run as one job per target and have no distributed version.
+DISTRIBUTED_OF = ["web-full", "web-scan", "web-fuzz", "web-sqlmap", "web-nuclei", "web-crawl", "spa-scan", "recon",
+                  "recon-http", "swagger-scan", "swagger-fuzz", "graphql-scan", "secrets-scan", "wayback-scan",
+                  "wayback-fuzz", "env-nuclei", "env-takeover", "env-secrets", "env-wayback", "env-wayback-secrets",
+                  "env-scan"]
+# the ones that probe live services get an "only what is reachable from the internet" twin
+EXTERNAL_OF = ["web-full", "web-scan", "web-fuzz", "web-sqlmap", "web-nuclei", "web-crawl", "spa-scan",
+               "recon-http", "swagger-scan", "swagger-fuzz", "graphql-scan", "secrets-scan", "env-nuclei",
+               "env-secrets", "env-wayback-secrets", "env-scan"]
+DISTRIBUTED: dict[str, list[dict]] = {wf: build(wf) for wf in DISTRIBUTED_OF}
+EXTERNAL: dict[str, list[dict]] = {wf: build(wf, ext=True) for wf in EXTERNAL_OF}
 
 
 def distributed_name(name: str) -> str:
     return f"{name}-distributed"
+
+
+def external_name(name: str) -> str:
+    return f"{name}-external"
 
 
 def _leaves_produce(stages: list[dict]) -> str:
@@ -276,17 +380,31 @@ def seed_templates(s: Session) -> None:
                     spec_json=json.dumps({"name": name, "params": []}))
         ids[name] = t.id
     wanted = set(CATALOG)
-    for wf, stages in DISTRIBUTED.items():
-        kind, title, cat, accepts, _produces, depth, desc = CATALOG[wf]
-        spec = {"stages": [{"template_id": ids[x["t"]], "from": x["from"],
+
+    def spec_of(stages):
+        return {"stages": [{"template_id": ids[x["t"]], "from": x["from"],
                             "input": x["input"] or DEFAULT_INPUT.get(CATALOG[x["t"]][3], "all"),
                             "args": x["args"], "label": x.get("label", "")} for x in stages]}
+
+    for wf, stages in DISTRIBUTED.items():
+        kind, title, cat, accepts, _produces, depth, desc = CATALOG[wf]
         name = distributed_name(wf)
         wanted.add(name)
         _upsert(s, name, kind="pipeline", title=title, category=cat, accepts=accepts,
                 produces=_leaves_produce(stages), depth=depth, builtin=True, variant_of=wf,
                 description=f"{desc} Distributed: {len(stages)} steps, each fanned out over every scanner.",
-                spec_json=json.dumps(spec))
+                spec_json=json.dumps(spec_of(stages)))
+    for wf, stages in EXTERNAL.items():
+        kind, title, cat, accepts, _produces, depth, desc = CATALOG[wf]
+        name = external_name(wf)
+        wanted.add(name)
+        _upsert(s, name, kind="pipeline", title=f"{title} — internet-reachable only", category=cat,
+                accepts=accepts, produces=_leaves_produce(stages), depth=depth, builtin=True,
+                variant_of=distributed_name(wf),
+                description=f"{desc} Only what answers from the public internet is scanned: a liveless check "
+                            f"(external probe) runs {'right after httpx' if any(x['t'] == 'httpx' for x in stages) else 'on the targets first'}. "
+                            f"{len(stages)} steps.",
+                spec_json=json.dumps(spec_of(stages)))
     # drop built-ins that no longer exist in this version (unless a scheduler still points at them)
     used = set(s.exec(select(Scheduler.template_id)).all())
     for t in s.exec(select(Template).where(Template.builtin == True)).all():  # noqa: E712

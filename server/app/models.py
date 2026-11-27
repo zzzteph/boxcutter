@@ -67,6 +67,7 @@ class Scan(SQLModel, table=True):
     vars_json: str = _text("{}")                                 # {custom: [{key, value}], debug: bool}
     plan_json: str = _text("[]")                                 # the stage plan of the current run (snapshot)
     removed_last_run: int = 0                                    # findings the last finished run no longer found
+    window_json: str = _text("")                                 # scan window (business hours), see window.py
     created_at: datetime = Field(default_factory=now)
     last_run_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -164,6 +165,7 @@ class Scheduler(SQLModel, table=True):
     vars_json: str = _text("{}")
     cron: str = Field(default="0 3 * * *", max_length=120)       # 5-field cron expression
     timezone: str = Field(default="UTC", max_length=64)          # IANA zone the cron is evaluated in
+    window_json: str = _text("")                                 # scan window (business hours), see window.py
     enabled: bool = True
     scan_id: Optional[int] = Field(default=None, index=True)
     last_run_at: Optional[datetime] = None
